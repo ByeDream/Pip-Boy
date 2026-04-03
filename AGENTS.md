@@ -27,3 +27,14 @@ This is a public GitHub repository. All generated code, comments, commit message
 - Keep dependencies in `pyproject.toml`; pin versions in `requirements.txt` for deployment
 - All configuration via environment variables or config files — never hardcoded
 - All code comments and documentation must be written in English
+
+## Profiler
+
+Pip includes a lightweight `Profiler` class (`pip_agent.profiler`) that is **disabled by default** (`PROFILER_ENABLED=false`). When implementing any new module or feature, you **must** add profiler sampling around performance-sensitive operations:
+
+- **API calls**: wrap with `profiler.start("api")` / `profiler.stop(input_tokens=..., output_tokens=...)`
+- **Tool execution**: wrap with `profiler.start("tool:<name>")` / `profiler.stop()`
+- **I/O or network**: wrap with `profiler.start("<label>")` / `profiler.stop()`
+- Call `profiler.flush()` at the end of each user-facing turn to emit collected samples
+
+The profiler is a no-op when disabled, so there is no performance overhead in production.

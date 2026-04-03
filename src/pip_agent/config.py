@@ -10,8 +10,10 @@ class Settings(BaseSettings):
 
     anthropic_api_key: str = Field(default="")
     anthropic_base_url: str = Field(default="")
-    model: str = Field(default="claude-sonnet-4-20250514")
+    model: str = Field(default="claude-sonnet-4-6")
     max_tokens: int = Field(default=8096)
+
+    profiler_enabled: bool = Field(default=False)
 
 
 settings = Settings()
