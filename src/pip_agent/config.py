@@ -15,5 +15,7 @@ class Settings(BaseSettings):
 
     profiler_enabled: bool = Field(default=False)
 
+    search_api_key: str = Field(default="")
+
 
 settings = Settings()

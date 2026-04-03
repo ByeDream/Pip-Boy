@@ -5,7 +5,7 @@ import anthropic
 
 from pip_agent.config import settings
 from pip_agent.profiler import Profiler
-from pip_agent.tools import ALL_TOOLS, execute_tool
+from pip_agent.tools import ALL_TOOLS, WORKDIR, execute_tool
 
 try:
     import readline  # noqa: F401 — enables input() history and line editing
@@ -21,8 +21,9 @@ except ImportError:
 
 SYSTEM_PROMPT = (
     f"You are Pip, a personal assistant agent. "
-    f"You work at {os.getcwd()}. "
-    f"Use bash to solve tasks. Act, don't explain."
+    f"Your working directory is {WORKDIR}. "
+    f"You have tools: bash, read, write, edit, glob, web_search, web_fetch. "
+    f"Use tools to solve tasks. Act, don't explain."
 )
 
 
