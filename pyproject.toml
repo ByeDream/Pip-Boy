@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "pip-agent"
@@ -9,6 +9,10 @@ description = "Personal assistant agent with persistent memory and configurable 
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.49,<1",
+    "pydantic-settings>=2.8,<3",
+]
 
 [project.urls]
 Repository = "https://github.com/ByeDream/Pip"
