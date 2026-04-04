@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     verbose: bool = Field(default=True)
 
     search_api_key: str = Field(default="")
+    subagent_max_rounds: int = Field(default=15)
 
     def check_required(self) -> None:
         errors: list[str] = []

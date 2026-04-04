@@ -168,6 +168,27 @@ WEB_FETCH_SCHEMA = {
     },
 }
 
+TASK_SCHEMA = {
+    "name": "task",
+    "description": (
+        "Delegate a task to a sub-agent that runs in an isolated context. "
+        "The sub-agent starts with a fresh conversation, performs the task "
+        "using tools, and returns only a concise summary. Use this for "
+        "research, exploration, or any multi-step work whose intermediate "
+        "details don't need to persist in your conversation."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "prompt": {
+                "type": "string",
+                "description": "A detailed description of the task for the sub-agent.",
+            },
+        },
+        "required": ["prompt"],
+    },
+}
+
 TODO_WRITE_SCHEMA = {
     "name": "todo_write",
     "description": (
@@ -381,6 +402,7 @@ ALL_TOOLS = [
     GLOB_SCHEMA,
     WEB_SEARCH_SCHEMA,
     WEB_FETCH_SCHEMA,
+    TASK_SCHEMA,
     TODO_WRITE_SCHEMA,
 ]
 

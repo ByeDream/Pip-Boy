@@ -6,6 +6,7 @@ import anthropic
 from pip_agent.config import settings
 from pip_agent.profiler import Profiler
 from pip_agent.todo import TodoManager
+from pip_agent.subagent import run_subagent
 from pip_agent.tools import ALL_TOOLS, WORKDIR, execute_tool
 
 try:
@@ -37,6 +38,7 @@ _TOOL_KEY_PARAM: dict[str, str] = {
     "glob": "pattern",
     "web_search": "query",
     "web_fetch": "url",
+    "task": "prompt",
 }
 
 
@@ -102,6 +104,14 @@ def agent_loop(
                         if settings.verbose:
                             print(result)
                         used_todo = True
+                    elif block.name == "task":
+                        profiler.start("tool:task")
+                        result = run_subagent(
+                            client,
+                            block.input["prompt"],
+                            profiler,
+                        )
+                        profiler.stop()
                     else:
                         profiler.start(f"tool:{block.name}")
                         result = execute_tool(block.name, block.input)
