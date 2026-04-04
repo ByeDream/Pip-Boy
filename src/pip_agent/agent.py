@@ -214,8 +214,6 @@ def run() -> None:
     tools: list[dict] = list(ALL_TOOLS)
     tools.append(COMPACT_SCHEMA)
     system_prompt = SYSTEM_PROMPT
-    if plan_manager.has_tasks():
-        system_prompt += "\n\nCurrent task graph:\n" + plan_manager.render()
     if skill_registry.available:
         tools.append(skill_registry.tool_schema())
         system_prompt += "\n\n" + skill_registry.catalog_prompt()

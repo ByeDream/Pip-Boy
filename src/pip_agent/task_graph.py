@@ -20,6 +20,7 @@ class Task:
     title: str
     status: TaskStatus = "pending"
     blocked_by: list[str] = field(default_factory=list)
+    owner: str = ""
     created_at: str = ""
     updated_at: str = ""
 
@@ -29,6 +30,7 @@ class Task:
             "title": self.title,
             "status": self.status,
             "blocked_by": self.blocked_by,
+            "owner": self.owner,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -40,6 +42,7 @@ class Task:
             title=data["title"],
             status=data.get("status", "pending"),
             blocked_by=data.get("blocked_by", []),
+            owner=data.get("owner", ""),
             created_at=data.get("created_at", ""),
             updated_at=data.get("updated_at", ""),
         )
@@ -75,6 +78,12 @@ class StoryMeta:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _items_json(items: list[Task] | list[StoryMeta]) -> str:
+    return json.dumps(
+        [i.to_dict() for i in items], indent=2, ensure_ascii=False,
+    )
 
 
 def _validate_id(node_id: str) -> None:
@@ -216,7 +225,7 @@ class _NodeGraph:
 
     def update(
         self, items: list[dict], *, story_blocked: bool = False,
-    ) -> None:
+    ) -> list[Task]:
         if not items:
             raise ValueError("No tasks provided")
 
@@ -238,6 +247,15 @@ class _NodeGraph:
 
             if "blocked_by" in entry:
                 task.blocked_by = entry["blocked_by"]
+            elif "add_blocked_by" in entry or "remove_blocked_by" in entry:
+                to_add = set(entry.get("add_blocked_by", []))
+                to_remove = set(entry.get("remove_blocked_by", []))
+                task.blocked_by = list(
+                    (set(task.blocked_by) | to_add) - to_remove
+                )
+
+            if "owner" in entry:
+                task.owner = entry["owner"]
 
             if "status" in entry:
                 new_status: TaskStatus = entry["status"]
@@ -250,19 +268,22 @@ class _NodeGraph:
                         raise ValueError(
                             f"Task '{tid}': parent story is blocked"
                         )
-                    statuses = {t.id: t.status for t in all_tasks.values()}
-                    if _is_blocked_by_status(task.blocked_by, statuses):
-                        blockers = [
-                            d for d in task.blocked_by
-                            if statuses.get(d, "completed") != "completed"
-                        ]
+                    if task.blocked_by:
                         raise ValueError(
                             f"Task '{tid}' is blocked by: "
-                            f"{', '.join(blockers)}"
+                            f"{', '.join(task.blocked_by)}"
                         )
                 task.status = new_status
 
-            modified.append(task)
+                if new_status == "completed":
+                    for sibling in all_tasks.values():
+                        if tid in sibling.blocked_by:
+                            sibling.blocked_by.remove(tid)
+                            if sibling not in modified:
+                                modified.append(sibling)
+
+            if task not in modified:
+                modified.append(task)
 
         all_ids = set(all_tasks.keys())
         _check_refs(
@@ -274,6 +295,9 @@ class _NodeGraph:
 
         for task in modified:
             self.save(task)
+
+        requested_ids = {e.get("id", "") for e in items}
+        return [t for t in modified if t.id in requested_ids]
 
     def remove(self, task_ids: list[str]) -> None:
         if not task_ids:
@@ -308,13 +332,12 @@ class _NodeGraph:
         wip: list[Task] = []
         done: list[Task] = []
 
-        statuses = {t.id: t.status for t in all_tasks.values()}
         for t in all_tasks.values():
             if t.status == "completed":
                 done.append(t)
             elif t.status == "in_progress":
                 wip.append(t)
-            elif _is_blocked_by_status(t.blocked_by, statuses):
+            elif t.blocked_by:
                 blocked_list.append(t)
             else:
                 ready.append(t)
@@ -324,7 +347,8 @@ class _NodeGraph:
         if wip:
             lines.append("  IN PROGRESS:")
             for t in wip:
-                lines.append(f"    [>] {t.title}  (id: {t.id})")
+                owner_tag = f", owner: {t.owner}" if t.owner else ""
+                lines.append(f"    [>] {t.title}  (id: {t.id}{owner_tag})")
         if ready:
             lines.append("  READY:")
             for t in ready:
@@ -332,12 +356,8 @@ class _NodeGraph:
         if blocked_list:
             lines.append("  BLOCKED:")
             for t in blocked_list:
-                waiting = [
-                    d for d in t.blocked_by
-                    if statuses.get(d, "completed") != "completed"
-                ]
                 lines.append(
-                    f"    [x] {t.title}  (id: {t.id}, waiting: {', '.join(waiting)})"
+                    f"    [x] {t.title}  (id: {t.id}, waiting: {', '.join(t.blocked_by)})"
                 )
         if done:
             lines.append("  COMPLETED:")
@@ -501,15 +521,18 @@ class PlanManager:
 
         names = ", ".join(f"'{m.id}'" for m in new_metas)
         notice = f"<notice>Story {names} created.</notice>\n"
-        return notice + self.render()
+        return notice + _items_json(new_metas)
 
     def _create_tasks(self, story_id: str, items: list[dict]) -> str:
         if not self._story_exists(story_id):
             raise ValueError(f"Story '{story_id}' not found")
         ng = self._task_graph(story_id)
         ng.create(items)
+        created_ids = {e["id"] for e in items}
+        all_tasks = ng.load_all()
+        created = [all_tasks[tid] for tid in created_ids if tid in all_tasks]
         notice = f"<notice>Tasks added to story '{story_id}'.</notice>\n"
-        return notice + self.render(story_id)
+        return notice + _items_json(created)
 
     def update(self, story: str | None, items: list[dict]) -> str:
         if not items:
@@ -543,6 +566,12 @@ class PlanManager:
 
             if "blocked_by" in entry:
                 meta.blocked_by = entry["blocked_by"]
+            elif "add_blocked_by" in entry or "remove_blocked_by" in entry:
+                to_add = set(entry.get("add_blocked_by", []))
+                to_remove = set(entry.get("remove_blocked_by", []))
+                meta.blocked_by = list(
+                    (set(meta.blocked_by) | to_add) - to_remove
+                )
 
             modified.append(meta)
 
@@ -557,7 +586,7 @@ class PlanManager:
         for meta in modified:
             self._save_meta(meta)
 
-        return self.render()
+        return _items_json(modified)
 
     def _update_tasks(self, story_id: str, items: list[dict]) -> str:
         if not self._story_exists(story_id):
@@ -565,9 +594,8 @@ class PlanManager:
 
         blocked = self._is_story_blocked(story_id)
         ng = self._task_graph(story_id)
-        ng.update(items, story_blocked=blocked)
+        updated = ng.update(items, story_blocked=blocked)
 
-        result = self.render(story_id) if self._story_exists(story_id) else ""
         pruned = self._prune_completed_stories()
 
         notices: list[str] = []
@@ -575,7 +603,7 @@ class PlanManager:
             notices.append(f"<notice>Story '{sid}' completed and removed.</notice>")
         if notices:
             return "\n".join(notices) + "\n" + self.render()
-        return result
+        return _items_json(updated)
 
     def remove(self, story: str | None, ids: list[str]) -> str:
         if not ids:
@@ -605,14 +633,14 @@ class PlanManager:
         for sid in story_ids:
             shutil.rmtree(self._story_dir(sid))
 
-        return self.render()
+        return f"Removed: {', '.join(story_ids)}"
 
     def _remove_tasks(self, story_id: str, task_ids: list[str]) -> str:
         if not self._story_exists(story_id):
             raise ValueError(f"Story '{story_id}' not found")
         ng = self._task_graph(story_id)
         ng.remove(task_ids)
-        return self.render(story_id)
+        return f"Removed from '{story_id}': {', '.join(task_ids)}"
 
     # ------------------------------------------------------------------
     # Queries
@@ -705,12 +733,8 @@ class PlanManager:
                 continue
             ng = self._task_graph(sid)
             tasks = ng.load_all()
-            statuses = {t.id: t.status for t in tasks.values()}
             for t in tasks.values():
-                if (
-                    t.status == "pending"
-                    and not _is_blocked_by_status(t.blocked_by, statuses)
-                ):
+                if t.status == "pending" and not t.blocked_by:
                     kanban_ready.append((sid, t))
 
         if kanban_ready:

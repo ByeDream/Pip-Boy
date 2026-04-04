@@ -67,6 +67,93 @@ class TestNodeGraphUpdate:
         with pytest.raises(ValueError, match="parent story is blocked"):
             ng.update([{"id": "a", "status": "in_progress"}], story_blocked=True)
 
+    def test_owner_field(self, tmp_path):
+        ng = _NodeGraph(tmp_path)
+        ng.create([{"id": "a", "title": "A"}])
+        ng.update([{"id": "a", "owner": "agent-1", "status": "in_progress"}])
+        task = ng.load_all()["a"]
+        assert task.owner == "agent-1"
+        assert task.status == "in_progress"
+
+    def test_owner_persists_on_disk(self, tmp_path):
+        ng = _NodeGraph(tmp_path)
+        ng.create([{"id": "a", "title": "A"}])
+        ng.update([{"id": "a", "owner": "bot"}])
+        ng2 = _NodeGraph(tmp_path)
+        assert ng2.load_all()["a"].owner == "bot"
+
+    def test_write_time_normalization(self, tmp_path):
+        ng = _NodeGraph(tmp_path)
+        ng.create([
+            {"id": "a", "title": "A"},
+            {"id": "b", "title": "B", "blocked_by": ["a"]},
+            {"id": "c", "title": "C", "blocked_by": ["a"]},
+        ])
+        ng.update([{"id": "a", "status": "in_progress"}])
+        ng.update([{"id": "a", "status": "completed"}])
+        tasks = ng.load_all()
+        assert tasks["b"].blocked_by == []
+        assert tasks["c"].blocked_by == []
+
+    def test_write_time_norm_persisted(self, tmp_path):
+        ng = _NodeGraph(tmp_path)
+        ng.create([
+            {"id": "a", "title": "A"},
+            {"id": "b", "title": "B", "blocked_by": ["a"]},
+        ])
+        ng.update([{"id": "a", "status": "in_progress"}])
+        ng.update([{"id": "a", "status": "completed"}])
+        ng2 = _NodeGraph(tmp_path)
+        assert ng2.load_all()["b"].blocked_by == []
+
+    def test_write_time_norm_unblocks_start(self, tmp_path):
+        ng = _NodeGraph(tmp_path)
+        ng.create([
+            {"id": "a", "title": "A"},
+            {"id": "b", "title": "B", "blocked_by": ["a"]},
+        ])
+        ng.update([{"id": "a", "status": "in_progress"}])
+        ng.update([{"id": "a", "status": "completed"}])
+        ng.update([{"id": "b", "status": "in_progress"}])
+        assert ng.load_all()["b"].status == "in_progress"
+
+    def test_add_blocked_by(self, tmp_path):
+        ng = _NodeGraph(tmp_path)
+        ng.create([
+            {"id": "a", "title": "A"},
+            {"id": "b", "title": "B"},
+            {"id": "c", "title": "C"},
+        ])
+        ng.update([{"id": "c", "add_blocked_by": ["a", "b"]}])
+        assert set(ng.load_all()["c"].blocked_by) == {"a", "b"}
+
+    def test_remove_blocked_by(self, tmp_path):
+        ng = _NodeGraph(tmp_path)
+        ng.create([
+            {"id": "a", "title": "A"},
+            {"id": "b", "title": "B"},
+            {"id": "c", "title": "C", "blocked_by": ["a", "b"]},
+        ])
+        ng.update([{"id": "c", "remove_blocked_by": ["a"]}])
+        assert ng.load_all()["c"].blocked_by == ["b"]
+
+    def test_blocked_by_full_replace_wins(self, tmp_path):
+        ng = _NodeGraph(tmp_path)
+        ng.create([
+            {"id": "a", "title": "A"},
+            {"id": "b", "title": "B"},
+            {"id": "c", "title": "C", "blocked_by": ["a"]},
+        ])
+        ng.update([{"id": "c", "blocked_by": ["b"], "add_blocked_by": ["a"]}])
+        assert ng.load_all()["c"].blocked_by == ["b"]
+
+    def test_update_returns_affected_tasks(self, tmp_path):
+        ng = _NodeGraph(tmp_path)
+        ng.create([{"id": "a", "title": "A"}, {"id": "b", "title": "B"}])
+        result = ng.update([{"id": "a", "status": "in_progress"}])
+        assert len(result) == 1
+        assert result[0].id == "a"
+
 
 class TestNodeGraphRemove:
     def test_remove_leaf(self, tmp_path):
@@ -414,6 +501,100 @@ class TestRender:
 # ======================================================================
 # Persistence
 # ======================================================================
+
+class TestStoryIncrementalDeps:
+    def test_add_blocked_by_story(self, tmp_path):
+        pm = PlanManager(tmp_path)
+        pm.create(None, [
+            {"id": "s1", "title": "S1"},
+            {"id": "s2", "title": "S2"},
+        ])
+        pm.update(None, [{"id": "s2", "add_blocked_by": ["s1"]}])
+        assert pm._load_meta("s2").blocked_by == ["s1"]
+
+    def test_remove_blocked_by_story(self, tmp_path):
+        pm = PlanManager(tmp_path)
+        pm.create(None, [
+            {"id": "s1", "title": "S1"},
+            {"id": "s2", "title": "S2", "blocked_by": ["s1"]},
+        ])
+        pm.update(None, [{"id": "s2", "remove_blocked_by": ["s1"]}])
+        assert pm._load_meta("s2").blocked_by == []
+
+
+class TestLeanReturns:
+    def test_create_story_returns_json(self, tmp_path):
+        pm = PlanManager(tmp_path)
+        result = pm.create(None, [{"id": "s1", "title": "S1"}])
+        assert "<notice>" in result
+        data = json.loads(result.split("\n", 1)[1])
+        assert data[0]["id"] == "s1"
+
+    def test_create_task_returns_json(self, tmp_path):
+        pm = PlanManager(tmp_path)
+        pm.create(None, [{"id": "s1", "title": "S1"}])
+        result = pm.create("s1", [{"id": "t1", "title": "T1"}])
+        assert "<notice>" in result
+        data = json.loads(result.split("\n", 1)[1])
+        assert data[0]["id"] == "t1"
+        assert data[0]["status"] == "pending"
+
+    def test_update_task_returns_json(self, tmp_path):
+        pm = PlanManager(tmp_path)
+        pm.create(None, [{"id": "s1", "title": "S1"}])
+        pm.create("s1", [{"id": "t1", "title": "T1"}])
+        result = pm.update("s1", [{"id": "t1", "status": "in_progress"}])
+        data = json.loads(result)
+        assert data[0]["id"] == "t1"
+        assert data[0]["status"] == "in_progress"
+
+    def test_update_story_returns_json(self, tmp_path):
+        pm = PlanManager(tmp_path)
+        pm.create(None, [{"id": "s1", "title": "Old"}])
+        result = pm.update(None, [{"id": "s1", "title": "New"}])
+        data = json.loads(result)
+        assert data[0]["title"] == "New"
+
+    def test_remove_story_returns_confirmation(self, tmp_path):
+        pm = PlanManager(tmp_path)
+        pm.create(None, [{"id": "s1", "title": "S1"}])
+        result = pm.remove(None, ["s1"])
+        assert "Removed" in result
+        assert "s1" in result
+
+    def test_remove_task_returns_confirmation(self, tmp_path):
+        pm = PlanManager(tmp_path)
+        pm.create(None, [{"id": "s1", "title": "S1"}])
+        pm.create("s1", [{"id": "t1", "title": "T1"}])
+        result = pm.remove("s1", ["t1"])
+        assert "Removed" in result
+        assert "t1" in result
+
+    def test_task_list_still_renders(self, tmp_path):
+        pm = PlanManager(tmp_path)
+        pm.create(None, [{"id": "s1", "title": "S1"}])
+        pm.create("s1", [{"id": "t1", "title": "T1"}])
+        result = pm.render()
+        assert "KANBAN" in result or "STORIES" in result
+
+
+class TestOwnerInRender:
+    def test_owner_shown_in_progress(self, tmp_path):
+        pm = PlanManager(tmp_path)
+        pm.create(None, [{"id": "s1", "title": "S1"}])
+        pm.create("s1", [{"id": "t1", "title": "T1"}])
+        pm.update("s1", [{"id": "t1", "status": "in_progress", "owner": "bot-1"}])
+        text = pm.render("s1")
+        assert "owner: bot-1" in text
+
+    def test_no_owner_tag_when_empty(self, tmp_path):
+        pm = PlanManager(tmp_path)
+        pm.create(None, [{"id": "s1", "title": "S1"}])
+        pm.create("s1", [{"id": "t1", "title": "T1"}])
+        pm.update("s1", [{"id": "t1", "status": "in_progress"}])
+        text = pm.render("s1")
+        assert "owner:" not in text
+
 
 class TestNotices:
     def test_story_create_notice(self, tmp_path):

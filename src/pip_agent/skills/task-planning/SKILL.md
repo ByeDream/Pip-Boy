@@ -21,6 +21,10 @@ when completed.
 - **blocked_by** = dependency list. Stories can block other stories;
   tasks can block other tasks *within the same story*.
   Cross-story task dependencies are not allowed.
+  When a task completes, its ID is automatically removed from
+  siblings' blocked_by lists (write-time normalization).
+- **owner** = optional string on tasks. Use it to claim a task
+  (e.g. set owner to an agent ID before starting work).
 - **Story status** is automatic:
   - Any task in_progress -> story is in_progress
   - All tasks completed  -> story is completed -> **directory deleted**
@@ -48,20 +52,29 @@ task_create(story="setup-infra", tasks=[
 
 ### task_update
 
-Update stories (title/blocked_by only) or tasks (status/title/blocked_by).
+Update stories (title/blocked_by only) or tasks (status/title/blocked_by/owner).
 
 ```
-# Update a story's dependencies:
+# Update a story's dependencies (full replace):
 task_update(tasks=[{"id": "build-api", "blocked_by": ["setup-infra"]}])
 
-# Start working on a task:
-task_update(story="setup-infra", tasks=[{"id": "configure-db", "status": "in_progress"}])
+# Incremental dependency changes:
+task_update(tasks=[{"id": "build-api", "add_blocked_by": ["setup-infra"]}])
+task_update(tasks=[{"id": "build-api", "remove_blocked_by": ["old-dep"]}])
+
+# Claim and start a task:
+task_update(story="setup-infra", tasks=[
+  {"id": "configure-db", "status": "in_progress", "owner": "agent-1"}
+])
 
 # Complete a task:
 task_update(story="setup-infra", tasks=[{"id": "configure-db", "status": "completed"}])
 ```
 
 Story status cannot be set manually -- it is derived from task statuses.
+
+Create/update tools return JSON of the affected items only.
+Use `task_list` to see the full graph.
 
 ### task_list
 
@@ -103,3 +116,4 @@ task_remove(story="setup-infra", task_ids=["setup-ci"])
 - blocked_by references must exist at the same level (story-to-story or task-to-task within one story).
 - No cycles allowed in either story or task dependency graphs.
 - Do NOT set story status manually -- it is always derived.
+- `blocked_by` (full replace) takes precedence over `add_blocked_by`/`remove_blocked_by`.

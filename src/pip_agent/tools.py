@@ -268,7 +268,21 @@ TASK_UPDATE_SCHEMA = {
                         "blocked_by": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "New list of blocking IDs.",
+                            "description": "Replace entire blocking IDs list.",
+                        },
+                        "add_blocked_by": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "IDs to add to blocking list (ignored if blocked_by is set).",
+                        },
+                        "remove_blocked_by": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "IDs to remove from blocking list (ignored if blocked_by is set).",
+                        },
+                        "owner": {
+                            "type": "string",
+                            "description": "Owner/agent claiming this task.",
                         },
                     },
                     "required": ["id"],
