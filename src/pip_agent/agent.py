@@ -22,10 +22,32 @@ except ImportError:
 SYSTEM_PROMPT = (
     f"You are Pip, a personal assistant agent. "
     f"Your working directory is {WORKDIR}. "
-    f"Use tools to solve tasks. Act, don't explain."
+    f"Use the todo_write tool to plan multi-step tasks. "
+    f"Mark in_progress before starting, completed when done. "
+    f"Prefer tools over prose."
 )
 
 NAG_THRESHOLD = 3
+
+_TOOL_KEY_PARAM: dict[str, str] = {
+    "bash": "command",
+    "read": "file_path",
+    "write": "file_path",
+    "edit": "file_path",
+    "glob": "pattern",
+    "web_search": "query",
+    "web_fetch": "url",
+}
+
+
+def _tool_summary(name: str, inputs: dict) -> str:
+    key = _TOOL_KEY_PARAM.get(name)
+    if key and key in inputs:
+        value = str(inputs[key])
+        if len(value) > 80:
+            value = value[:77] + "..."
+        return f"{name}: {value}"
+    return name
 
 
 def agent_loop(
@@ -61,7 +83,13 @@ def agent_loop(
             tool_results = []
             used_todo = False
             for block in assistant_content:
+                if settings.verbose and hasattr(block, "text"):
+                    print()
+                    print(block.text)
                 if block.type == "tool_use":
+                    if settings.verbose:
+                        print()
+                        print(f"> {_tool_summary(block.name, block.input)}")
                     if block.name == "todo_write":
                         profiler.start("tool:todo_write")
                         try:
@@ -71,6 +99,8 @@ def agent_loop(
                         except ValueError as e:
                             result = f"[error] {e}"
                         profiler.stop()
+                        if settings.verbose:
+                            print(result)
                         used_todo = True
                     else:
                         profiler.start(f"tool:{block.name}")
@@ -84,7 +114,7 @@ def agent_loop(
                         }
                     )
             rounds_since_todo = 0 if used_todo else rounds_since_todo + 1
-            if rounds_since_todo >= NAG_THRESHOLD:
+            if todo_manager.has_items() and rounds_since_todo >= NAG_THRESHOLD:
                 tool_results.append(
                     {"type": "text", "text": "<reminder>Update your todos.</reminder>"}
                 )
@@ -131,12 +161,8 @@ def run() -> None:
         if last["role"] == "assistant":
             for block in last["content"]:
                 if hasattr(block, "text"):
+                    print()
+                    print("================================================")
                     print(block.text)
 
-        if todo_manager.has_items():
-            print("\n--- Todo ---")
-            print(todo_manager.render())
-            print("------------")
-
         profiler.flush()
-        print()

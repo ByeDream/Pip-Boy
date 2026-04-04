@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     max_tokens: int = Field(default=8096)
 
     profiler_enabled: bool = Field(default=False)
+    verbose: bool = Field(default=True)
 
     search_api_key: str = Field(default="")
 
