@@ -21,7 +21,11 @@ Intelligence is trained, not coded. Do not attempt to create intelligent behavio
 - **Hands**: provide tools that execute the model's decisions faithfully.
 - **Then step aside**: no nudging, no coaching, no "smart" scaffolding.
 
-If you find yourself writing code that tells the model what it *should* do next, stop. That is the model's job.
+The practical test for every line of code: **constrain, surface, never coach.**
+
+- **Constrain** — validation that protects data integrity (cycle detection, reference checks) is correct. The model is probabilistic; hard constraints prevent irreversible errors.
+- **Surface** — return factual data and error details ("cycle detected: A -> B"). Give the model what it needs to reason, not what you think it should conclude.
+- **Never coach** — do not inject reminders, suggestions, or next-step hints. If the model forgets something, the answer is better eyes, not a nudge.
 
 ## Tech Stack
 
