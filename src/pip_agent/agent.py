@@ -270,6 +270,18 @@ def agent_loop(
                         client, messages, system_prompt, transcripts_dir, profiler
                     )
         else:
+            if team_manager is not None:
+                inbox = team_manager.read_inbox()
+                if inbox:
+                    messages.append({"role": "user", "content": [
+                        {"type": "text", "text": (
+                            f'<team-message from="{msg["from"]}"'
+                            f' msg_type="{msg.get("type", "message")}">'
+                            f'\n{msg["content"]}\n</team-message>'
+                        )}
+                        for msg in inbox
+                    ]})
+                    continue
             break
 
 

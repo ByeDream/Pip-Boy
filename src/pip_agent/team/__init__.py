@@ -144,6 +144,7 @@ class Bus:
             "ts": time.time(),
         })
         with self._lock:
+            self._dir.mkdir(parents=True, exist_ok=True)
             with open(
                 self._dir / f"{to_name}.jsonl", "a", encoding="utf-8",
             ) as f:
