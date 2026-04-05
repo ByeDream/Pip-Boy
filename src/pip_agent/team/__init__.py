@@ -487,9 +487,10 @@ class TeamManager:
                 self._bus.send(self.LEAD, name, content, "broadcast")
                 count += 1
             return f"Broadcast to {count} teammates."
+        result = self._bus.send(self.LEAD, to, content, msg_type)
         if to not in self._active:
-            return f"[error] '{to}' is not working. Use team_spawn first."
-        return self._bus.send(self.LEAD, to, content, msg_type)
+            return f"{result} (offline — will be read on next activation)"
+        return result
 
     def read_inbox(self) -> list[dict]:
         return self._bus.read_inbox(self.LEAD)
