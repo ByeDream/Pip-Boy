@@ -1,5 +1,9 @@
 # Pip-Boy
 
+<p align="center">
+  <img src="docs/Imgs/Pip-BoyAdArtPrint.jpg" width="480" alt="Pip-Boy 3000 Mark IV" />
+</p>
+
 A personal assistant agent with persistent memory and a configurable persona, providing a chat-based interface for workstation interaction.
 
 ## Features
