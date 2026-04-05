@@ -2,7 +2,7 @@
 
 ## Project
 
-Pip is a personal assistant agent with persistent memory and a configurable persona, providing a chat-based interface for workstation interaction.
+Pip-Boy is a personal assistant agent with persistent memory and a configurable persona, providing a chat-based interface for workstation interaction.
 
 ## Public Repository Policy
 

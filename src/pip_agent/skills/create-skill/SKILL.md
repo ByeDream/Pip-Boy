@@ -1,13 +1,13 @@
 ---
 name: create-skill
 description: >-
-  Guide users through creating new Pip skills. Use when the user wants to
+  Guide users through creating new Pip-Boy skills. Use when the user wants to
   create, write, or author a new skill, or asks about skill format or
   best practices.
 tags: [skill, authoring]
 ---
 
-# Creating Skills for Pip
+# Creating Skills for Pip-Boy
 
 Help the user create a well-structured skill. Follow the workflow below.
 

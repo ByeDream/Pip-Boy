@@ -1,4 +1,4 @@
-# Pip Agent -- Backlog
+# Pip-Boy Agent -- Backlog
 
 ## Skills
 

@@ -8,7 +8,7 @@ tags: [planning, tasks, stories]
 
 # Task Planning System
 
-Pip uses a two-level **Story / Task** system to track goals on disk.
+Pip-Boy uses a two-level **Story / Task** system to track goals on disk.
 Stories and tasks survive across sessions and are automatically cleaned up
 when completed.
 

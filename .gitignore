@@ -38,7 +38,7 @@ htmlcov/
 .coverage
 .coverage.*
 
-# Pip runtime data
+# Pip-Boy runtime data
 .tasks/
 .transcripts/
 

@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/ByeDream/Pip"
+Repository = "https://github.com/ByeDream/Pip-Boy"
 
 [tool.setuptools.packages.find]
 where = ["src"]

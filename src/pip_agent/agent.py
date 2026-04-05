@@ -43,7 +43,7 @@ except ImportError:
     pass
 
 SYSTEM_PROMPT = (
-    f"You are Pip, a personal assistant agent. "
+    f"You are Pip-Boy, a personal assistant agent. "
     f"Your working directory is {WORKDIR}. "
     f"Use task tools to plan goals. "
     f"Load the 'task-planning' skill for guidance. "
@@ -261,7 +261,7 @@ def run() -> None:
         tools.append(skill_registry.tool_schema())
         system_prompt += "\n\n" + skill_registry.catalog_prompt()
 
-    print("Pip Agent (type 'exit' to quit)")
+    print("Pip-Boy Agent (type 'exit' to quit)")
 
     while True:
         try:
