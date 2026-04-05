@@ -239,7 +239,7 @@ def auto_compact(
     )
 
     messages.clear()
-    messages.append({"role": "user", "content": f"[Conversation context]\n{summary}"})
+    messages.append({"role": "user", "content": f"<context>\n{summary}\n</context>"})
 
     if settings.verbose:
         print(

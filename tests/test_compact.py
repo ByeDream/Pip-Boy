@@ -289,4 +289,4 @@ class TestAutoCompact:
             auto_compact(client, msgs, "system", tmp_path)
 
         assert len(msgs) == 1
-        assert "[Conversation context]" in msgs[0]["content"]
+        assert "<context>" in msgs[0]["content"]

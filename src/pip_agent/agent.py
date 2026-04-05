@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import os
 import sys
+import time
+import uuid
 from pathlib import Path
 
 import anthropic
 
+from pip_agent.background import BackgroundTaskManager
 from pip_agent.compact import (
     COMPACT_SCHEMA,
     auto_compact,
@@ -17,7 +20,13 @@ from pip_agent.profiler import Profiler
 from pip_agent.skills import SkillRegistry
 from pip_agent.task_graph import PlanManager
 from pip_agent.subagent import run_subagent
-from pip_agent.tools import ALL_TOOLS, TASK_TOOL_NAMES, WORKDIR, execute_tool
+from pip_agent.tools import (
+    ALL_TOOLS,
+    TASK_TOOL_NAMES,
+    WORKDIR,
+    execute_tool,
+    run_bash,
+)
 
 BUILTIN_SKILLS_DIR = Path(__file__).resolve().parent / "skills"
 USER_SKILLS_DIR = WORKDIR / ".pip" / "skills"
@@ -56,6 +65,7 @@ _TOOL_KEY_PARAM: dict[str, str] = {
     "task_create": "tasks",
     "task_update": "tasks",
     "task_remove": "task_ids",
+    "check_background": "task_id",
 }
 
 
@@ -93,6 +103,7 @@ def agent_loop(
     system_prompt: str,
     skill_registry: SkillRegistry | None = None,
     transcripts_dir: Path | None = None,
+    bg_manager: BackgroundTaskManager | None = None,
 ) -> None:
     messages.append({"role": "user", "content": user_input})
     rounds_since_todo = 0
@@ -100,6 +111,23 @@ def agent_loop(
 
     while True:
         micro_compact(messages)
+
+        if bg_manager is not None:
+            notifications = bg_manager.drain()
+            if notifications:
+                last_msg = messages[-1]
+                if last_msg["role"] == "user" and isinstance(last_msg["content"], list):
+                    for n in notifications:
+                        last_msg["content"].append({
+                            "type": "text",
+                            "text": (
+                                f'<background-result task_id="{n.task_id}"'
+                                f' status="{n.status}"'
+                                f' elapsed_ms="{n.elapsed_ms:.0f}">'
+                                f"\n{n.result}\n</background-result>"
+                            ),
+                        })
+                        profiler.record(f"bg:bash", n.elapsed_ms)
 
         if transcripts_dir is not None and estimate_tokens(messages) > settings.compact_threshold:
             auto_compact(client, messages, system_prompt, transcripts_dir, profiler)
@@ -163,6 +191,20 @@ def agent_loop(
                             skill_registry=skill_registry,
                         )
                         profiler.stop()
+                    elif (
+                        block.name == "bash"
+                        and block.input.get("background")
+                        and bg_manager is not None
+                    ):
+                        task_id = uuid.uuid4().hex[:8]
+                        bg_manager.spawn(
+                            task_id, block.input["command"], run_bash, block.input
+                        )
+                        result = f"[background:{task_id}] started"
+                    elif block.name == "check_background" and bg_manager is not None:
+                        profiler.start("tool:check_background")
+                        result = bg_manager.check(block.input.get("task_id"))
+                        profiler.stop()
                     else:
                         profiler.start(f"tool:{block.name}")
                         result = execute_tool(block.name, block.input)
@@ -206,6 +248,7 @@ def run() -> None:
     client = anthropic.Anthropic(**client_kwargs)
     messages: list[dict] = []
     profiler = Profiler()
+    bg_manager = BackgroundTaskManager()
     plan_manager = PlanManager(WORKDIR / settings.tasks_dir)
     skill_registry = SkillRegistry(BUILTIN_SKILLS_DIR, USER_SKILLS_DIR)
 
@@ -242,6 +285,7 @@ def run() -> None:
             system_prompt=system_prompt,
             skill_registry=skill_registry,
             transcripts_dir=transcripts_dir,
+            bg_manager=bg_manager,
         )
 
         last = messages[-1]
@@ -251,5 +295,34 @@ def run() -> None:
                     print()
                     print("================================================")
                     print(block.text)
+
+        while bg_manager.has_pending():
+            if settings.verbose:
+                print("  (waiting for background tasks...)")
+            time.sleep(1)
+            notifications = bg_manager.drain()
+            if notifications:
+                for n in notifications:
+                    profiler.record("bg:bash", n.elapsed_ms)
+                    if settings.verbose:
+                        print(
+                            f"  [bg:{n.task_id} {n.status}"
+                            f" ({n.elapsed_ms:.0f}ms)] {n.result}"
+                        )
+                parts = [
+                    f'<background-result task_id="{n.task_id}"'
+                    f' status="{n.status}"'
+                    f' elapsed_ms="{n.elapsed_ms:.0f}">'
+                    f"\n{n.result}\n</background-result>"
+                    for n in notifications
+                ]
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "<background-results>\n"
+                        + "".join(parts)
+                        + "\n</background-results>"
+                    ),
+                })
 
         profiler.flush()

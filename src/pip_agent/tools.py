@@ -39,6 +39,13 @@ BASH_SCHEMA = {
                 "type": "integer",
                 "description": "Timeout in seconds. Default 120.",
             },
+            "background": {
+                "type": "boolean",
+                "description": (
+                    "If true, run in background and return immediately. "
+                    "Result delivered later via notification."
+                ),
+            },
         },
         "required": ["command"],
     },
@@ -336,6 +343,20 @@ TASK_REMOVE_SCHEMA = {
 
 TASK_TOOL_NAMES = frozenset({"task_create", "task_update", "task_list", "task_remove"})
 
+CHECK_BACKGROUND_SCHEMA = {
+    "name": "check_background",
+    "description": "Check background task status. Omit task_id to list all tasks.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": "Task ID to inspect. Omit to list all.",
+            },
+        },
+    },
+}
+
 # ---------------------------------------------------------------------------
 # Tool implementations
 # ---------------------------------------------------------------------------
@@ -518,6 +539,7 @@ ALL_TOOLS = [
     TASK_UPDATE_SCHEMA,
     TASK_LIST_SCHEMA,
     TASK_REMOVE_SCHEMA,
+    CHECK_BACKGROUND_SCHEMA,
 ]
 
 

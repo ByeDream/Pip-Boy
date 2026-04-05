@@ -13,19 +13,23 @@ This is a public GitHub repository. All generated code, comments, commit message
 - API keys, tokens, passwords, or any credentials
 - Subjective motivations or personal context about the project
 
-## Design Philosophy
+## Core Philosophy
 
-Intelligence is trained, not coded. Do not attempt to create intelligent behavior through clever prompts, hints, status descriptions, or prescriptive tool-result messages. The model decides **what** to do, **how** to do it, and **when** to do it. Our job is limited to:
+Embodies a Zen-like minimalism that values simplicity and clarity above all. This approach reflects:
 
-- **Eyes**: surface information the model needs (files, state, errors) when it asks.
-- **Hands**: provide tools that execute the model's decisions faithfully.
-- **Then step aside**: no nudging, no coaching, no "smart" scaffolding.
+- **Wabi-sabi philosophy**: Embracing simplicity and the essential. Each line serves a clear purpose without unnecessary embellishment.
+- **Occam's Razor thinking**: The solution should be as simple as possible, but no simpler.
+- **Trust in emergence**: Complex systems work best when built from simple, well-defined components that do one thing well.
+- **Present-moment focus**: The code handles what's needed now rather than anticipating every possible future scenario.
+- **Pragmatic trust**: The developer trusts external systems enough to interact with them directly, handling failures as they occur rather than assuming they'll happen.
 
-The practical test for every line of code: **constrain, surface, never coach.**
+This development philosophy values clear documentation, readable code, and belief that good architecture emerges from simplicity rather than being imposed through complexity.
 
-- **Constrain** — validation that protects data integrity (cycle detection, reference checks) is correct. The model is probabilistic; hard constraints prevent irreversible errors.
-- **Surface** — return factual data and error details ("cycle detected: A -> B"). Give the model what it needs to reason, not what you think it should conclude.
-- **Never coach** — do not inject reminders, suggestions, or next-step hints. If the model forgets something, the answer is better eyes, not a nudge.
+## Design Principles
+
+- **CONSTRAIN, SURFACE, NEVER COACH**: Intelligence is trained, not coded. Provide eyes (information) and hands (tools) — never inject hints, suggestions, or coaching.
+- **PROFILE**: Wrap performance-sensitive operations (API calls, tool execution, I/O) with `Profiler` (`pip_agent.profiler`). Disabled by default, zero overhead.
+- **XML-WRAP INJECTIONS**: When injecting system-generated content into user messages, wrap it in XML tags to create a clear boundary between user intent and system context.
 
 ## Tech Stack
 
@@ -39,14 +43,3 @@ The practical test for every line of code: **constrain, surface, never coach.**
 - Keep dependencies in `pyproject.toml`; pin versions in `requirements.txt` for deployment
 - All configuration via environment variables or config files — never hardcoded
 - All code comments and documentation must be written in English
-
-## Profiler
-
-Pip includes a lightweight `Profiler` class (`pip_agent.profiler`) that is **disabled by default** (`PROFILER_ENABLED=false`). When implementing any new module or feature, you **must** add profiler sampling around performance-sensitive operations:
-
-- **API calls**: wrap with `profiler.start("api")` / `profiler.stop(input_tokens=..., output_tokens=...)`
-- **Tool execution**: wrap with `profiler.start("tool:<name>")` / `profiler.stop()`
-- **I/O or network**: wrap with `profiler.start("<label>")` / `profiler.stop()`
-- Call `profiler.flush()` at the end of each user-facing turn to emit collected samples
-
-The profiler is a no-op when disabled, so there is no performance overhead in production.

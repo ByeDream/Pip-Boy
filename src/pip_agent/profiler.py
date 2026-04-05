@@ -45,6 +45,14 @@ class Profiler:
         self._pending_label = None
         return elapsed_ms
 
+    def record(self, label: str, elapsed_ms: float, **metadata: object) -> None:
+        """Record a pre-computed sample (e.g. from a background thread)."""
+        if not self.enabled:
+            return
+        self._samples.append(
+            Sample(label=label, elapsed_ms=elapsed_ms, metadata=dict(metadata))
+        )
+
     def flush(self) -> None:
         """Print all collected samples for the current turn, then reset."""
         if not self.enabled or not self._samples:
