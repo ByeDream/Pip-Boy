@@ -42,4 +42,5 @@ This development philosophy values clear documentation, readable code, and belie
 - Follow PEP 8; use type hints throughout
 - Keep dependencies in `pyproject.toml`; pin versions in `requirements.txt` for deployment
 - All configuration via environment variables or config files — never hardcoded
-- All code comments and documentation must be written in English
+- Communicate and write plans in Chinese, keeping technical terms in English
+- All code files and documentation for commits must be written in English
