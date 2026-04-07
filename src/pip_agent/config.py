@@ -30,8 +30,6 @@ class Settings(BaseSettings):
         errors: list[str] = []
         if not self.anthropic_api_key:
             errors.append("ANTHROPIC_API_KEY is not set")
-        if not self.anthropic_base_url:
-            errors.append("ANTHROPIC_BASE_URL is not set")
         if errors:
             for e in errors:
                 print(f"  [config error] {e}", file=sys.stderr)
