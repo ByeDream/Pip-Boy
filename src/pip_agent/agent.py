@@ -21,10 +21,10 @@ from pip_agent.task_graph import PlanManager
 from pip_agent.team import TeamManager
 from pip_agent.tool_dispatch import ToolContext, dispatch_tool
 from pip_agent.tools import (
-    LEAD_TOOLS,
     TASK_TOOL_NAMES,
     TEAM_TOOL_NAMES,
     WORKDIR,
+    tools_for_role,
 )
 
 BUILTIN_SKILLS_DIR = Path(__file__).resolve().parent / "skills"
@@ -69,6 +69,9 @@ _TOOL_KEY_PARAM: dict[str, str] = {
     "team_spawn": "name",
     "team_send": "to",
     "team_list_models": "",
+    "claim_task": "task_id",
+    "task_board_overview": "",
+    "task_board_detail": "task_id",
 }
 
 
@@ -265,7 +268,7 @@ def run() -> None:
         plan_manager=plan_manager,
     )
 
-    tools: list[dict] = list(LEAD_TOOLS)
+    tools: list[dict] = tools_for_role("lead")
     team_manager.patch_model_enum(tools)
     system_prompt = SYSTEM_PROMPT
     if skill_registry.available:

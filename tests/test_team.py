@@ -98,41 +98,19 @@ class TestTeammateSpec:
         spec = TeammateSpec.from_file(path)
         assert spec.name == "alice"
         assert spec.description == "Python backend developer."
-        assert spec.model == "test-model"
-        assert spec.max_turns == 5
-        assert spec.tools == ["bash", "read", "write"]
         assert "Python backend developer" in spec.system_body
 
-    def test_parse_minimal_uses_defaults(self, tmp_path):
+    def test_parse_minimal(self, tmp_path):
         path = _write_md(tmp_path, "bob", MINIMAL_MD)
-        with patch("pip_agent.team.settings") as mock_settings:
-            mock_settings.model = "default-model"
-            mock_settings.subagent_max_rounds = 15
-            spec = TeammateSpec.from_file(path)
+        spec = TeammateSpec.from_file(path)
         assert spec.name == "bob"
-        assert spec.model == "default-model"
-        assert spec.max_turns == 15
-        assert spec.tools == [
-            "bash", "read", "write", "edit", "glob", "web_search", "web_fetch",
-        ]
+        assert spec.description == "Helper bot."
 
     def test_no_frontmatter_uses_filename(self, tmp_path):
         path = _write_md(tmp_path, "charlie", NO_FRONTMATTER_MD)
-        with patch("pip_agent.team.settings") as mock_settings:
-            mock_settings.model = "m"
-            mock_settings.subagent_max_rounds = 10
-            spec = TeammateSpec.from_file(path)
+        spec = TeammateSpec.from_file(path)
         assert spec.name == "charlie"
         assert spec.system_body == NO_FRONTMATTER_MD
-
-    def test_tools_as_csv_string(self, tmp_path):
-        md = "---\nname: d\ndescription: d\ntools: bash, read\n---\nbody"
-        path = _write_md(tmp_path, "d", md)
-        with patch("pip_agent.team.settings") as ms:
-            ms.model = "m"
-            ms.subagent_max_rounds = 5
-            spec = TeammateSpec.from_file(path)
-        assert spec.tools == ["bash", "read"]
 
 
 class TestParseFrontmatter:
@@ -236,18 +214,13 @@ class TestTeamManagerDiscovery:
         user = tmp_path / "user"
         _write_md(
             builtin, "alpha",
-            "---\nname: alpha\ndescription: Alpha bot.\nmodel: m\nmax_turns: 5\n---\nAlpha.",
+            "---\nname: alpha\ndescription: Alpha bot.\n---\nAlpha.",
         )
         _write_md(
             user, "beta",
             "---\nname: beta\ndescription: Beta bot.\n---\nBeta body.",
         )
-        with patch("pip_agent.team.settings") as ms:
-            ms.model = "m"
-            ms.subagent_max_rounds = 10
-            mgr = TeamManager(
-                builtin, user, MagicMock(), Profiler(),
-            )
+        mgr = TeamManager(builtin, user, MagicMock(), Profiler())
         result = mgr.status()
         assert "alpha" in result
         assert "beta" in result
@@ -257,18 +230,13 @@ class TestTeamManagerDiscovery:
         user = tmp_path / "user"
         _write_md(
             builtin, "alice",
-            "---\nname: alice\ndescription: Builtin alice.\nmodel: old\n---\nOld.",
+            "---\nname: alice\ndescription: Builtin alice.\n---\nOld.",
         )
         _write_md(
             user, "alice",
-            "---\nname: alice\ndescription: User alice.\nmodel: new\n---\nNew.",
+            "---\nname: alice\ndescription: User alice.\n---\nNew.",
         )
-        with patch("pip_agent.team.settings") as ms:
-            ms.model = "m"
-            ms.subagent_max_rounds = 10
-            mgr = TeamManager(
-                builtin, user, MagicMock(), Profiler(),
-            )
+        mgr = TeamManager(builtin, user, MagicMock(), Profiler())
         assert "User alice" in mgr.status()
         assert "Builtin alice" not in mgr.status()
 
@@ -302,14 +270,14 @@ class TestTeamManagerSpawn:
     def test_spawn_success(self, tmp_path):
         mgr = _make_mgr(tmp_path, "alice")
         with patch.object(Teammate, "start"):
-            result = mgr.spawn("alice", "Do some work")
+            result = mgr.spawn("alice", "Do some work", model="m", max_turns=5)
         assert "Spawned" in result
         assert "alice" in result
 
     def test_spawn_writes_prompt_to_inbox(self, tmp_path):
         mgr = _make_mgr(tmp_path, "alice")
         with patch.object(Teammate, "start"):
-            mgr.spawn("alice", "Build the feature")
+            mgr.spawn("alice", "Build the feature", model="m", max_turns=5)
         msgs = mgr._bus.read_inbox("alice")
         assert len(msgs) == 1
         assert msgs[0]["content"] == "Build the feature"
@@ -318,20 +286,20 @@ class TestTeamManagerSpawn:
     def test_spawn_already_working_rejected(self, tmp_path):
         mgr = _make_mgr(tmp_path, "alice")
         with patch.object(Teammate, "start"):
-            mgr.spawn("alice", "Task 1")
-            result = mgr.spawn("alice", "Task 2")
+            mgr.spawn("alice", "Task 1", model="m", max_turns=5)
+            result = mgr.spawn("alice", "Task 2", model="m", max_turns=5)
         assert "[error]" in result
         assert "currently working" in result
 
     def test_spawn_unknown_rejected(self, tmp_path):
         mgr = _make_mgr(tmp_path, "alice")
-        result = mgr.spawn("nobody", "Task")
+        result = mgr.spawn("nobody", "Task", model="m", max_turns=5)
         assert "[error]" in result
 
     def test_spawn_shows_working_in_status(self, tmp_path):
         mgr = _make_mgr(tmp_path, "alice")
         with patch.object(Teammate, "start"):
-            mgr.spawn("alice", "Work")
+            mgr.spawn("alice", "Work", model="m", max_turns=5)
         assert "[working]" in mgr.status()
 
 
@@ -346,7 +314,7 @@ class TestTeamManagerRescan:
 
         _write_md(user_dir, "alice", SAMPLE_MD)
         with patch.object(Teammate, "start"):
-            result = mgr.spawn("alice", "Task")
+            result = mgr.spawn("alice", "Task", model="m", max_turns=5)
         assert "Spawned" in result
 
     def test_status_picks_up_files_created_after_init(self, tmp_path):
@@ -372,26 +340,23 @@ class TestTeamManagerSend:
     def test_send_to_working_succeeds(self, tmp_path):
         mgr = _make_mgr(tmp_path, "alice")
         with patch.object(Teammate, "start"):
-            mgr.spawn("alice", "Initial task")
-            mgr._bus.read_inbox("alice")  # drain spawn prompt
+            mgr.spawn("alice", "Initial task", model="m", max_turns=5)
+            mgr._bus.read_inbox("alice")
         result = mgr.send("alice", "Follow-up")
         assert "Sent" in result
 
     def test_send_to_unspawned_queued(self, tmp_path):
         mgr = _make_mgr(tmp_path, "alice")
         result = mgr.send("alice", "hello")
-        # Sending to an offline (unspawned) teammate is now allowed —
-        # the message is queued and will be delivered on next activation.
         assert "offline" in result
         assert "[error]" not in result
 
     def test_send_to_done_teammate_queued(self, tmp_path):
         mgr = _make_mgr(tmp_path, "alice")
         with patch.object(Teammate, "start"):
-            mgr.spawn("alice", "Task")
+            mgr.spawn("alice", "Task", model="m", max_turns=5)
         mgr._on_done("alice")
         result = mgr.send("alice", "follow-up")
-        # Sending to a finished teammate is now allowed — queued for next activation.
         assert "offline" in result
         assert "[error]" not in result
 
@@ -402,15 +367,10 @@ class TestTeamManagerSend:
             user_dir, "bob",
             "---\nname: bob\ndescription: Bob.\n---\nBob body.",
         )
-        with patch("pip_agent.team.settings") as ms:
-            ms.model = "m"
-            ms.subagent_max_rounds = 10
-            mgr = TeamManager(
-                tmp_path / "b", user_dir, MagicMock(), Profiler(),
-            )
+        mgr = TeamManager(tmp_path / "b", user_dir, MagicMock(), Profiler())
         with patch.object(Teammate, "start"):
-            mgr.spawn("alice", "Task A")
-            mgr.spawn("bob", "Task B")
+            mgr.spawn("alice", "Task A", model="m", max_turns=5)
+            mgr.spawn("bob", "Task B", model="m", max_turns=5)
         result = mgr.send("all", "hello everyone", "broadcast")
         assert "Broadcast" in result
         assert "2" in result
@@ -431,14 +391,14 @@ class TestTeamManagerStatus:
     def test_working_after_spawn(self, tmp_path):
         mgr = _make_mgr(tmp_path, "alice")
         with patch.object(Teammate, "start"):
-            mgr.spawn("alice", "Task")
+            mgr.spawn("alice", "Task", model="m", max_turns=5)
         result = mgr.status()
         assert "[working]" in result
 
     def test_offline_after_done(self, tmp_path):
         mgr = _make_mgr(tmp_path, "alice")
         with patch.object(Teammate, "start"):
-            mgr.spawn("alice", "Task")
+            mgr.spawn("alice", "Task", model="m", max_turns=5)
         mgr._on_done("alice")
         result = mgr.status()
         assert "[offline]" in result
@@ -447,10 +407,10 @@ class TestTeamManagerStatus:
     def test_respawn_after_done(self, tmp_path):
         mgr = _make_mgr(tmp_path, "alice")
         with patch.object(Teammate, "start"):
-            mgr.spawn("alice", "Task 1")
+            mgr.spawn("alice", "Task 1", model="m", max_turns=5)
         mgr._on_done("alice")
         with patch.object(Teammate, "start"):
-            result = mgr.spawn("alice", "Task 2")
+            result = mgr.spawn("alice", "Task 2", model="m", max_turns=5)
         assert "Spawned" in result
         assert "[working]" in mgr.status()
 
@@ -472,7 +432,7 @@ class TestTeamManagerLifecycle:
     def test_deactivate_all(self, tmp_path):
         mgr = _make_mgr(tmp_path, "alice")
         with patch.object(Teammate, "start"):
-            mgr.spawn("alice", "Task")
+            mgr.spawn("alice", "Task", model="m", max_turns=5)
         mgr.deactivate_all()
         assert "[offline]" in mgr.status()
 
@@ -483,7 +443,7 @@ class TestTeamManagerLifecycle:
 
 
 class TestTeammateLLMLoop:
-    def _make_teammate(self, tmp_path, spec=None):
+    def _make_teammate(self, tmp_path, spec=None, max_turns=5):
         if spec is None:
             path = _write_md(tmp_path / "team", "alice", SAMPLE_MD)
             spec = TeammateSpec.from_file(path)
@@ -492,6 +452,7 @@ class TestTeammateLLMLoop:
         profiler = Profiler()
         return Teammate(
             spec, client, bus, profiler,
+            model="test-model", max_turns=max_turns,
             active_names_fn=lambda: ["alice"],
         ), client, bus
 
@@ -533,10 +494,7 @@ class TestTeammateLLMLoop:
         t._work([], inbox)
 
     def test_max_turns_respected(self, tmp_path):
-        md = "---\nname: alice\ndescription: d\nmodel: m\nmax_turns: 2\ntools: [read]\n---\nbody"
-        path = _write_md(tmp_path / "team", "alice", md)
-        spec = TeammateSpec.from_file(path)
-        t, client, bus = self._make_teammate(tmp_path, spec=spec)
+        t, client, bus = self._make_teammate(tmp_path, max_turns=2)
 
         client.messages.create.return_value = _make_response(
             [_tool_use_block("read", {"file_path": "x.txt"})],
@@ -553,6 +511,7 @@ class TestTeammateLLMLoop:
 
     def test_tool_allowlist_enforced(self, tmp_path):
         t, client, bus = self._make_teammate(tmp_path)
+        t._plan_manager = MagicMock()
         tools = t._build_tools()
         tool_names = {tool["name"] for tool in tools}
         assert "bash" in tool_names
@@ -561,8 +520,14 @@ class TestTeammateLLMLoop:
         assert "send" in tool_names
         assert "read_inbox" in tool_names
         assert "idle" in tool_names
+        assert "claim_task" in tool_names
+        assert "task_board_overview" in tool_names
+        assert "task_board_detail" in tool_names
+        assert "task_update" in tool_names
         assert "task" not in tool_names
         assert "team_spawn" not in tool_names
+        assert "task_create" not in tool_names
+        assert "compact" not in tool_names
 
 
 # ---------------------------------------------------------------------------
@@ -580,6 +545,7 @@ class TestTeammateSingleShot:
         profiler = Profiler()
         return Teammate(
             spec, client, bus, profiler,
+            model="test-model", max_turns=5,
             active_names_fn=lambda: ["alice"],
         ), client, bus
 
@@ -627,6 +593,7 @@ class TestTeammateSingleShot:
         done_fn = MagicMock()
         t = Teammate(
             spec, client, bus, Profiler(),
+            model="test-model", max_turns=5,
             done_fn=done_fn,
         )
         client.messages.create.return_value = _make_response([_text_block("ok")])
@@ -648,6 +615,7 @@ class TestTeammateSend:
         bus = Bus(tmp_path / "inbox")
         t = Teammate(
             spec, MagicMock(), bus, Profiler(),
+            model="test-model", max_turns=5,
             active_names_fn=lambda: ["alice", "bob"],
         )
         result = t._handle_send({"to": "bob", "content": "hello"})
@@ -662,6 +630,7 @@ class TestTeammateSend:
         bus = Bus(tmp_path / "inbox")
         t = Teammate(
             spec, MagicMock(), bus, Profiler(),
+            model="test-model", max_turns=5,
             active_names_fn=lambda: ["alice", "bob"],
         )
         result = t._handle_send({"to": "all", "content": "hey", "msg_type": "broadcast"})
@@ -808,7 +777,7 @@ class TestShutdownProtocol:
     def test_manager_send_creates_req_id(self, tmp_path):
         mgr = _make_mgr(tmp_path, "alice")
         with patch.object(Teammate, "start"):
-            mgr.spawn("alice", "Task")
+            mgr.spawn("alice", "Task", model="m", max_turns=5)
             mgr._bus.read_inbox("alice")
         mgr.send("alice", "Please shut down", "shutdown_request")
         msgs = mgr._bus.read_inbox("alice")
@@ -828,6 +797,7 @@ class TestShutdownProtocol:
         req_id = pt.open_shutdown("alice")
         t = Teammate(
             spec, MagicMock(), bus, Profiler(),
+            model="test-model", max_turns=5,
             protocol=pt,
             active_names_fn=lambda: ["alice"],
         )
@@ -850,6 +820,7 @@ class TestShutdownProtocol:
         req_id = pt.open_shutdown("alice")
         t = Teammate(
             spec, MagicMock(), bus, Profiler(),
+            model="test-model", max_turns=5,
             protocol=pt,
             active_names_fn=lambda: ["alice"],
         )
@@ -872,6 +843,7 @@ class TestShutdownProtocol:
         req_id = pt.open_shutdown("alice")
         t = Teammate(
             spec, client, bus, Profiler(),
+            model="test-model", max_turns=5,
             protocol=pt,
             active_names_fn=lambda: ["alice"],
         )
@@ -905,6 +877,7 @@ class TestShutdownProtocol:
         req_id = pt.open_shutdown("alice")
         t = Teammate(
             spec, MagicMock(), bus, Profiler(),
+            model="test-model", max_turns=5,
             protocol=pt,
             active_names_fn=lambda: ["alice"],
         )
@@ -935,6 +908,7 @@ class TestPlanApprovalProtocol:
         pt = ProtocolTracker()
         t = Teammate(
             spec, MagicMock(), bus, Profiler(),
+            model="test-model", max_turns=5,
             protocol=pt,
             active_names_fn=lambda: ["alice"],
         )
@@ -956,7 +930,7 @@ class TestPlanApprovalProtocol:
         mgr = _make_mgr(tmp_path, "alice")
         req_id = mgr._protocol.open_plan("alice", "Refactor auth")
         with patch.object(Teammate, "start"):
-            mgr.spawn("alice", "Task")
+            mgr.spawn("alice", "Task", model="m", max_turns=5)
             mgr._bus.read_inbox("alice")
         mgr.send(
             "alice", "Approved, go ahead.",
@@ -973,7 +947,7 @@ class TestPlanApprovalProtocol:
         mgr = _make_mgr(tmp_path, "alice")
         req_id = mgr._protocol.open_plan("alice", "Delete everything")
         with patch.object(Teammate, "start"):
-            mgr.spawn("alice", "Task")
+            mgr.spawn("alice", "Task", model="m", max_turns=5)
             mgr._bus.read_inbox("alice")
         mgr.send(
             "alice", "Too risky.",
@@ -993,7 +967,7 @@ class TestIdleTool:
         spec = TeammateSpec.from_file(path)
         client = MagicMock()
         bus = Bus(tmp_path / "inbox")
-        t = Teammate(spec, client, bus, Profiler())
+        t = Teammate(spec, client, bus, Profiler(), model="test-model", max_turns=5)
 
         client.messages.create.side_effect = [
             _make_response(
@@ -1013,7 +987,7 @@ class TestIdleTool:
         spec = TeammateSpec.from_file(path)
         client = MagicMock()
         bus = Bus(tmp_path / "inbox")
-        t = Teammate(spec, client, bus, Profiler())
+        t = Teammate(spec, client, bus, Profiler(), model="test-model", max_turns=5)
 
         client.messages.create.return_value = _make_response(
             [_tool_use_block("idle", {})],
@@ -1044,7 +1018,9 @@ class TestClaimTaskTool:
         client = MagicMock()
         bus = Bus(tmp_path / "inbox")
         t = Teammate(
-            spec, client, bus, Profiler(), plan_manager=pm,
+            spec, client, bus, Profiler(),
+            model="test-model", max_turns=5,
+            plan_manager=pm,
         )
 
         client.messages.create.side_effect = [
@@ -1068,17 +1044,22 @@ class TestClaimTaskTool:
         spec = TeammateSpec.from_file(path)
         bus = Bus(tmp_path / "inbox")
 
-        t_without = Teammate(spec, MagicMock(), bus, Profiler())
+        t_without = Teammate(
+            spec, MagicMock(), bus, Profiler(), model="test-model", max_turns=5,
+        )
         names = {tool["name"] for tool in t_without._build_tools()}
         assert "claim_task" not in names
+        assert "task_update" not in names
 
         t_with = Teammate(
-            spec, MagicMock(), bus, Profiler(), plan_manager=MagicMock(),
+            spec, MagicMock(), bus, Profiler(),
+            model="test-model", max_turns=5, plan_manager=MagicMock(),
         )
         names = {tool["name"] for tool in t_with._build_tools()}
         assert "claim_task" in names
         assert "task_board_overview" in names
         assert "task_board_detail" in names
+        assert "task_update" in names
 
 
 # ---------------------------------------------------------------------------
@@ -1101,7 +1082,9 @@ class TestAutonomousClaim:
         client = MagicMock()
         bus = Bus(tmp_path / "inbox")
         t = Teammate(
-            spec, client, bus, Profiler(), plan_manager=pm,
+            spec, client, bus, Profiler(),
+            model="test-model", max_turns=5,
+            plan_manager=pm,
         )
 
         call_count = [0]
@@ -1131,6 +1114,7 @@ class TestAutonomousClaim:
         spec = TeammateSpec.from_file(path)
         t = Teammate(
             spec, MagicMock(), Bus(tmp_path / "inbox"), Profiler(),
+            model="test-model", max_turns=5,
             plan_manager=pm,
         )
         assert t._maybe_task_board_hint() is not None
@@ -1144,7 +1128,7 @@ class TestAutonomousClaim:
         spec = TeammateSpec.from_file(path)
         client = MagicMock()
         bus = Bus(tmp_path / "inbox")
-        t = Teammate(spec, client, bus, Profiler())
+        t = Teammate(spec, client, bus, Profiler(), model="test-model", max_turns=5)
 
         client.messages.create.return_value = _make_response([_text_block("ok")])
         bus.send("lead", "alice", "Do work")
@@ -1166,7 +1150,10 @@ class TestIdentityReinjection:
     def test_injects_when_messages_short(self, tmp_path):
         path = _write_md(tmp_path / "team", "alice", SAMPLE_MD)
         spec = TeammateSpec.from_file(path)
-        t = Teammate(spec, MagicMock(), Bus(tmp_path / "inbox"), Profiler())
+        t = Teammate(
+            spec, MagicMock(), Bus(tmp_path / "inbox"), Profiler(),
+            model="test-model", max_turns=5,
+        )
 
         messages: list[dict] = [
             {"role": "user", "content": "hello"},
@@ -1182,7 +1169,10 @@ class TestIdentityReinjection:
     def test_skips_when_messages_long(self, tmp_path):
         path = _write_md(tmp_path / "team", "alice", SAMPLE_MD)
         spec = TeammateSpec.from_file(path)
-        t = Teammate(spec, MagicMock(), Bus(tmp_path / "inbox"), Profiler())
+        t = Teammate(
+            spec, MagicMock(), Bus(tmp_path / "inbox"), Profiler(),
+            model="test-model", max_turns=5,
+        )
 
         messages: list[dict] = [
             {"role": "user", "content": "a"},
@@ -1207,7 +1197,7 @@ class TestThreeStateStatus:
         spec = TeammateSpec.from_file(path)
         client = MagicMock()
         bus = Bus(tmp_path / "inbox")
-        t = Teammate(spec, client, bus, Profiler())
+        t = Teammate(spec, client, bus, Profiler(), model="test-model", max_turns=5)
 
         assert t.status == "working"
 
@@ -1227,29 +1217,20 @@ class TestThreeStateStatus:
 # ---------------------------------------------------------------------------
 
 
-class TestMaxTurnsOverride:
-    def test_override_takes_precedence(self, tmp_path):
+class TestMaxTurns:
+    def test_max_turns_stored(self, tmp_path):
         path = _write_md(tmp_path / "team", "alice", SAMPLE_MD)
         spec = TeammateSpec.from_file(path)
-        assert spec.max_turns == 5
         bus = Bus(tmp_path / "inbox")
-        t = Teammate(spec, MagicMock(), bus, Profiler(), max_turns_override=99)
+        t = Teammate(spec, MagicMock(), bus, Profiler(), model="test-model", max_turns=99)
         assert t._max_turns == 99
 
-    def test_no_override_uses_spec(self, tmp_path):
-        path = _write_md(tmp_path / "team", "alice", SAMPLE_MD)
-        spec = TeammateSpec.from_file(path)
-        bus = Bus(tmp_path / "inbox")
-        t = Teammate(spec, MagicMock(), bus, Profiler())
-        assert t._max_turns == 5
-
     def test_max_turns_exhausted_notifies_lead(self, tmp_path):
-        md = "---\nname: alice\ndescription: d\nmodel: m\nmax_turns: 2\ntools: [read]\n---\nbody"
-        path = _write_md(tmp_path / "team", "alice", md)
+        path = _write_md(tmp_path / "team", "alice", SAMPLE_MD)
         spec = TeammateSpec.from_file(path)
         client = MagicMock()
         bus = Bus(tmp_path / "inbox")
-        t = Teammate(spec, client, bus, Profiler())
+        t = Teammate(spec, client, bus, Profiler(), model="test-model", max_turns=2)
 
         client.messages.create.return_value = _make_response(
             [_tool_use_block("read", {"file_path": "x.txt"})],
@@ -1275,7 +1256,7 @@ class TestFinishNotification:
         spec = TeammateSpec.from_file(path)
         client = MagicMock()
         bus = Bus(tmp_path / "inbox")
-        t = Teammate(spec, client, bus, Profiler())
+        t = Teammate(spec, client, bus, Profiler(), model="test-model", max_turns=5)
 
         client.messages.create.return_value = _make_response([_text_block("ok")])
         bus.send("lead", "alice", "Task")
@@ -1291,12 +1272,11 @@ class TestFinishNotification:
     @patch("pip_agent.team.IDLE_POLL_INTERVAL", 0.05)
     @patch("pip_agent.team.IDLE_TIMEOUT", 0.2)
     def test_max_turns_reason_in_finish(self, tmp_path):
-        md = "---\nname: alice\ndescription: d\nmodel: m\nmax_turns: 1\ntools: [read]\n---\nbody"
-        path = _write_md(tmp_path / "team", "alice", md)
+        path = _write_md(tmp_path / "team", "alice", SAMPLE_MD)
         spec = TeammateSpec.from_file(path)
         client = MagicMock()
         bus = Bus(tmp_path / "inbox")
-        t = Teammate(spec, client, bus, Profiler())
+        t = Teammate(spec, client, bus, Profiler(), model="test-model", max_turns=1)
 
         client.messages.create.return_value = _make_response(
             [_tool_use_block("read", {"file_path": "x.txt"})],
@@ -1323,7 +1303,7 @@ class TestFinishNotification:
         spec = TeammateSpec.from_file(path)
         client = MagicMock()
         bus = Bus(tmp_path / "inbox")
-        t = Teammate(spec, client, bus, Profiler())
+        t = Teammate(spec, client, bus, Profiler(), model="test-model", max_turns=5)
 
         def run_inner_boom():
             raise RuntimeError("boom")
@@ -1341,7 +1321,7 @@ class TestFinishNotification:
 
 
 class TestSpawnMaxTurns:
-    def test_spawn_with_max_turns_override(self, tmp_path):
+    def test_spawn_respects_max_turns(self, tmp_path):
         builtin_dir = tmp_path / "builtin"
         user_dir = tmp_path / "user"
         _write_md(builtin_dir, "alice", SAMPLE_MD)
@@ -1349,20 +1329,95 @@ class TestSpawnMaxTurns:
         mgr = TeamManager(builtin_dir, user_dir, client, Profiler())
 
         client.messages.create.return_value = _make_response([_text_block("ok")])
-        result = mgr.spawn("alice", "task", max_turns=99)
+        result = mgr.spawn("alice", "task", model="m", max_turns=99)
         assert "max 99 turns" in result
         assert mgr._active["alice"]._max_turns == 99
         mgr.deactivate_all()
 
-    def test_spawn_without_override_uses_spec(self, tmp_path):
-        builtin_dir = tmp_path / "builtin"
-        user_dir = tmp_path / "user"
-        _write_md(builtin_dir, "alice", SAMPLE_MD)
-        client = MagicMock()
-        mgr = TeamManager(builtin_dir, user_dir, client, Profiler())
 
-        client.messages.create.return_value = _make_response([_text_block("ok")])
-        result = mgr.spawn("alice", "task")
-        assert "max 5 turns" in result
-        assert mgr._active["alice"]._max_turns == 5
-        mgr.deactivate_all()
+# ---------------------------------------------------------------------------
+# Unified tool pool (tools_for_role)
+# ---------------------------------------------------------------------------
+
+
+class TestToolsForRole:
+    def test_lead_sees_claim_task_and_task_board(self):
+        from pip_agent.tools import tools_for_role
+        names = {t["name"] for t in tools_for_role("lead")}
+        assert "claim_task" in names
+        assert "task_board_overview" in names
+        assert "task_board_detail" in names
+
+    def test_lead_does_not_see_teammate_only_tools(self):
+        from pip_agent.tools import tools_for_role
+        names = {t["name"] for t in tools_for_role("lead")}
+        assert "send" not in names
+        assert "read_inbox" not in names
+        assert "idle" not in names
+
+    def test_teammate_does_not_see_lead_only_tools(self):
+        from pip_agent.tools import tools_for_role
+        names = {t["name"] for t in tools_for_role("teammate")}
+        assert "team_spawn" not in names
+        assert "task_create" not in names
+        assert "task" not in names
+        assert "compact" not in names
+
+    def test_teammate_sees_shared_tools(self):
+        from pip_agent.tools import tools_for_role
+        names = {t["name"] for t in tools_for_role("teammate")}
+        assert "bash" in names
+        assert "read" in names
+        assert "write" in names
+        assert "claim_task" in names
+        assert "task_board_overview" in names
+        assert "task_update" in names
+        assert "send" in names
+        assert "read_inbox" in names
+        assert "idle" in names
+
+
+# ---------------------------------------------------------------------------
+# Lead claim_task via dispatch
+# ---------------------------------------------------------------------------
+
+
+class TestLeadClaimTask:
+    def test_lead_claims_task_via_dispatch(self, tmp_path):
+        from pip_agent.task_graph import PlanManager
+        from pip_agent.tool_dispatch import ToolContext, dispatch_tool
+
+        pm = PlanManager(tmp_path / "tasks")
+        pm.create(None, [{"id": "s1", "title": "Story"}])
+        pm.create("s1", [{"id": "t1", "title": "Task 1"}])
+
+        ctx = ToolContext(plan_manager=pm, caller="lead")
+        result = dispatch_tool(ctx, "claim_task", {"story": "s1", "task_id": "t1"})
+        assert "[error]" not in result.content
+
+        task = pm._task_graph("s1").load_all()["t1"]
+        assert task.status == "in_progress"
+        assert task.owner == "lead"
+
+    def test_lead_claim_task_without_plan_manager(self):
+        from pip_agent.tool_dispatch import ToolContext, dispatch_tool
+
+        ctx = ToolContext(caller="lead")
+        result = dispatch_tool(ctx, "claim_task", {"story": "s1", "task_id": "t1"})
+        assert "Unknown tool" in result.content
+
+    def test_teammate_claim_sets_caller_as_owner(self, tmp_path):
+        from pip_agent.task_graph import PlanManager
+        from pip_agent.tool_dispatch import ToolContext, dispatch_tool
+
+        pm = PlanManager(tmp_path / "tasks")
+        pm.create(None, [{"id": "s1", "title": "Story"}])
+        pm.create("s1", [{"id": "t1", "title": "Task 1"}])
+
+        ctx = ToolContext(plan_manager=pm, caller="alice")
+        result = dispatch_tool(ctx, "claim_task", {"story": "s1", "task_id": "t1"})
+        assert "[error]" not in result.content
+
+        task = pm._task_graph("s1").load_all()["t1"]
+        assert task.status == "in_progress"
+        assert task.owner == "alice"

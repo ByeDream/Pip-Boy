@@ -23,8 +23,7 @@ when completed.
   Cross-story task dependencies are not allowed.
   When a task completes, its ID is automatically removed from
   siblings' blocked_by lists (write-time normalization).
-- **owner** = optional string on tasks. Use it to claim a task
-  (e.g. set owner to an agent ID before starting work).
+- **owner** = set automatically by `claim_task` to identify who is working on it.
 - **Story status** is automatic:
   - Any task in_progress -> story is in_progress
   - All tasks completed  -> story is completed -> **directory deleted**
@@ -50,9 +49,19 @@ task_create(story="setup-infra", tasks=[
 ])
 ```
 
+### claim_task
+
+Claim a task to start working on it. Sets status to `in_progress` and
+owner to the caller.
+
+```
+claim_task(story="setup-infra", task_id="configure-db")
+```
+
 ### task_update
 
-Update stories (title/blocked_by only) or tasks (status/title/blocked_by/owner).
+Update stories (title/blocked_by only) or tasks (status/title/blocked_by).
+Use `claim_task` to start work on a task.
 
 ```
 # Update a story's dependencies (full replace):
@@ -61,11 +70,6 @@ task_update(tasks=[{"id": "build-api", "blocked_by": ["setup-infra"]}])
 # Incremental dependency changes:
 task_update(tasks=[{"id": "build-api", "add_blocked_by": ["setup-infra"]}])
 task_update(tasks=[{"id": "build-api", "remove_blocked_by": ["old-dep"]}])
-
-# Claim and start a task:
-task_update(story="setup-infra", tasks=[
-  {"id": "configure-db", "status": "in_progress", "owner": "agent-1"}
-])
 
 # Complete a task:
 task_update(story="setup-infra", tasks=[{"id": "configure-db", "status": "completed"}])
@@ -104,13 +108,10 @@ task_remove(story="setup-infra", task_ids=["setup-ci"])
 
 1. **Plan**: Create stories for each major goal, with inter-story dependencies.
 2. **Decompose**: Add tasks to each story, with intra-story dependencies.
-3. **Work**: Use `task_list()` to see what's ready. Pick a task,
-   mark it `in_progress`, do the work, mark it `completed`.
+3. **Work**: Use `task_list()` to see what's ready. `claim_task` to start,
+   do the work, `task_update` to mark `completed`.
 4. **Auto-cleanup**: When all tasks in a story complete, the story
    directory is automatically deleted from disk.
-
-When using Agent Team, teammates claim tasks from the board
-and manage their own status via `claim_task` and `task_update`.
 
 ## Rules
 

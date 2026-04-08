@@ -243,6 +243,7 @@ TASK_UPDATE_SCHEMA = {
         "Update stories or tasks. Omit 'story' to update story metadata "
         "(title/blocked_by only; status is auto-derived). "
         "Provide 'story' to update tasks (status, title, blocked_by). "
+        "Use claim_task to start work on a task. "
         "Completing all tasks in a story auto-deletes it."
     ),
     "input_schema": {
@@ -552,7 +553,7 @@ COMPACT_SCHEMA = {
 }
 
 # ---------------------------------------------------------------------------
-# Teammate-only tool schemas
+# Communication & task board tool schemas
 # ---------------------------------------------------------------------------
 
 VALID_MSG_TYPES = frozenset({
@@ -666,24 +667,19 @@ TASK_BOARD_DETAIL_SCHEMA = {
 }
 
 # ---------------------------------------------------------------------------
-# Tool groups
+# Role-based tool filtering
 # ---------------------------------------------------------------------------
 
-TEAMMATE_BLOCKED_TOOLS = frozenset({
-    "task_create", "task_update", "task_list", "task_remove",
+_LEAD_ONLY = frozenset({
+    "task_create", "task_list", "task_remove",
     "team_spawn", "team_send", "team_status", "team_read_inbox",
-    "team_create", "team_edit", "team_delete", "team_list_models",
+    "team_list_models", "team_create", "team_edit", "team_delete",
     "task", "check_background", "compact",
 })
 
-TEAMMATE_EXTRA_TOOLS = [
-    SEND_SCHEMA,
-    READ_INBOX_SCHEMA,
-    IDLE_SCHEMA,
-    CLAIM_TASK_SCHEMA,
-    TASK_BOARD_OVERVIEW_SCHEMA,
-    TASK_BOARD_DETAIL_SCHEMA,
-]
+_TEAMMATE_ONLY = frozenset({
+    "send", "read_inbox", "idle",
+})
 
 # ---------------------------------------------------------------------------
 # Tool implementations
@@ -844,7 +840,7 @@ def run_web_fetch(tool_input: dict) -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
-LEAD_TOOLS = [
+ALL_TOOLS = [
     BASH_SCHEMA,
     READ_SCHEMA,
     WRITE_SCHEMA,
@@ -867,9 +863,22 @@ LEAD_TOOLS = [
     TEAM_EDIT_SCHEMA,
     TEAM_DELETE_SCHEMA,
     COMPACT_SCHEMA,
+    SEND_SCHEMA,
+    READ_INBOX_SCHEMA,
+    IDLE_SCHEMA,
+    CLAIM_TASK_SCHEMA,
+    TASK_BOARD_OVERVIEW_SCHEMA,
+    TASK_BOARD_DETAIL_SCHEMA,
 ]
 
-ALL_TOOLS = LEAD_TOOLS
+
+def tools_for_role(role: str) -> list[dict]:
+    """Return tool schemas visible to *role* ('lead' or 'teammate')."""
+    exclude = _TEAMMATE_ONLY if role == "lead" else _LEAD_ONLY
+    return [t for t in ALL_TOOLS if t["name"] not in exclude]
+
+
+LEAD_TOOLS = tools_for_role("lead")
 
 
 def execute_tool(name: str, tool_input: dict) -> str:

@@ -14,13 +14,7 @@ import yaml
 from pip_agent.config import settings
 from pip_agent.profiler import Profiler
 from pip_agent.tool_dispatch import TeammateToolSurface, ToolContext, dispatch_tool
-from pip_agent.tools import (
-    LEAD_TOOLS,
-    TEAMMATE_BLOCKED_TOOLS,
-    TEAMMATE_EXTRA_TOOLS,
-    VALID_MSG_TYPES,
-    WORKDIR,
-)
+from pip_agent.tools import VALID_MSG_TYPES, WORKDIR, tools_for_role
 
 if TYPE_CHECKING:
     import anthropic
@@ -562,7 +556,6 @@ class Teammate:
             send=self._handle_send,
             read_inbox=self._surface_read_inbox,
             request_idle=self._surface_request_idle,
-            claim_task=self._surface_claim_task,
         )
 
     def _surface_read_inbox(self) -> str:
@@ -574,26 +567,13 @@ class Teammate:
     def _surface_request_idle(self) -> None:
         self._idle_requested = True
 
-    def _surface_claim_task(self, tool_input: dict) -> str:
-        if self._plan_manager is None:
-            return "Unknown tool: claim_task"
-        story = tool_input["story"]
-        task_id = tool_input["task_id"]
-        try:
-            result = self._plan_manager.update(
-                story,
-                [{"id": task_id, "status": "in_progress", "owner": self.spec.name}],
-            )
-        except ValueError as e:
-            return f"[error] {e}"
-        return str(result)
-
     def _exec_tool(self, name: str, tool_input: dict) -> str:
         ctx = ToolContext(
             profiler=self._profiler,
             plan_manager=self._plan_manager,
             skill_registry=self._skill_registry,
             teammate=self._teammate_tool_surface(),
+            caller=self.spec.name,
         )
         result = dispatch_tool(ctx, name, tool_input).content
         self._maybe_mark_board_seen(name, result)
@@ -647,11 +627,13 @@ class Teammate:
     # -- Tool & prompt construction -----------------------------------------
 
     def _build_tools(self) -> list[dict]:
-        tools = [
-            t for t in LEAD_TOOLS
-            if t["name"] not in TEAMMATE_BLOCKED_TOOLS
-        ]
-        tools.extend(TEAMMATE_EXTRA_TOOLS)
+        tools = list(tools_for_role("teammate"))
+        if self._plan_manager is None:
+            _plan_tools = {
+                "claim_task", "task_board_overview",
+                "task_board_detail", "task_update",
+            }
+            tools = [t for t in tools if t["name"] not in _plan_tools]
         if self._skill_registry is not None and self._skill_registry.available:
             tools.append(self._skill_registry.tool_schema())
         return tools

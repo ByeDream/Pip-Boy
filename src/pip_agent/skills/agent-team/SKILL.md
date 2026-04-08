@@ -1,13 +1,13 @@
 ---
 name: agent-team
 description: >-
-  Complete guide for managing the Agent Team: creating teammates,
-  spawning with model/turn selection, communication, task coordination,
-  and lifecycle management. Load when delegating work to teammates.
-tags: [team, management, collaboration]
+  Agent Team: creating teammates, spawning with model/turn selection,
+  communication, task coordination, and lifecycle.
+  Load when working with teammates.
+tags: [team, collaboration]
 ---
 
-# Agent Team Management
+# Agent Team
 
 ## Teammate Definitions
 
@@ -73,15 +73,14 @@ The teammate begins working immediately on its own thread.
 ### Teammate to lead
 Teammates use `send(to="lead", content)` to report back.
 
-## Task Board Coordination
+## Task Board
 
-When tasks are planned, teammates autonomously find and claim work:
+All agents (lead and teammates) share the same task workflow:
 
 1. `task_board_overview` — see stories and ready tasks
 2. `task_board_detail(story, task_id)` — inspect a task
 3. `claim_task(story, task_id)` — take ownership (sets in_progress and owner)
-4. Complete the work, then update task status to completed
-5. Check board again for newly unblocked tasks
+4. Complete the work, then `task_update` status to completed
 
 The system hints idle teammates when new claimable work appears.
 
@@ -101,7 +100,7 @@ idle timeout, or shutdown approved. Re-spawn to continue.
 ## Workflow Example
 
 1. Plan the work with `task_create` (stories, tasks, dependencies)
-2. Create and spawn teammates with project context
-3. Teammates check task board, claim and complete tasks autonomously
-4. Monitor via `team_status` and `team_read_inbox`
+2. Spawn teammates with project context
+3. All agents (lead included) `claim_task`, work, and mark completed
+4. Use `team_status` and `team_read_inbox` to coordinate
 5. Story auto-cleans when all tasks complete

@@ -56,7 +56,6 @@ def test_send_with_surface() -> None:
             send=lambda inp: f"sent:{inp['content']}",
             read_inbox=lambda: "[]",
             request_idle=lambda: None,
-            claim_task=lambda _inp: "no",
         ),
     )
     out = dispatch_tool(ctx, "send", {"to": "x", "content": "hi"})
@@ -110,7 +109,6 @@ def test_idle_sets_request_idle_on_result() -> None:
             send=lambda _inp: "",
             read_inbox=lambda: "",
             request_idle=mark_idle,
-            claim_task=lambda _inp: "",
         ),
     )
     out = dispatch_tool(ctx, "idle", {})

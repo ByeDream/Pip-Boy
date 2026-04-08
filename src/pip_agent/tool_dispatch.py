@@ -41,7 +41,6 @@ class TeammateToolSurface:
     send: Callable[[dict], str]
     read_inbox: Callable[[], str]
     request_idle: Callable[[], None]
-    claim_task: Callable[[dict], str]
 
 
 @dataclass
@@ -53,6 +52,7 @@ class ToolContext:
     bg_manager: BackgroundTaskManager | None = None
     team_manager: TeamManager | None = None
     teammate: TeammateToolSurface | None = None
+    caller: str = "lead"
 
 
 def _handle_plan_tool(name: str, inputs: dict, pm: PlanManager) -> str:
@@ -234,9 +234,16 @@ def _handle_idle(ctx: ToolContext, inp: dict) -> DispatchResult:
 
 
 def _handle_claim_task(ctx: ToolContext, inp: dict) -> DispatchResult:
-    if ctx.teammate is None:
+    if ctx.plan_manager is None:
         return DispatchResult(content="Unknown tool: claim_task")
-    return DispatchResult(content=ctx.teammate.claim_task(inp))
+    try:
+        result = ctx.plan_manager.update(
+            inp["story"],
+            [{"id": inp["task_id"], "status": "in_progress", "owner": ctx.caller}],
+        )
+    except ValueError as e:
+        return DispatchResult(content=f"[error] {e}")
+    return DispatchResult(content=result, used_task_tool=True)
 
 
 def _handle_task_board_overview(ctx: ToolContext, _inp: dict) -> DispatchResult:
