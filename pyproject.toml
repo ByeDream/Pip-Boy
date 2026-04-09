@@ -26,3 +26,4 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "pip_agent.skills" = ["**/*.md"]
+"pip_agent.scaffold" = ["*.md", "*.json", "*.txt"]

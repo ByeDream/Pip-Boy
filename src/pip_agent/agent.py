@@ -47,7 +47,7 @@ except ImportError:
 SYSTEM_PROMPT = (
     f"You are Pip-Boy, a personal assistant agent. "
     f"Your working directory is {WORKDIR}. "
-    f"Read PIP_BOY.md in your working directory before starting work."
+    f"Read AGENTS.md in your working directory before starting work."
 )
 
 NAG_THRESHOLD = 3
@@ -242,6 +242,9 @@ def run() -> None:
     sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
     sys.stdin.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
 
+    from pip_agent.scaffold import ensure_workspace
+
+    ensure_workspace(WORKDIR)
     settings.check_required()
 
     client_kwargs: dict = {"api_key": settings.anthropic_api_key}
