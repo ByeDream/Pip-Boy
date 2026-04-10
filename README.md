@@ -72,31 +72,22 @@ On first run in a new project, the agent automatically creates:
 **Prerequisites:** Python ≥ 3.11
 
 ```bash
-# 1. Clone the repo
+# 1. Clone and install
 git clone https://github.com/ByeDream/Pip-Boy.git
 cd Pip-Boy
-
-# 2. Create & activate a virtual environment
 python -m venv .venv
-# Windows PowerShell
-.\.venv\Scripts\Activate.ps1
-# macOS / Linux
-# source .venv/bin/activate
-
-# 3. Install the project (editable mode)
+.\.venv\Scripts\Activate.ps1   # Windows PowerShell
+# source .venv/bin/activate    # macOS / Linux
 pip install -e .
 
-# 4. Configure environment variables
-cp .env.example .env
-# Then edit .env and fill in your ANTHROPIC_API_KEY (required)
-# See the Configuration table below for all available options
-
-# 5. Navigate to your target project and run
+# 2. Navigate to your target project and run
 cd /path/to/your/project
 python -m pip_agent
 ```
 
-The agent uses `Path.cwd()` as its working directory. Run it from the project you want to interact with — the scaffold will set up `.pip/` automatically on first launch.
+On first launch, the scaffold automatically creates `.pip/` directory structure, `.env` (from template), `AGENTS.md`, and `.gitignore` entries in the target project. Edit the generated `.env` to fill in your `ANTHROPIC_API_KEY`, then run again.
+
+The agent uses `Path.cwd()` as its working directory — always run it from the project you want to interact with.
 
 ## Configuration
 
