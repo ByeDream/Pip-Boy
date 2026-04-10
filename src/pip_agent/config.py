@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
+        extra="ignore",
     )
 
     anthropic_api_key: str = Field(default="")
@@ -19,7 +20,6 @@ class Settings(BaseSettings):
     verbose: bool = Field(default=True)
 
     search_api_key: str = Field(default="")
-    subagent_max_rounds: int = Field(default=50)
 
     compact_threshold: int = Field(default=50_000)
     compact_micro_age: int = Field(default=3)

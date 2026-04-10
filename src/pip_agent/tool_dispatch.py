@@ -17,13 +17,12 @@ from pip_agent.tools import (
 )
 
 if TYPE_CHECKING:
-    import anthropic
-
     from pip_agent.background import BackgroundTaskManager
     from pip_agent.profiler import Profiler
     from pip_agent.skills import SkillRegistry
     from pip_agent.task_graph import PlanManager
     from pip_agent.team import TeamManager
+    from pip_agent.worktree import WorktreeManager
 
 
 @dataclass
@@ -47,10 +46,10 @@ class TeammateToolSurface:
 class ToolContext:
     profiler: Profiler | None = None
     plan_manager: PlanManager | None = None
-    client: anthropic.Anthropic | None = None
     skill_registry: SkillRegistry | None = None
     bg_manager: BackgroundTaskManager | None = None
     team_manager: TeamManager | None = None
+    worktree_manager: WorktreeManager | None = None
     teammate: TeammateToolSurface | None = None
     caller: str = "lead"
 
@@ -105,21 +104,6 @@ def _handle_load_skill(ctx: ToolContext, inp: dict) -> DispatchResult:
         return DispatchResult(content="Unknown tool: load_skill")
     return DispatchResult(content=ctx.skill_registry.load(inp["name"]))
 
-
-def _handle_task(ctx: ToolContext, inp: dict) -> DispatchResult:
-    if ctx.client is None:
-        return DispatchResult(content="Unknown tool: task")
-    from pip_agent.subagent import run_subagent
-
-    if ctx.profiler is None:
-        return DispatchResult(content="[error] task tool requires profiler context")
-    text = run_subagent(
-        ctx.client,
-        inp["prompt"],
-        ctx.profiler,
-        skill_registry=ctx.skill_registry,
-    )
-    return DispatchResult(content=text)
 
 
 def _handle_bash(ctx: ToolContext, inp: dict) -> DispatchResult:
@@ -233,6 +217,86 @@ def _handle_idle(ctx: ToolContext, inp: dict) -> DispatchResult:
     )
 
 
+def _handle_task_update(ctx: ToolContext, inp: dict) -> DispatchResult:
+    """Lead-only task_update with worktree integrate/cleanup hooks."""
+    if ctx.plan_manager is None:
+        return DispatchResult(content="Unknown tool: task_update")
+
+    story = inp.get("story")
+    tasks = inp.get("tasks", [])
+
+    for task_entry in tasks:
+        status = task_entry.get("status")
+        task_id = task_entry.get("id", "")
+        wt = ctx.worktree_manager
+
+        if status == "merged" and wt is not None and story is not None:
+            ng = ctx.plan_manager._task_graph(story)
+            all_tasks = ng.load_all()
+            task_obj = all_tasks.get(task_id)
+            owner = task_obj.owner if task_obj else ""
+
+            if owner and owner != "lead" and wt.exists(owner):
+                result = wt.integrate(owner)
+                if not result.ok:
+                    try:
+                        ctx.plan_manager.update(
+                            story, [{"id": task_id, "status": "failed"}],
+                        )
+                    except ValueError:
+                        pass
+                    msg = f"[integrate failed] {result.message}"
+                    if result.conflict_files:
+                        msg += f"\nConflict files: {', '.join(result.conflict_files)}"
+                    return DispatchResult(content=msg, used_task_tool=True)
+
+        if status == "completed" and wt is not None and story is not None:
+            ng = ctx.plan_manager._task_graph(story)
+            all_tasks = ng.load_all()
+            task_obj = all_tasks.get(task_id)
+            owner = task_obj.owner if task_obj else ""
+
+            if owner and owner != "lead" and wt.exists(owner):
+                wt.remove(owner)
+
+    try:
+        text = _handle_plan_tool("task_update", inp, ctx.plan_manager)
+    except ValueError as e:
+        return DispatchResult(content=f"[error] {e}", used_task_tool=True)
+    return DispatchResult(content=text, used_task_tool=True)
+
+
+def _handle_task_submit(ctx: ToolContext, inp: dict) -> DispatchResult:
+    """Subagent submits work for review: sync branch then set in_review."""
+    if ctx.plan_manager is None:
+        return DispatchResult(content="Unknown tool: task_submit")
+
+    if ctx.worktree_manager is not None and ctx.worktree_manager.exists(ctx.caller):
+        sync = ctx.worktree_manager.sync(ctx.caller)
+        if not sync.ok:
+            try:
+                ctx.plan_manager.update(
+                    inp["story"],
+                    [{"id": inp["task_id"], "status": "failed"}],
+                )
+            except ValueError:
+                pass
+            msg = f"[sync failed] {sync.message}"
+            if sync.conflict_files:
+                msg += f"\nConflict files: {', '.join(sync.conflict_files)}"
+                msg += "\nResolve conflicts, commit, then call task_submit again."
+            return DispatchResult(content=msg, used_task_tool=True)
+
+    try:
+        result = ctx.plan_manager.update(
+            inp["story"],
+            [{"id": inp["task_id"], "status": "in_review"}],
+        )
+    except ValueError as e:
+        return DispatchResult(content=f"[error] {e}")
+    return DispatchResult(content=result, used_task_tool=True)
+
+
 def _handle_claim_task(ctx: ToolContext, inp: dict) -> DispatchResult:
     if ctx.plan_manager is None:
         return DispatchResult(content="Unknown tool: claim_task")
@@ -243,6 +307,14 @@ def _handle_claim_task(ctx: ToolContext, inp: dict) -> DispatchResult:
         )
     except ValueError as e:
         return DispatchResult(content=f"[error] {e}")
+
+    if ctx.caller != "lead" and ctx.worktree_manager is not None:
+        try:
+            wt_path = ctx.worktree_manager.create(ctx.caller)
+            result += f"\nWorktree created at: {wt_path}"
+        except Exception as e:
+            result += f"\n[warning] Worktree creation failed: {e}"
+
     return DispatchResult(content=result, used_task_tool=True)
 
 
@@ -262,11 +334,10 @@ def _handle_task_board_detail(ctx: ToolContext, inp: dict) -> DispatchResult:
 _TOOL_REGISTRY: dict[str, Callable[[ToolContext, dict], DispatchResult]] = {
     "compact": _handle_compact,
     "task_create": _make_task_handler("task_create"),
-    "task_update": _make_task_handler("task_update"),
+    "task_update": _handle_task_update,
     "task_list": _make_task_handler("task_list"),
     "task_remove": _make_task_handler("task_remove"),
     "load_skill": _handle_load_skill,
-    "task": _handle_task,
     "bash": _handle_bash,
     "check_background": _handle_check_background,
     "team_spawn": _handle_team_spawn,
@@ -280,6 +351,7 @@ _TOOL_REGISTRY: dict[str, Callable[[ToolContext, dict], DispatchResult]] = {
     "send": _handle_send,
     "read_inbox": _handle_read_inbox,
     "idle": _handle_idle,
+    "task_submit": _handle_task_submit,
     "claim_task": _handle_claim_task,
     "task_board_overview": _handle_task_board_overview,
     "task_board_detail": _handle_task_board_detail,

@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     import anthropic
     from pip_agent.skills import SkillRegistry
     from pip_agent.task_graph import PlanManager
+    from pip_agent.worktree import WorktreeManager
 
 MAX_TOOL_OUTPUT = 50_000
 
@@ -286,6 +287,7 @@ class Teammate:
         active_names_fn: callable = lambda: [],
         done_fn: callable | None = None,
         plan_manager: PlanManager | None = None,
+        worktree_manager: WorktreeManager | None = None,
     ) -> None:
         self.spec = spec
         self._model = model
@@ -297,6 +299,7 @@ class Teammate:
         self._active_names_fn = active_names_fn
         self._done_fn = done_fn
         self._plan_manager = plan_manager
+        self._worktree_manager = worktree_manager
         self._max_turns = max_turns
         self._status = "working"
         self._shutdown = threading.Event()
@@ -511,6 +514,7 @@ class Teammate:
             return None
         if not self._plan_manager.has_claimable_work():
             return None
+        self._board_revision_seen = self._plan_manager.board_revision
         return [{
             "type": "message",
             "from": "task_board",
@@ -572,6 +576,7 @@ class Teammate:
             profiler=self._profiler,
             plan_manager=self._plan_manager,
             skill_registry=self._skill_registry,
+            worktree_manager=self._worktree_manager,
             teammate=self._teammate_tool_surface(),
             caller=self.spec.name,
         )
@@ -631,7 +636,7 @@ class Teammate:
         if self._plan_manager is None:
             _plan_tools = {
                 "claim_task", "task_board_overview",
-                "task_board_detail", "task_update",
+                "task_board_detail", "task_submit",
             }
             tools = [t for t in tools if t["name"] not in _plan_tools]
         if self._skill_registry is not None and self._skill_registry.available:
@@ -639,16 +644,23 @@ class Teammate:
         return tools
 
     def _system_prompt(self) -> str:
+        wt = self._worktree_manager
+        if wt is not None and wt.exists(self.spec.name):
+            workdir = str(wt.worktree_path(self.spec.name))
+        else:
+            workdir = str(WORKDIR)
+
         base = (
-            f"You are '{self.spec.name}', a teammate in a collaborative agent team.\n"
-            f"Working directory: {WORKDIR}\n"
+            f"You are '{self.spec.name}', a subagent in an agent team.\n"
+            f"Working directory: {workdir}\n"
             f"Use the 'send' tool to communicate with teammates or 'lead'.\n"
         )
         if self._plan_manager is not None:
             base += (
-                "Task board tools: task_board_overview, task_board_detail, "
-                "claim_task. Idle may deliver a task_board hint when new work "
-                "is available.\n"
+                "Task board: task_board_overview, task_board_detail, claim_task.\n"
+                "When done: use task_submit(story, task_id) to submit for Lead review.\n"
+                "If task_submit reports conflicts (status=failed), resolve the "
+                "conflict files, commit, then call task_submit again.\n"
             )
         if self.spec.system_body:
             return base + "\n" + self.spec.system_body
@@ -674,11 +686,13 @@ class TeamManager:
         *,
         skill_registry: SkillRegistry | None = None,
         plan_manager: PlanManager | None = None,
+        worktree_manager: WorktreeManager | None = None,
     ) -> None:
         self._client = client
         self._profiler = profiler
         self._skill_registry = skill_registry
         self._plan_manager = plan_manager
+        self._worktree_manager = worktree_manager
         self._roster: dict[str, TeammateSpec] = {}
         self._active: dict[str, Teammate] = {}
         self._bus = Bus(user_dir / "inbox")
@@ -720,6 +734,7 @@ class TeamManager:
             active_names_fn=self._active_names,
             done_fn=self._on_done,
             plan_manager=self._plan_manager,
+            worktree_manager=self._worktree_manager,
         )
 
     # -- Public API (called from agent_loop) --------------------------------

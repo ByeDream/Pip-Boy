@@ -523,8 +523,7 @@ class TestTeammateLLMLoop:
         assert "claim_task" in tool_names
         assert "task_board_overview" in tool_names
         assert "task_board_detail" in tool_names
-        assert "task_update" in tool_names
-        assert "task" not in tool_names
+        assert "task_update" not in tool_names
         assert "team_spawn" not in tool_names
         assert "task_create" not in tool_names
         assert "compact" not in tool_names
@@ -1059,7 +1058,7 @@ class TestClaimTaskTool:
         assert "claim_task" in names
         assert "task_board_overview" in names
         assert "task_board_detail" in names
-        assert "task_update" in names
+        assert "task_update" not in names
 
 
 # ---------------------------------------------------------------------------
@@ -1371,7 +1370,7 @@ class TestToolsForRole:
         assert "write" in names
         assert "claim_task" in names
         assert "task_board_overview" in names
-        assert "task_update" in names
+        assert "task_update" not in names
         assert "send" in names
         assert "read_inbox" in names
         assert "idle" in names

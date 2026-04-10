@@ -174,26 +174,6 @@ WEB_FETCH_SCHEMA = {
     },
 }
 
-TASK_SCHEMA = {
-    "name": "task",
-    "description": (
-        "Delegate a task to a sub-agent that runs in an isolated context. "
-        "The sub-agent starts with a fresh conversation, performs the task "
-        "using tools, and returns only a concise summary. Use this for "
-        "research, exploration, or any multi-step work whose intermediate "
-        "details don't need to persist in your conversation."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "prompt": {
-                "type": "string",
-                "description": "A detailed description of the task for the sub-agent.",
-            },
-        },
-        "required": ["prompt"],
-    },
-}
 
 TASK_CREATE_SCHEMA = {
     "name": "task_create",
@@ -240,10 +220,12 @@ TASK_CREATE_SCHEMA = {
 TASK_UPDATE_SCHEMA = {
     "name": "task_update",
     "description": (
-        "Update stories or tasks. Omit 'story' to update story metadata "
+        "Update stories or tasks (Lead only). Omit 'story' to update story metadata "
         "(title/blocked_by only; status is auto-derived). "
-        "Provide 'story' to update tasks (status, title, blocked_by). "
-        "Use claim_task to start work on a task. "
+        "Provide 'story' to update tasks. "
+        "For subagent tasks: 'merged' approves merge into main (WORKDIR must be clean), "
+        "'completed' confirms merged code and cleans up worktree, "
+        "'failed' sends task back to subagent. "
         "Completing all tasks in a story auto-deletes it."
     ),
     "input_schema": {
@@ -265,8 +247,17 @@ TASK_UPDATE_SCHEMA = {
                         },
                         "status": {
                             "type": "string",
-                            "enum": ["pending", "in_progress", "completed"],
-                            "description": "New status (tasks only; stories derive status automatically).",
+                            "enum": [
+                                "pending", "in_progress",
+                                "merged", "completed", "failed",
+                            ],
+                            "description": (
+                                "New status. For subagent tasks: "
+                                "'merged' = approve merge to main, "
+                                "'completed' = confirm and cleanup worktree, "
+                                "'failed' = reject / send back. "
+                                "Stories derive status automatically."
+                            ),
                         },
                         "title": {
                             "type": "string",
@@ -297,6 +288,29 @@ TASK_UPDATE_SCHEMA = {
             },
         },
         "required": ["tasks"],
+    },
+}
+
+TASK_SUBMIT_SCHEMA = {
+    "name": "task_submit",
+    "description": (
+        "Submit your completed work for Lead's review (subagent only). "
+        "This syncs your branch with main and notifies Lead. "
+        "Also use this after resolving merge conflicts (failed status)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "story": {
+                "type": "string",
+                "description": "Story ID containing the task.",
+            },
+            "task_id": {
+                "type": "string",
+                "description": "Task ID to submit for review.",
+            },
+        },
+        "required": ["story", "task_id"],
     },
 }
 
@@ -341,7 +355,9 @@ TASK_REMOVE_SCHEMA = {
     },
 }
 
-TASK_TOOL_NAMES = frozenset({"task_create", "task_update", "task_list", "task_remove"})
+TASK_TOOL_NAMES = frozenset({
+    "task_create", "task_update", "task_list", "task_remove", "task_submit",
+})
 
 TEAM_SPAWN_SCHEMA = {
     "name": "team_spawn",
@@ -621,6 +637,7 @@ CLAIM_TASK_SCHEMA = {
     "name": "claim_task",
     "description": (
         "Claim a task by story and task ID (sets in_progress and owner to you). "
+        "For subagents, this also creates a worktree and feature branch. "
         "Use task_board_overview and task_board_detail to inspect the board first."
     ),
     "input_schema": {
@@ -671,14 +688,14 @@ TASK_BOARD_DETAIL_SCHEMA = {
 # ---------------------------------------------------------------------------
 
 _LEAD_ONLY = frozenset({
-    "task_create", "task_list", "task_remove",
+    "task_create", "task_update", "task_list", "task_remove",
     "team_spawn", "team_send", "team_status", "team_read_inbox",
     "team_list_models", "team_create", "team_edit", "team_delete",
-    "task", "check_background", "compact",
+    "check_background", "compact",
 })
 
 _TEAMMATE_ONLY = frozenset({
-    "send", "read_inbox", "idle",
+    "send", "read_inbox", "idle", "task_submit",
 })
 
 # ---------------------------------------------------------------------------
@@ -848,9 +865,9 @@ ALL_TOOLS = [
     GLOB_SCHEMA,
     WEB_SEARCH_SCHEMA,
     WEB_FETCH_SCHEMA,
-    TASK_SCHEMA,
     TASK_CREATE_SCHEMA,
     TASK_UPDATE_SCHEMA,
+    TASK_SUBMIT_SCHEMA,
     TASK_LIST_SCHEMA,
     TASK_REMOVE_SCHEMA,
     CHECK_BACKGROUND_SCHEMA,

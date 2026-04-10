@@ -41,7 +41,6 @@ def test_fresh_init(tmp_path: Path) -> None:
     assert gitignore.exists()
     lines = gitignore.read_text(encoding="utf-8").splitlines()
     assert ".pip/" in lines
-    assert ".worktrees/" in lines
 
 
 def test_idempotent(tmp_path: Path) -> None:
@@ -97,7 +96,6 @@ def test_gitignore_merge(tmp_path: Path) -> None:
     lines = text.splitlines()
     assert lines.count(".pip/") == 1
     assert "node_modules/" in lines
-    assert ".worktrees/" in lines
     assert ".env" in lines
 
 
@@ -109,7 +107,6 @@ def test_gitignore_create(tmp_path: Path) -> None:
 
     text = (tmp_path / ".gitignore").read_text(encoding="utf-8")
     assert ".pip/" in text
-    assert ".worktrees/" in text
 
 
 def test_env_not_overwritten(tmp_path: Path) -> None:

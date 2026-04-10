@@ -1,5 +1,4 @@
 .pip/
-.worktrees/
 .env
 .env.*
 !.env.example

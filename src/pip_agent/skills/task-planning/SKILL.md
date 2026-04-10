@@ -25,9 +25,36 @@ when completed.
   siblings' blocked_by lists (write-time normalization).
 - **owner** = set automatically by `claim_task` to identify who is working on it.
 - **Story status** is automatic:
-  - Any task in_progress -> story is in_progress
-  - All tasks completed  -> story is completed -> **directory deleted**
-  - Otherwise            -> story is pending
+  - Any task in_progress/in_review/merged/failed -> story is in_progress
+  - All tasks completed -> story is completed -> **directory deleted**
+  - Otherwise -> story is pending
+
+## Task States
+
+### Lead's own tasks (3 states):
+```
+pending → in_progress → completed
+```
+
+### Subagent tasks (5 states + failed):
+```
+pending → in_progress → in_review → merged → completed
+                          ↑           |
+                          +-- failed --+
+```
+
+State meanings:
+
+| Status       | Meaning                                                 |
+|-------------|----------------------------------------------------------|
+| `pending`    | Not started, waiting to be claimed                      |
+| `in_progress`| Being worked on                                         |
+| `in_review`  | Subagent submitted work, synced with main, awaiting Lead review |
+| `merged`     | Lead approved, code merged into main WORKDIR            |
+| `failed`     | Merge conflict or issue, subagent needs to resolve      |
+| `completed`  | Lead confirmed, worktree cleaned up, downstream unblocked |
+
+Only `completed` unblocks downstream tasks.
 
 ## Tools
 
@@ -52,33 +79,45 @@ task_create(story="setup-infra", tasks=[
 ### claim_task
 
 Claim a task to start working on it. Sets status to `in_progress` and
-owner to the caller.
+owner to the caller. For subagents, also creates a worktree.
 
 ```
 claim_task(story="setup-infra", task_id="configure-db")
 ```
 
-### task_update
+### task_update (Lead only)
 
 Update stories (title/blocked_by only) or tasks (status/title/blocked_by).
-Use `claim_task` to start work on a task.
 
 ```
-# Update a story's dependencies (full replace):
+# Update a story's dependencies:
 task_update(tasks=[{"id": "build-api", "blocked_by": ["setup-infra"]}])
 
-# Incremental dependency changes:
-task_update(tasks=[{"id": "build-api", "add_blocked_by": ["setup-infra"]}])
-task_update(tasks=[{"id": "build-api", "remove_blocked_by": ["old-dep"]}])
+# Approve merge (subagent task in_review → merged):
+task_update(story="s1", tasks=[{"id": "t1", "status": "merged"}])
 
-# Complete a task:
-task_update(story="setup-infra", tasks=[{"id": "configure-db", "status": "completed"}])
+# Confirm completion (merged → completed, cleans up worktree):
+task_update(story="s1", tasks=[{"id": "t1", "status": "completed"}])
+
+# Reject / send back (→ failed):
+task_update(story="s1", tasks=[{"id": "t1", "status": "failed"}])
+
+# Complete Lead's own task:
+task_update(story="s1", tasks=[{"id": "t2", "status": "completed"}])
 ```
 
 Story status cannot be set manually -- it is derived from task statuses.
 
-Create/update tools return JSON of the affected items only.
-Use `task_list` to see the full graph.
+### task_submit (Subagent only)
+
+Submit completed work for Lead review. Syncs branch with main first.
+
+```
+task_submit(story="setup-infra", task_id="configure-db")
+```
+
+If there are merge conflicts, the task goes to `failed`. Resolve the
+conflicts, commit, then call `task_submit` again.
 
 ### task_list
 
@@ -106,18 +145,26 @@ task_remove(story="setup-infra", task_ids=["setup-ci"])
 
 ## Typical workflow
 
-1. **Plan**: Create stories for each major goal, with inter-story dependencies.
-2. **Decompose**: Add tasks to each story, with intra-story dependencies.
-3. **Work**: Use `task_list()` to see what's ready. `claim_task` to start,
-   do the work, `task_update` to mark `completed`.
-4. **Auto-cleanup**: When all tasks in a story complete, the story
-   directory is automatically deleted from disk.
+### Lead working alone:
+1. **Plan**: Create stories and tasks with dependencies.
+2. **Work**: `claim_task` → do work → `task_update(status="completed")`
+3. **Auto-cleanup**: Story directories deleted when all tasks complete.
+
+### Lead + subagent team:
+1. **Plan**: Create stories and tasks with dependencies.
+2. **Spawn**: Create subagents and give them project context.
+3. **Subagents work**: `claim_task` → work in worktree → `task_submit`
+4. **Lead reviews**: See `in_review` → `task_update(status="merged")` → verify → `task_update(status="completed")`
+5. **Lead's own tasks**: `claim_task` → work in WORKDIR → `task_update(status="completed")`
+6. **Auto-cleanup**: Stories auto-delete when complete.
 
 ## Rules
 
 - Task IDs: alphanumeric, dashes, underscores, 1-64 characters.
 - A task in a blocked story cannot be started.
-- blocked_by references must exist at the same level (story-to-story or task-to-task within one story).
-- No cycles allowed in either story or task dependency graphs.
+- blocked_by references must exist at the same level.
+- No cycles allowed in dependency graphs.
 - Do NOT set story status manually -- it is always derived.
-- `blocked_by` (full replace) takes precedence over `add_blocked_by`/`remove_blocked_by`.
+- Subagents cannot directly mark tasks `completed` -- they use `task_submit`.
+- Lead cannot mark tasks `in_review` -- that's done by `task_submit`.
+- Lead must commit WORKDIR changes before approving `merged`.

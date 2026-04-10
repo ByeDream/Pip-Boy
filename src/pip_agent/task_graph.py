@@ -9,7 +9,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-TaskStatus = Literal["pending", "in_progress", "completed"]
+TaskStatus = Literal[
+    "pending", "in_progress", "in_review", "merged", "failed", "completed",
+]
 
 _SAFE_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 _META_FILE = "_meta.json"
@@ -260,7 +262,11 @@ class _NodeGraph:
 
             if "status" in entry:
                 new_status: TaskStatus = entry["status"]
-                if new_status not in ("pending", "in_progress", "completed"):
+                _VALID_STATUSES = {
+                    "pending", "in_progress", "in_review",
+                    "merged", "failed", "completed",
+                }
+                if new_status not in _VALID_STATUSES:
                     raise ValueError(
                         f"Task '{tid}': invalid status '{new_status}'"
                     )
@@ -331,11 +337,20 @@ class _NodeGraph:
         ready: list[Task] = []
         blocked_list: list[Task] = []
         wip: list[Task] = []
+        in_review: list[Task] = []
+        merged: list[Task] = []
+        failed: list[Task] = []
         done: list[Task] = []
 
         for t in all_tasks.values():
             if t.status == "completed":
                 done.append(t)
+            elif t.status == "in_review":
+                in_review.append(t)
+            elif t.status == "merged":
+                merged.append(t)
+            elif t.status == "failed":
+                failed.append(t)
             elif t.status == "in_progress":
                 wip.append(t)
             elif t.blocked_by:
@@ -350,6 +365,21 @@ class _NodeGraph:
             for t in wip:
                 owner_tag = f", owner: {t.owner}" if t.owner else ""
                 lines.append(f"    [>] {t.title}  (id: {t.id}{owner_tag})")
+        if in_review:
+            lines.append("  IN REVIEW:")
+            for t in in_review:
+                owner_tag = f", owner: {t.owner}" if t.owner else ""
+                lines.append(f"    [R] {t.title}  (id: {t.id}{owner_tag})")
+        if merged:
+            lines.append("  MERGED:")
+            for t in merged:
+                owner_tag = f", owner: {t.owner}" if t.owner else ""
+                lines.append(f"    [M] {t.title}  (id: {t.id}{owner_tag})")
+        if failed:
+            lines.append("  FAILED:")
+            for t in failed:
+                owner_tag = f", owner: {t.owner}" if t.owner else ""
+                lines.append(f"    [!] {t.title}  (id: {t.id}{owner_tag})")
         if ready:
             lines.append("  READY:")
             for t in ready:
@@ -453,7 +483,8 @@ class PlanManager:
         statuses = {t.status for t in tasks.values()}
         if statuses == {"completed"}:
             return "completed"
-        if "in_progress" in statuses:
+        active = {"in_progress", "in_review", "merged", "failed"}
+        if statuses & active:
             return "in_progress"
         return "pending"
 

@@ -26,6 +26,7 @@ from pip_agent.tools import (
     WORKDIR,
     tools_for_role,
 )
+from pip_agent.worktree import WorktreeManager
 
 BUILTIN_SKILLS_DIR = Path(__file__).resolve().parent / "skills"
 USER_SKILLS_DIR = WORKDIR / ".pip" / "skills"
@@ -60,11 +61,11 @@ _TOOL_KEY_PARAM: dict[str, str] = {
     "glob": "pattern",
     "web_search": "query",
     "web_fetch": "url",
-    "task": "prompt",
     "load_skill": "name",
     "task_create": "tasks",
     "task_update": "tasks",
     "task_remove": "task_ids",
+    "task_submit": "task_id",
     "check_background": "task_id",
     "team_spawn": "name",
     "team_send": "to",
@@ -98,6 +99,7 @@ def agent_loop(
     transcripts_dir: Path | None = None,
     bg_manager: BackgroundTaskManager | None = None,
     team_manager: TeamManager | None = None,
+    worktree_manager: WorktreeManager | None = None,
 ) -> None:
     messages.append({"role": "user", "content": user_input})
     rounds_since_todo = 0
@@ -191,10 +193,10 @@ def agent_loop(
             tool_ctx = ToolContext(
                 profiler=profiler,
                 plan_manager=plan_manager,
-                client=client,
                 skill_registry=skill_registry,
                 bg_manager=bg_manager,
                 team_manager=team_manager,
+                worktree_manager=worktree_manager,
             )
             for block in assistant_content:
                 if settings.verbose and hasattr(block, "text"):
@@ -261,6 +263,7 @@ def run() -> None:
     plan_manager = PlanManager(WORKDIR / settings.tasks_dir)
     skill_registry = SkillRegistry(BUILTIN_SKILLS_DIR, USER_SKILLS_DIR)
 
+    worktree_manager = WorktreeManager(WORKDIR)
     transcripts_dir = WORKDIR / settings.transcripts_dir
     team_manager = TeamManager(
         BUILTIN_TEAM_DIR,
@@ -269,6 +272,7 @@ def run() -> None:
         profiler,
         skill_registry=skill_registry,
         plan_manager=plan_manager,
+        worktree_manager=worktree_manager,
     )
 
     tools: list[dict] = tools_for_role("lead")
@@ -323,6 +327,7 @@ def run() -> None:
                 transcripts_dir=transcripts_dir,
                 bg_manager=bg_manager,
                 team_manager=team_manager,
+                worktree_manager=worktree_manager,
             )
         except KeyboardInterrupt:
             print("\n  [interrupted] Returning to prompt.")
