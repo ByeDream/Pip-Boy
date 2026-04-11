@@ -3,12 +3,23 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
 import anthropic
 
 from pip_agent.background import BackgroundTaskManager
+from pip_agent.channels import (
+    ChannelManager,
+    CLIChannel,
+    InboundMessage,
+    WeChatChannel,
+    WecomChannel,
+    build_session_key,
+    wechat_poll_loop,
+    wecom_ws_loop,
+)
 from pip_agent.compact import (
     auto_compact,
     estimate_tokens,
@@ -100,10 +111,12 @@ def agent_loop(
     bg_manager: BackgroundTaskManager | None = None,
     team_manager: TeamManager | None = None,
     worktree_manager: WorktreeManager | None = None,
-) -> None:
+) -> str | None:
+    """Run one agent turn.  Returns the final assistant text (if any)."""
     messages.append({"role": "user", "content": user_input})
     rounds_since_todo = 0
     last_input_tokens = 0
+    final_text: str | None = None
 
     while True:
         micro_compact(messages)
@@ -237,7 +250,94 @@ def agent_loop(
                         client, messages, system_prompt, transcripts_dir, profiler
                     )
         else:
+            final_text = "".join(
+                b.text for b in assistant_content if hasattr(b, "text")
+            )
             break
+
+    return final_text
+
+
+def _process_inbound(
+    inbound: InboundMessage,
+    conversations: dict[str, list[dict]],
+    channel_mgr: ChannelManager,
+    client: anthropic.Anthropic,
+    profiler: Profiler,
+    plan_manager: PlanManager,
+    *,
+    tools: list[dict],
+    system_prompt: str,
+    skill_registry: SkillRegistry | None = None,
+    transcripts_dir: Path | None = None,
+    bg_manager: BackgroundTaskManager | None = None,
+    team_manager: TeamManager | None = None,
+    worktree_manager: WorktreeManager | None = None,
+) -> None:
+    """Run agent_loop for one InboundMessage and route the reply."""
+    sk = build_session_key(inbound.channel, inbound.peer_id)
+    if sk not in conversations:
+        conversations[sk] = []
+    messages = conversations[sk]
+
+    if inbound.channel == "wechat":
+        wc = channel_mgr.get("wechat")
+        if isinstance(wc, WeChatChannel):
+            wc.send_typing(inbound.peer_id)
+
+    try:
+        reply_text = agent_loop(
+            client,
+            messages,
+            inbound.text,
+            profiler,
+            plan_manager,
+            tools=tools,
+            system_prompt=system_prompt,
+            skill_registry=skill_registry,
+            transcripts_dir=transcripts_dir,
+            bg_manager=bg_manager,
+            team_manager=team_manager,
+            worktree_manager=worktree_manager,
+        )
+    except KeyboardInterrupt:
+        print("\n  [interrupted] Returning to prompt.")
+        return
+    except anthropic.APIError as exc:
+        print(f"\n  [api_error] {exc}")
+        return
+
+    if reply_text:
+        ch = channel_mgr.get(inbound.channel)
+        if ch:
+            ch.send(inbound.peer_id, reply_text)
+
+    profiler.flush()
+
+
+def _stdin_reader_thread(
+    queue: list[InboundMessage],
+    lock: threading.Lock,
+    stop: threading.Event,
+) -> None:
+    """Read stdin lines and push as CLI InboundMessages.  Daemon thread."""
+    while not stop.is_set():
+        try:
+            line = sys.stdin.readline()
+        except (EOFError, OSError):
+            break
+        if not line:
+            break
+        text = line.strip()
+        if text:
+            msg = InboundMessage(
+                text=text,
+                sender_id="cli-user",
+                channel="cli",
+                peer_id="cli-user",
+            )
+            with lock:
+                queue.append(msg)
 
 
 def run() -> None:
@@ -257,7 +357,6 @@ def run() -> None:
         }
         os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
     client = anthropic.Anthropic(**client_kwargs)
-    messages: list[dict] = []
     profiler = Profiler()
     bg_manager = BackgroundTaskManager()
     plan_manager = PlanManager(WORKDIR / ".pip" / "tasks")
@@ -282,6 +381,59 @@ def run() -> None:
         tools.append(skill_registry.tool_schema())
         system_prompt += "\n\n" + skill_registry.catalog_prompt()
 
+    # -- Channel setup --
+    channel_mgr = ChannelManager()
+    cli_channel = CLIChannel()
+    channel_mgr.register(cli_channel)
+
+    stop_event = threading.Event()
+    msg_queue: list[InboundMessage] = []
+    q_lock = threading.Lock()
+    bg_threads: list[threading.Thread] = []
+    has_remote_channels = False
+
+    state_dir = WORKDIR / ".pip"
+
+    # WeChat iLink
+    wechat_channel: WeChatChannel | None = None
+    if settings.wechat_bot_token:
+        try:
+            wechat_channel = WeChatChannel(state_dir)
+            channel_mgr.register(wechat_channel)
+            if not wechat_channel.is_logged_in:
+                wechat_channel.login()
+            if wechat_channel.is_logged_in:
+                t = threading.Thread(
+                    target=wechat_poll_loop, daemon=True,
+                    args=(wechat_channel, msg_queue, q_lock, stop_event),
+                )
+                t.start()
+                bg_threads.append(t)
+                has_remote_channels = True
+        except Exception as exc:
+            print(f"  [wechat] Init failed: {exc}")
+
+    # WeCom WebSocket
+    wecom_channel: WecomChannel | None = None
+    if settings.wecom_bot_id and settings.wecom_bot_secret:
+        try:
+            wecom_channel = WecomChannel(
+                settings.wecom_bot_id,
+                settings.wecom_bot_secret,
+                msg_queue,
+                q_lock,
+            )
+            channel_mgr.register(wecom_channel)
+            t = threading.Thread(
+                target=wecom_ws_loop, daemon=True,
+                args=(wecom_channel, stop_event),
+            )
+            t.start()
+            bg_threads.append(t)
+            has_remote_channels = True
+        except Exception as exc:
+            print(f"  [wecom] Init failed: {exc}")
+
     print(
         "============================================\n"
         "  ROBCO INDUSTRIES (TM) TERMLINK PROTOCOL\n"
@@ -290,87 +442,176 @@ def run() -> None:
         "============================================\n"
         "  Welcome, Vault Dweller. Type 'exit' to\n"
         "  power down.\n"
+        f"  Channels: {', '.join(channel_mgr.list_channels())}\n"
         "============================================"
     )
 
-    while True:
-        try:
-            user_input = input("> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            team_manager.deactivate_all()
-            break
+    conversations: dict[str, list[dict]] = {}
+    cli_session_key = build_session_key("cli", "cli-user")
+    conversations[cli_session_key] = []
 
-        if user_input.lower() == "exit":
-            team_manager.deactivate_all()
-            break
-        if not user_input:
-            continue
-        if user_input == "/team":
-            print(team_manager.status())
-            continue
-        if user_input == "/inbox":
-            inbox = team_manager.peek_inbox()
-            print(json.dumps(inbox, indent=2) if inbox else "(no messages)")
-            continue
+    common_kwargs = dict(
+        tools=tools,
+        system_prompt=system_prompt,
+        skill_registry=skill_registry,
+        transcripts_dir=transcripts_dir,
+        bg_manager=bg_manager,
+        team_manager=team_manager,
+        worktree_manager=worktree_manager,
+    )
 
-        try:
-            agent_loop(
-                client,
-                messages,
-                user_input,
-                profiler,
-                plan_manager,
-                tools=tools,
-                system_prompt=system_prompt,
-                skill_registry=skill_registry,
-                transcripts_dir=transcripts_dir,
-                bg_manager=bg_manager,
-                team_manager=team_manager,
-                worktree_manager=worktree_manager,
-            )
-        except KeyboardInterrupt:
-            print("\n  [interrupted] Returning to prompt.")
-            continue
-        except anthropic.APIError as exc:
-            print(f"\n  [api_error] {exc}")
-            continue
+    if has_remote_channels:
+        # Multi-channel mode: stdin reader thread + shared queue
+        stdin_thread = threading.Thread(
+            target=_stdin_reader_thread, daemon=True,
+            args=(msg_queue, q_lock, stop_event),
+        )
+        stdin_thread.start()
+        print("  (multi-channel mode: type and press Enter)")
 
-        last = messages[-1]
-        if last["role"] == "assistant":
-            for block in last["content"]:
-                if hasattr(block, "text"):
-                    print()
-                    print("================================================")
-                    print(block.text)
+        while not stop_event.is_set():
+            with q_lock:
+                batch = msg_queue[:]
+                msg_queue.clear()
 
-        while bg_manager.has_pending():
-            if settings.verbose:
-                print("  (waiting for background tasks...)")
-            time.sleep(1)
-            notifications = bg_manager.drain()
-            if notifications:
-                for n in notifications:
-                    profiler.record("bg:bash", n.elapsed_ms)
+            if not batch:
+                time.sleep(0.3)
+                continue
+
+            for inbound in batch:
+                if inbound.channel == "cli":
+                    if inbound.text.lower() == "exit":
+                        stop_event.set()
+                        break
+                    if inbound.text == "/team":
+                        print(team_manager.status())
+                        continue
+                    if inbound.text == "/inbox":
+                        inbox = team_manager.peek_inbox()
+                        print(json.dumps(inbox, indent=2) if inbox else "(no messages)")
+                        continue
+                    if inbound.text == "/channels":
+                        for name in channel_mgr.list_channels():
+                            print(f"  - {name}")
+                        continue
+
+                if settings.verbose and inbound.channel != "cli":
+                    print(f"\n  [{inbound.channel}] {inbound.sender_id}: "
+                          f"{inbound.text[:80]}")
+
+                _process_inbound(
+                    inbound, conversations, channel_mgr, client, profiler,
+                    plan_manager, **common_kwargs,
+                )
+
+                # drain background tasks for CLI session
+                cli_messages = conversations.get(cli_session_key, [])
+                while bg_manager.has_pending():
                     if settings.verbose:
-                        print(
-                            f"  [bg:{n.task_id} {n.status}"
-                            f" ({n.elapsed_ms:.0f}ms)] {n.result}"
-                        )
-                parts = [
-                    f'<background-result task_id="{n.task_id}"'
-                    f' status="{n.status}"'
-                    f' elapsed_ms="{n.elapsed_ms:.0f}">'
-                    f"\n{n.result}\n</background-result>"
-                    for n in notifications
-                ]
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "<background-results>\n"
-                        + "".join(parts)
-                        + "\n</background-results>"
-                    ),
-                })
+                        print("  (waiting for background tasks...)")
+                    time.sleep(1)
+                    notifications = bg_manager.drain()
+                    if notifications:
+                        for n in notifications:
+                            profiler.record("bg:bash", n.elapsed_ms)
+                            if settings.verbose:
+                                print(
+                                    f"  [bg:{n.task_id} {n.status}"
+                                    f" ({n.elapsed_ms:.0f}ms)] {n.result}"
+                                )
+                        parts = [
+                            f'<background-result task_id="{n.task_id}"'
+                            f' status="{n.status}"'
+                            f' elapsed_ms="{n.elapsed_ms:.0f}">'
+                            f"\n{n.result}\n</background-result>"
+                            for n in notifications
+                        ]
+                        cli_messages.append({
+                            "role": "user",
+                            "content": (
+                                "<background-results>\n"
+                                + "".join(parts)
+                                + "\n</background-results>"
+                            ),
+                        })
+    else:
+        # CLI-only mode: original blocking REPL (preserves readline, etc.)
+        messages = conversations[cli_session_key]
 
-        profiler.flush()
+        while True:
+            try:
+                user_input = input("> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                team_manager.deactivate_all()
+                break
+
+            if user_input.lower() == "exit":
+                team_manager.deactivate_all()
+                break
+            if not user_input:
+                continue
+            if user_input == "/team":
+                print(team_manager.status())
+                continue
+            if user_input == "/inbox":
+                inbox = team_manager.peek_inbox()
+                print(json.dumps(inbox, indent=2) if inbox else "(no messages)")
+                continue
+
+            try:
+                reply_text = agent_loop(
+                    client,
+                    messages,
+                    user_input,
+                    profiler,
+                    plan_manager,
+                    **common_kwargs,
+                )
+            except KeyboardInterrupt:
+                print("\n  [interrupted] Returning to prompt.")
+                continue
+            except anthropic.APIError as exc:
+                print(f"\n  [api_error] {exc}")
+                continue
+
+            if reply_text:
+                cli_channel.send("cli-user", reply_text)
+
+            while bg_manager.has_pending():
+                if settings.verbose:
+                    print("  (waiting for background tasks...)")
+                time.sleep(1)
+                notifications = bg_manager.drain()
+                if notifications:
+                    for n in notifications:
+                        profiler.record("bg:bash", n.elapsed_ms)
+                        if settings.verbose:
+                            print(
+                                f"  [bg:{n.task_id} {n.status}"
+                                f" ({n.elapsed_ms:.0f}ms)] {n.result}"
+                            )
+                    parts = [
+                        f'<background-result task_id="{n.task_id}"'
+                        f' status="{n.status}"'
+                        f' elapsed_ms="{n.elapsed_ms:.0f}">'
+                        f"\n{n.result}\n</background-result>"
+                        for n in notifications
+                    ]
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "<background-results>\n"
+                            + "".join(parts)
+                            + "\n</background-results>"
+                        ),
+                    })
+
+            profiler.flush()
+
+    # -- Cleanup --
+    stop_event.set()
+    team_manager.deactivate_all()
+    for t in bg_threads:
+        t.join(timeout=3.0)
+    channel_mgr.close_all()
