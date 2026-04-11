@@ -31,7 +31,11 @@ def _ensure_dirs(workdir: Path) -> None:
 
 
 def _ensure_agents_md(workdir: Path) -> None:
-    template = (_SCAFFOLD_DIR / "agents.md").read_text(encoding="utf-8")
+    src = _SCAFFOLD_DIR / "agents.md"
+    if not src.is_file():
+        logger.warning("Scaffold template missing: %s", src)
+        return
+    template = src.read_text(encoding="utf-8")
     block = f"{_SENTINEL}\n{template}\n{_SENTINEL_END}\n"
     target = workdir / "AGENTS.md"
 
@@ -54,13 +58,21 @@ def _ensure_copy(target: Path, scaffold_name: str) -> None:
     if target.exists():
         logger.debug("Already exists: %s", target)
         return
+    src = _SCAFFOLD_DIR / scaffold_name
+    if not src.is_file():
+        logger.warning("Scaffold resource missing: %s", src)
+        return
     target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(_SCAFFOLD_DIR / scaffold_name, target)
+    shutil.copy2(src, target)
     logger.info("Created %s", target)
 
 
 def _ensure_gitignore(workdir: Path) -> None:
-    entries_text = (_SCAFFOLD_DIR / "gitignore_entries.txt").read_text(encoding="utf-8")
+    src = _SCAFFOLD_DIR / "gitignore_entries.txt"
+    if not src.is_file():
+        logger.warning("Scaffold resource missing: %s", src)
+        return
+    entries_text = src.read_text(encoding="utf-8")
     required = [line for line in entries_text.splitlines() if line.strip()]
 
     target = workdir / ".gitignore"

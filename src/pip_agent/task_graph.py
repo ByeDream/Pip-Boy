@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 import threading
@@ -8,6 +9,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
+
+log = logging.getLogger(__name__)
 
 TaskStatus = Literal[
     "pending", "in_progress", "in_review", "merged", "failed", "completed",
@@ -165,7 +168,8 @@ class _NodeGraph:
             try:
                 t = Task.from_dict(json.loads(p.read_text(encoding="utf-8")))
                 tasks[t.id] = t
-            except (json.JSONDecodeError, KeyError):
+            except (json.JSONDecodeError, KeyError) as exc:
+                log.warning("Skipping corrupted task file %s: %s", p.name, exc)
                 continue
         return tasks
 
@@ -521,10 +525,10 @@ class PlanManager:
     def create(self, story: str | None, items: list[dict]) -> str:
         if not items:
             raise ValueError("No items provided")
-
-        if story is None:
-            return self._create_stories(items)
-        return self._create_tasks(story, items)
+        with self._claim_lock:
+            if story is None:
+                return self._create_stories(items)
+            return self._create_tasks(story, items)
 
     def _create_stories(self, items: list[dict]) -> str:
         all_metas = self._load_all_metas()
@@ -582,10 +586,10 @@ class PlanManager:
     def update(self, story: str | None, items: list[dict]) -> str:
         if not items:
             raise ValueError("No items provided")
-
-        if story is None:
-            return self._update_stories(items)
-        return self._update_tasks(story, items)
+        with self._claim_lock:
+            if story is None:
+                return self._update_stories(items)
+            return self._update_tasks(story, items)
 
     def _update_stories(self, items: list[dict]) -> str:
         all_metas = self._load_all_metas()
@@ -655,10 +659,10 @@ class PlanManager:
     def remove(self, story: str | None, ids: list[str]) -> str:
         if not ids:
             raise ValueError("No IDs provided")
-
-        if story is None:
-            return self._remove_stories(ids)
-        return self._remove_tasks(story, ids)
+        with self._claim_lock:
+            if story is None:
+                return self._remove_stories(ids)
+            return self._remove_tasks(story, ids)
 
     def _remove_stories(self, story_ids: list[str]) -> str:
         all_metas = self._load_all_metas()

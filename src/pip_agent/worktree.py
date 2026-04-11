@@ -8,10 +8,21 @@ main), and cleanup.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+
+_SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def _validate_name(name: str) -> None:
+    """Raise ValueError if *name* is unsafe for use as a path component."""
+    if not name or not _SAFE_NAME_RE.match(name):
+        raise ValueError(
+            f"Invalid worktree name {name!r}: only [a-zA-Z0-9_-] allowed"
+        )
 
 
 @dataclass
@@ -27,7 +38,7 @@ class WorktreeManager:
     def __init__(self, workdir: Path) -> None:
         self._workdir = workdir
         self._worktrees_root = workdir / ".pip" / ".worktrees"
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     @property
     def worktrees_root(self) -> Path:
@@ -76,6 +87,7 @@ class WorktreeManager:
 
         Returns the worktree path.
         """
+        _validate_name(name)
         wt_path = self.worktree_path(name)
         branch = self.branch_name(name)
 
@@ -97,6 +109,7 @@ class WorktreeManager:
 
     def remove(self, name: str) -> None:
         """Remove worktree and delete the feature branch."""
+        _validate_name(name)
         wt_path = self.worktree_path(name)
         branch = self.branch_name(name)
 
@@ -112,25 +125,28 @@ class WorktreeManager:
 
         This ensures the feature branch is up to date before review.
         """
+        _validate_name(name)
         wt_path = self.worktree_path(name)
-        if not wt_path.exists():
-            return MergeResult(ok=False, message=f"Worktree '{name}' not found")
 
-        main = self._main_branch()
-        r = self._git(["merge", main], cwd=wt_path, check=False)
+        with self._lock:
+            if not wt_path.exists():
+                return MergeResult(ok=False, message=f"Worktree '{name}' not found")
 
-        if r.returncode != 0:
-            conflicts = self._conflict_files(wt_path)
-            if conflicts:
-                self._git(["merge", "--abort"], cwd=wt_path, check=False)
-                return MergeResult(
-                    ok=False,
-                    message=f"Merge conflicts with {main}: {', '.join(conflicts)}",
-                    conflict_files=conflicts,
-                )
-            return MergeResult(ok=False, message=f"Merge failed: {r.stderr.strip()}")
+            main = self._main_branch()
+            r = self._git(["merge", main], cwd=wt_path, check=False)
 
-        return MergeResult(ok=True, message=f"Synced with {main}")
+            if r.returncode != 0:
+                conflicts = self._conflict_files(wt_path)
+                if conflicts:
+                    self._git(["merge", "--abort"], cwd=wt_path, check=False)
+                    return MergeResult(
+                        ok=False,
+                        message=f"Merge conflicts with {main}: {', '.join(conflicts)}",
+                        conflict_files=conflicts,
+                    )
+                return MergeResult(ok=False, message=f"Merge failed: {r.stderr.strip()}")
+
+            return MergeResult(ok=True, message=f"Synced with {main}")
 
     def workdir_clean(self) -> bool:
         """Check if WORKDIR has no uncommitted changes."""
@@ -142,6 +158,7 @@ class WorktreeManager:
 
         Must be called from the Lead's context (WORKDIR).
         """
+        _validate_name(name)
         if not self.workdir_clean():
             return MergeResult(
                 ok=False,

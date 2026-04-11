@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 import time
@@ -10,6 +11,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import yaml
+
+log = logging.getLogger(__name__)
 
 from pip_agent.config import settings
 from pip_agent.profiler import Profiler
@@ -30,6 +33,16 @@ TASK_BOARD_HINT = (
 
 IDLE_POLL_INTERVAL = 5
 IDLE_TIMEOUT = 60
+
+_SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def _validate_name(name: str) -> None:
+    """Raise ValueError if *name* is unsafe for use as a path component."""
+    if not name or not _SAFE_NAME_RE.match(name):
+        raise ValueError(
+            f"Invalid name {name!r}: only [a-zA-Z0-9_-] allowed"
+        )
 
 
 def _parse_frontmatter(text: str) -> tuple[dict, str]:
@@ -65,12 +78,13 @@ class TeammateSpec:
         )
 
     def to_frontmatter(self) -> str:
-        lines = [
-            "---",
-            f"name: {self.name}",
-            f'description: "{self.description}"',
-            "---",
-        ]
+        header = yaml.dump(
+            {"name": self.name, "description": self.description},
+            default_flow_style=False,
+            allow_unicode=True,
+            sort_keys=False,
+        ).strip()
+        lines = ["---", header, "---"]
         if self.system_body:
             lines.append("")
             lines.append(self.system_body)
@@ -98,6 +112,7 @@ class Bus:
         msg_type: str = "message",
         **extra,
     ) -> str:
+        _validate_name(to_name)
         if msg_type not in VALID_MSG_TYPES:
             return (
                 f"[error] Invalid msg_type '{msg_type}'. "
@@ -130,6 +145,7 @@ class Bus:
         return messages
 
     def peek_inbox(self, name: str) -> list[dict]:
+        _validate_name(name)
         path = self._dir / f"{name}.jsonl"
         with self._lock:
             if not path.is_file() or path.stat().st_size == 0:
@@ -137,6 +153,7 @@ class Bus:
             return self._parse_inbox(path)
 
     def read_inbox(self, name: str) -> list[dict]:
+        _validate_name(name)
         path = self._dir / f"{name}.jsonl"
         with self._lock:
             if not path.is_file() or path.stat().st_size == 0:
@@ -700,6 +717,7 @@ class TeamManager:
         self._worktree_manager = worktree_manager
         self._roster: dict[str, TeammateSpec] = {}
         self._active: dict[str, Teammate] = {}
+        self._active_lock = threading.Lock()
         self._bus = Bus(user_dir / "inbox")
         self._protocol = ProtocolTracker()
         self._builtin_dir = builtin_dir
@@ -715,14 +733,17 @@ class TeamManager:
             try:
                 spec = TeammateSpec.from_file(md_path)
                 self._roster[spec.name] = spec
-            except Exception:
+            except Exception as exc:
+                log.warning("Skipping teammate file %s: %s", md_path.name, exc)
                 continue
 
     def _active_names(self) -> list[str]:
-        return list(self._active.keys())
+        with self._active_lock:
+            return list(self._active.keys())
 
     def _on_done(self, name: str) -> None:
-        self._active.pop(name, None)
+        with self._active_lock:
+            self._active.pop(name, None)
 
     def _make_teammate(
         self, spec: TeammateSpec, *, model: str, max_turns: int,
@@ -771,9 +792,10 @@ class TeamManager:
     def spawn(
         self, name: str, prompt: str, *, model: str, max_turns: int,
     ) -> str:
-        if name in self._active:
-            state = self._active[name].status
-            return f"[error] '{name}' is currently {state}."
+        with self._active_lock:
+            if name in self._active:
+                state = self._active[name].status
+                return f"[error] '{name}' is currently {state}."
         valid = self._valid_models()
         if valid and model not in valid:
             return (
@@ -789,7 +811,8 @@ class TeamManager:
             return f"[error] Unknown teammate '{name}'. Available: {available}"
         teammate = self._make_teammate(spec, model=model, max_turns=max_turns)
         teammate.start()
-        self._active[name] = teammate
+        with self._active_lock:
+            self._active[name] = teammate
         self._bus.send(self.LEAD, name, prompt, "message")
         return f"Spawned '{name}' ({model}, max {max_turns} turns)."
 
@@ -797,8 +820,10 @@ class TeamManager:
         self, to: str, content: str, msg_type: str = "message", **extra,
     ) -> str:
         if msg_type == "broadcast":
+            with self._active_lock:
+                names = list(self._active)
             count = 0
-            for name in list(self._active):
+            for name in names:
                 self._bus.send(self.LEAD, name, content, "broadcast")
                 count += 1
             return f"Broadcast to {count} teammates."
@@ -810,7 +835,9 @@ class TeamManager:
             if req_id:
                 self._protocol.resolve(req_id, approve)
         result = self._bus.send(self.LEAD, to, content, msg_type, **extra)
-        if to not in self._active:
+        with self._active_lock:
+            is_online = to in self._active
+        if not is_online:
             return f"{result} (offline — will be read on next activation)"
         return result
 
@@ -825,10 +852,12 @@ class TeamManager:
         if not self._roster:
             return "No teammates defined."
         lines: list[str] = []
+        with self._active_lock:
+            active_snapshot = dict(self._active)
         for name in sorted(self._roster):
             spec = self._roster[name]
-            if name in self._active:
-                tm = self._active[name]
+            if name in active_snapshot:
+                tm = active_snapshot[name]
                 lines.append(
                     f"  {name} [{tm.status}] {spec.description}"
                     f" ({tm._model}, {tm._max_turns} turns)"
@@ -838,6 +867,7 @@ class TeamManager:
         return "\n".join(lines)
 
     def create_teammate(self, name: str, description: str, system_prompt: str) -> str:
+        _validate_name(name)
         if name in self._roster:
             return f"[error] Teammate '{name}' already exists."
         spec = TeammateSpec(name=name, description=description, system_body=system_prompt)
@@ -848,6 +878,7 @@ class TeamManager:
         return f"Created teammate '{name}' at {path.relative_to(WORKDIR)}"
 
     def edit_teammate(self, name: str, **updates: str) -> str:
+        _validate_name(name)
         spec = self._roster.get(name)
         if spec is None:
             self._rescan()
@@ -865,8 +896,10 @@ class TeamManager:
         return f"Updated teammate '{name}'."
 
     def delete_teammate(self, name: str) -> str:
-        if name in self._active:
-            return f"[error] '{name}' is currently active. Stop it first."
+        _validate_name(name)
+        with self._active_lock:
+            if name in self._active:
+                return f"[error] '{name}' is currently active. Stop it first."
         path = self._user_dir / f"{name}.md"
         if not path.is_file():
             path = self._builtin_dir / f"{name}.md"
@@ -887,6 +920,8 @@ class TeamManager:
         return json.dumps(data, indent=2)
 
     def deactivate_all(self) -> None:
-        for t in self._active.values():
+        with self._active_lock:
+            teammates = list(self._active.values())
+            self._active.clear()
+        for t in teammates:
             t.stop()
-        self._active.clear()

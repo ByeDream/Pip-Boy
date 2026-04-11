@@ -106,7 +106,10 @@ def _make_task_handler(tool_name: str) -> Callable[[ToolContext, dict], Dispatch
 def _handle_load_skill(ctx: ToolContext, inp: dict) -> DispatchResult:
     if ctx.skill_registry is None:
         return DispatchResult(content="Unknown tool: load_skill")
-    return DispatchResult(content=ctx.skill_registry.load(inp["name"]))
+    name = inp.get("name", "")
+    if not name:
+        return DispatchResult(content="[error] 'name' is required for load_skill")
+    return DispatchResult(content=ctx.skill_registry.load(name))
 
 
 
@@ -129,6 +132,9 @@ def _handle_check_background(ctx: ToolContext, inp: dict) -> DispatchResult:
 def _handle_team_spawn(ctx: ToolContext, inp: dict) -> DispatchResult:
     if ctx.team_manager is None:
         return DispatchResult(content="Unknown tool: team_spawn")
+    missing = [k for k in ("name", "prompt", "model", "max_turns") if k not in inp]
+    if missing:
+        return DispatchResult(content=f"[error] Missing required fields: {', '.join(missing)}")
     text = ctx.team_manager.spawn(
         inp["name"],
         inp["prompt"],
@@ -141,6 +147,9 @@ def _handle_team_spawn(ctx: ToolContext, inp: dict) -> DispatchResult:
 def _handle_team_send(ctx: ToolContext, inp: dict) -> DispatchResult:
     if ctx.team_manager is None:
         return DispatchResult(content="Unknown tool: team_send")
+    missing = [k for k in ("to", "content") if k not in inp]
+    if missing:
+        return DispatchResult(content=f"[error] Missing required fields: {', '.join(missing)}")
     extra: dict = {}
     for key in ("req_id", "approve"):
         if key in inp:
@@ -177,6 +186,9 @@ def _handle_team_list_models(ctx: ToolContext, _inp: dict) -> DispatchResult:
 def _handle_team_create(ctx: ToolContext, inp: dict) -> DispatchResult:
     if ctx.team_manager is None:
         return DispatchResult(content="Unknown tool: team_create")
+    missing = [k for k in ("name", "description", "system_prompt") if k not in inp]
+    if missing:
+        return DispatchResult(content=f"[error] Missing required fields: {', '.join(missing)}")
     text = ctx.team_manager.create_teammate(
         inp["name"], inp["description"], inp["system_prompt"],
     )
@@ -186,19 +198,25 @@ def _handle_team_create(ctx: ToolContext, inp: dict) -> DispatchResult:
 def _handle_team_edit(ctx: ToolContext, inp: dict) -> DispatchResult:
     if ctx.team_manager is None:
         return DispatchResult(content="Unknown tool: team_edit")
+    name = inp.get("name", "")
+    if not name:
+        return DispatchResult(content="[error] 'name' is required for team_edit")
     updates: dict[str, str] = {}
     if "description" in inp:
         updates["description"] = inp["description"]
     if "system_prompt" in inp:
         updates["system_prompt"] = inp["system_prompt"]
-    text = ctx.team_manager.edit_teammate(inp["name"], **updates)
+    text = ctx.team_manager.edit_teammate(name, **updates)
     return DispatchResult(content=text)
 
 
 def _handle_team_delete(ctx: ToolContext, inp: dict) -> DispatchResult:
     if ctx.team_manager is None:
         return DispatchResult(content="Unknown tool: team_delete")
-    return DispatchResult(content=ctx.team_manager.delete_teammate(inp["name"]))
+    name = inp.get("name", "")
+    if not name:
+        return DispatchResult(content="[error] 'name' is required for team_delete")
+    return DispatchResult(content=ctx.team_manager.delete_teammate(name))
 
 
 def _handle_send(ctx: ToolContext, inp: dict) -> DispatchResult:
@@ -276,6 +294,9 @@ def _handle_task_submit(ctx: ToolContext, inp: dict) -> DispatchResult:
     """Subagent submits work for review: sync branch then set in_review."""
     if ctx.plan_manager is None:
         return DispatchResult(content="Unknown tool: task_submit")
+    missing = [k for k in ("story", "task_id") if k not in inp]
+    if missing:
+        return DispatchResult(content=f"[error] Missing required fields: {', '.join(missing)}")
 
     if ctx.worktree_manager is not None and ctx.worktree_manager.exists(ctx.caller):
         sync = ctx.worktree_manager.sync(ctx.caller)
@@ -306,6 +327,9 @@ def _handle_task_submit(ctx: ToolContext, inp: dict) -> DispatchResult:
 def _handle_claim_task(ctx: ToolContext, inp: dict) -> DispatchResult:
     if ctx.plan_manager is None:
         return DispatchResult(content="Unknown tool: claim_task")
+    missing = [k for k in ("story", "task_id") if k not in inp]
+    if missing:
+        return DispatchResult(content=f"[error] Missing required fields: {', '.join(missing)}")
     try:
         result = ctx.plan_manager.update(
             inp["story"],
@@ -333,6 +357,9 @@ def _handle_task_board_overview(ctx: ToolContext, _inp: dict) -> DispatchResult:
 def _handle_task_board_detail(ctx: ToolContext, inp: dict) -> DispatchResult:
     if ctx.plan_manager is None:
         return DispatchResult(content="Unknown tool: task_board_detail")
+    missing = [k for k in ("story", "task_id") if k not in inp]
+    if missing:
+        return DispatchResult(content=f"[error] Missing required fields: {', '.join(missing)}")
     text = ctx.plan_manager.format_task(inp["story"], inp["task_id"])
     return DispatchResult(content=text)
 

@@ -22,27 +22,25 @@ class Profiler:
     def __init__(self) -> None:
         self.enabled: bool = settings.profiler_enabled
         self._samples: list[Sample] = []
-        self._pending_label: str | None = None
-        self._t0: float = 0.0
+        self._stack: list[tuple[str, float]] = []
 
     def start(self, label: str) -> None:
         if not self.enabled:
             return
-        self._pending_label = label
-        self._t0 = time.perf_counter()
+        self._stack.append((label, time.perf_counter()))
 
     def stop(self, **metadata: object) -> float:
-        if not self.enabled or self._pending_label is None:
+        if not self.enabled or not self._stack:
             return 0.0
-        elapsed_ms = (time.perf_counter() - self._t0) * 1000
+        label, t0 = self._stack.pop()
+        elapsed_ms = (time.perf_counter() - t0) * 1000
         self._samples.append(
             Sample(
-                label=self._pending_label,
+                label=label,
                 elapsed_ms=elapsed_ms,
                 metadata=dict(metadata),
             )
         )
-        self._pending_label = None
         return elapsed_ms
 
     def record(self, label: str, elapsed_ms: float, **metadata: object) -> None:

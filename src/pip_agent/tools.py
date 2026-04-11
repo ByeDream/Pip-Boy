@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import logging
 import re
 import subprocess
 from pathlib import Path
 
 from pip_agent.config import settings
 
-WORKDIR = Path.cwd()
+log = logging.getLogger(__name__)
+
+WORKDIR: Path = Path.cwd()
 
 
 def safe_path(raw: str, *, workdir: Path | None = None) -> Path:
@@ -827,8 +830,8 @@ def run_web_search(tool_input: dict) -> str:
     if settings.search_api_key:
         try:
             return _search_tavily(query, max_results)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("Tavily search failed, falling back to DuckDuckGo: %s", exc)
     return _search_duckduckgo(query, max_results)
 
 

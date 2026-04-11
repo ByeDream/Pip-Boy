@@ -103,7 +103,8 @@ def _find_tool_name(messages: list[dict], tool_use_id: str) -> str:
     return "unknown"
 
 
-PRESERVE_RESULT_TOOLS = {"read", "task"}
+PRESERVE_RESULT_TOOLS = {"read"}
+PRESERVE_RESULT_PREFIXES = ("task_",)
 
 
 def estimate_tokens(messages: list[dict]) -> int:
@@ -147,7 +148,7 @@ def micro_compact(messages: list[dict], *, max_age: int | None = None) -> int:
             if isinstance(current, str) and current.startswith("[Previous:"):
                 continue
             tool_name = _find_tool_name(messages, block.get("tool_use_id", ""))
-            if tool_name in PRESERVE_RESULT_TOOLS:
+            if tool_name in PRESERVE_RESULT_TOOLS or tool_name.startswith(PRESERVE_RESULT_PREFIXES):
                 continue
             block["content"] = f"[Previous: used {tool_name}]"
             replaced += 1
