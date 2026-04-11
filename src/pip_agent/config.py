@@ -24,8 +24,6 @@ class Settings(BaseSettings):
     compact_threshold: int = Field(default=50_000)
     compact_micro_age: int = Field(default=3)
 
-    wechat_bot_token: str = Field(default="")
-
     wecom_bot_id: str = Field(default="")
     wecom_bot_secret: str = Field(default="")
 

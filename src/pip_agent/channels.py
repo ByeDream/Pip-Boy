@@ -77,12 +77,7 @@ class CLIChannel(Channel):
 # WeChatChannel — iLink Bot long-poll protocol
 # ---------------------------------------------------------------------------
 
-try:
-    import httpx as _httpx
-    _HAS_HTTPX = True
-except ImportError:
-    _httpx = None  # type: ignore[assignment]
-    _HAS_HTTPX = False
+import httpx as _httpx
 
 
 def _random_wechat_uin() -> str:
@@ -99,8 +94,6 @@ class WeChatChannel(Channel):
     MAX_TEXT_LEN = 2000
 
     def __init__(self, state_dir: Path) -> None:
-        if not _HAS_HTTPX:
-            raise RuntimeError("WeChatChannel requires httpx: pip install httpx")
         self._state_dir = state_dir
         self._state_dir.mkdir(parents=True, exist_ok=True)
         self._cred_path = state_dir / "wechat_session.json"

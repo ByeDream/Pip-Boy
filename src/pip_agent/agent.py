@@ -340,7 +340,7 @@ def _stdin_reader_thread(
                 queue.append(msg)
 
 
-def run() -> None:
+def run(mode: str = "auto") -> None:
     sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
     sys.stdin.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
 
@@ -396,13 +396,20 @@ def run() -> None:
 
     # WeChat iLink
     wechat_channel: WeChatChannel | None = None
-    if settings.wechat_bot_token:
+    if mode != "cli":
         try:
             wechat_channel = WeChatChannel(state_dir)
-            channel_mgr.register(wechat_channel)
-            if not wechat_channel.is_logged_in:
-                wechat_channel.login()
-            if wechat_channel.is_logged_in:
+            if mode == "scan":
+                wechat_channel._clear_creds()
+                if not wechat_channel.login():
+                    print("  [wechat] Login failed, falling back to CLI-only.")
+                    wechat_channel = None
+            elif not wechat_channel.is_logged_in:
+                if not wechat_channel.login():
+                    print("  [wechat] Login failed, falling back to CLI-only.")
+                    wechat_channel = None
+            if wechat_channel and wechat_channel.is_logged_in:
+                channel_mgr.register(wechat_channel)
                 t = threading.Thread(
                     target=wechat_poll_loop, daemon=True,
                     args=(wechat_channel, msg_queue, q_lock, stop_event),

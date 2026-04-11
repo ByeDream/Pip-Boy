@@ -16,12 +16,12 @@ dependencies = [
     "tavily-python>=0.5",
     "ddgs>=7",
     "pyyaml>=6,<7",
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
-wechat = ["httpx>=0.27"]
 wecom = ["wecom-aibot-python-sdk>=1.0"]
-channels = ["httpx>=0.27", "wecom-aibot-python-sdk>=1.0"]
+qrcode = ["qrcode>=7"]
 
 [project.urls]
 Repository = "https://github.com/ByeDream/Pip-Boy"
