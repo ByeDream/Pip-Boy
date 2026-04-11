@@ -18,8 +18,7 @@ def ensure_workspace(workdir: Path) -> None:
     _ensure_dirs(workdir)
     _ensure_agents_md(workdir)
     _ensure_copy(workdir / ".pip" / "models.json", "models.json")
-    _ensure_copy(workdir / ".env.example", "env.example")
-    _ensure_env(workdir)
+    _ensure_copy(workdir / ".env", "env.example")
     _ensure_gitignore(workdir)
     _check_git(workdir)
 
@@ -58,15 +57,6 @@ def _ensure_copy(target: Path, scaffold_name: str) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(_SCAFFOLD_DIR / scaffold_name, target)
     logger.info("Created %s", target)
-
-
-def _ensure_env(workdir: Path) -> None:
-    target = workdir / ".env"
-    if target.exists():
-        logger.debug("Already exists: %s", target)
-        return
-    shutil.copy2(_SCAFFOLD_DIR / "env.example", target)
-    logger.info("Created %s (edit this file to configure your API keys)", target)
 
 
 def _ensure_gitignore(workdir: Path) -> None:

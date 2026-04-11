@@ -1,4 +1,3 @@
 .pip/
 .env
 .env.*
-!.env.example

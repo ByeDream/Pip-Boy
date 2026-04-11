@@ -260,11 +260,11 @@ def run() -> None:
     messages: list[dict] = []
     profiler = Profiler()
     bg_manager = BackgroundTaskManager()
-    plan_manager = PlanManager(WORKDIR / settings.tasks_dir)
+    plan_manager = PlanManager(WORKDIR / ".pip" / "tasks")
     skill_registry = SkillRegistry(BUILTIN_SKILLS_DIR, USER_SKILLS_DIR)
 
     worktree_manager = WorktreeManager(WORKDIR)
-    transcripts_dir = WORKDIR / settings.transcripts_dir
+    transcripts_dir = WORKDIR / ".pip" / "transcripts"
     team_manager = TeamManager(
         BUILTIN_TEAM_DIR,
         USER_TEAM_DIR,

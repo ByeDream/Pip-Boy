@@ -102,8 +102,6 @@ All configuration is done via environment variables or `.env` file.
 | `SEARCH_API_KEY` | No | — | Tavily API key; falls back to DuckDuckGo |
 | `COMPACT_THRESHOLD` | No | `50000` | Token estimate to trigger auto-compaction |
 | `COMPACT_MICRO_AGE` | No | `3` | Micro-compaction: rounds of tool results to preserve |
-| `TRANSCRIPTS_DIR` | No | `.pip/transcripts` | Transcript storage path (relative to working dir) |
-| `TASKS_DIR` | No | `.pip/tasks` | Task storage path (relative to working dir) |
 | `VERBOSE` | No | `true` | Verbose output |
 | `PROFILER_ENABLED` | No | `false` | Enable performance profiling |
 

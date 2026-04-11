@@ -34,7 +34,6 @@ def test_fresh_init(tmp_path: Path) -> None:
     assert isinstance(data, list)
     assert any(m["id"] == "claude-sonnet-4-6" for m in data)
 
-    assert (tmp_path / ".env.example").exists()
     assert (tmp_path / ".env").exists()
 
     gitignore = tmp_path / ".gitignore"
