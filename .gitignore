@@ -45,3 +45,6 @@ htmlcov/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Pip-Boy
+.pip/wechat_session.json
