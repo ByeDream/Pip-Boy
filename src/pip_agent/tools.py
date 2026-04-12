@@ -557,6 +557,25 @@ CHECK_BACKGROUND_SCHEMA = {
     },
 }
 
+NOTIFY_USER_SCHEMA = {
+    "name": "notify_user",
+    "description": (
+        "Send a brief progress message to the user immediately, "
+        "without ending your turn. Use this during long multi-step "
+        "tasks to keep the user informed of what you are doing."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "text": {
+                "type": "string",
+                "description": "The progress message to send to the user.",
+            },
+        },
+        "required": ["text"],
+    },
+}
+
 COMPACT_SCHEMA = {
     "name": "compact",
     "description": (
@@ -695,7 +714,7 @@ _LEAD_ONLY = frozenset({
     "task_create", "task_update", "task_list", "task_remove",
     "team_spawn", "team_send", "team_status", "team_read_inbox",
     "team_list_models", "team_create", "team_edit", "team_delete",
-    "check_background", "compact",
+    "check_background", "compact", "notify_user",
 })
 
 _TEAMMATE_ONLY = frozenset({
@@ -886,6 +905,7 @@ ALL_TOOLS = [
     TEAM_CREATE_SCHEMA,
     TEAM_EDIT_SCHEMA,
     TEAM_DELETE_SCHEMA,
+    NOTIFY_USER_SCHEMA,
     COMPACT_SCHEMA,
     SEND_SCHEMA,
     READ_INBOX_SCHEMA,

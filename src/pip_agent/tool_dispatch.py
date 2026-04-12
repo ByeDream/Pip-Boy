@@ -19,6 +19,7 @@ from pip_agent.tools import (
 
 if TYPE_CHECKING:
     from pip_agent.background import BackgroundTaskManager
+    from pip_agent.channels import Channel
     from pip_agent.profiler import Profiler
     from pip_agent.skills import SkillRegistry
     from pip_agent.task_graph import PlanManager
@@ -54,6 +55,8 @@ class ToolContext:
     teammate: TeammateToolSurface | None = None
     caller: str = "lead"
     workdir: Path | None = None
+    channel: Channel | None = None
+    peer_id: str = ""
 
 
 def _handle_plan_tool(name: str, inputs: dict, pm: PlanManager) -> str:
@@ -348,6 +351,16 @@ def _handle_claim_task(ctx: ToolContext, inp: dict) -> DispatchResult:
     return DispatchResult(content=result, used_task_tool=True)
 
 
+def _handle_notify_user(ctx: ToolContext, inp: dict) -> DispatchResult:
+    text = inp.get("text", "")
+    if not text:
+        return DispatchResult(content="No text provided.")
+    if ctx.channel is None:
+        return DispatchResult(content="No channel available.")
+    ok = ctx.channel.send(ctx.peer_id, text)
+    return DispatchResult(content="Sent" if ok else "Send failed")
+
+
 def _handle_task_board_overview(ctx: ToolContext, _inp: dict) -> DispatchResult:
     if ctx.plan_manager is None:
         return DispatchResult(content="Unknown tool: task_board_overview")
@@ -386,6 +399,7 @@ _TOOL_REGISTRY: dict[str, Callable[[ToolContext, dict], DispatchResult]] = {
     "idle": _handle_idle,
     "task_submit": _handle_task_submit,
     "claim_task": _handle_claim_task,
+    "notify_user": _handle_notify_user,
     "task_board_overview": _handle_task_board_overview,
     "task_board_detail": _handle_task_board_detail,
     "read": lambda ctx, inp: DispatchResult(

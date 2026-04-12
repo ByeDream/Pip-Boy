@@ -11,6 +11,7 @@ import anthropic
 
 from pip_agent.background import BackgroundTaskManager
 from pip_agent.channels import (
+    Channel,
     ChannelManager,
     CLIChannel,
     InboundMessage,
@@ -84,6 +85,7 @@ _TOOL_KEY_PARAM: dict[str, str] = {
     "claim_task": "task_id",
     "task_board_overview": "",
     "task_board_detail": "task_id",
+    "notify_user": "text",
 }
 
 
@@ -111,6 +113,8 @@ def agent_loop(
     bg_manager: BackgroundTaskManager | None = None,
     team_manager: TeamManager | None = None,
     worktree_manager: WorktreeManager | None = None,
+    channel: Channel | None = None,
+    peer_id: str = "",
 ) -> str | None:
     """Run one agent turn.  Returns the final assistant text (if any)."""
     messages.append({"role": "user", "content": user_input})
@@ -210,6 +214,8 @@ def agent_loop(
                 bg_manager=bg_manager,
                 team_manager=team_manager,
                 worktree_manager=worktree_manager,
+                channel=channel,
+                peer_id=peer_id,
             )
             for block in assistant_content:
                 if settings.verbose and hasattr(block, "text"):
@@ -285,6 +291,8 @@ def _process_inbound(
         if isinstance(wc, WeChatChannel):
             wc.send_typing(inbound.peer_id)
 
+    ch = channel_mgr.get(inbound.channel)
+
     try:
         reply_text = agent_loop(
             client,
@@ -299,6 +307,8 @@ def _process_inbound(
             bg_manager=bg_manager,
             team_manager=team_manager,
             worktree_manager=worktree_manager,
+            channel=ch,
+            peer_id=inbound.peer_id,
         )
     except KeyboardInterrupt:
         print("\n  [interrupted] Returning to prompt.")
@@ -308,7 +318,6 @@ def _process_inbound(
         return
 
     if reply_text:
-        ch = channel_mgr.get(inbound.channel)
         if ch:
             if not ch.send(inbound.peer_id, reply_text):
                 print(f"  [warning] Failed to send reply via {inbound.channel}, "
@@ -620,6 +629,8 @@ def run(mode: str = "auto") -> None:
                     user_input,
                     profiler,
                     plan_manager,
+                    channel=cli_channel,
+                    peer_id="cli-user",
                     **common_kwargs,
                 )
             except KeyboardInterrupt:
