@@ -591,7 +591,12 @@ class WecomChannel(Channel):
             """Return (sender_id, peer_id, is_group, guild_id, chat_type)."""
             sender = body.get("from", {})
             if isinstance(sender, dict):
-                sender_id = sender.get("user_id", sender.get("open_id", ""))
+                sender_id = (
+                    sender.get("userid")
+                    or sender.get("user_id")
+                    or sender.get("open_id")
+                    or ""
+                )
             elif isinstance(sender, str):
                 sender_id = sender
             else:
