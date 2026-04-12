@@ -85,7 +85,6 @@ _TOOL_KEY_PARAM: dict[str, str] = {
     "claim_task": "task_id",
     "task_board_overview": "",
     "task_board_detail": "task_id",
-    "notify_user": "text",
 }
 
 
@@ -218,9 +217,12 @@ def agent_loop(
                 peer_id=peer_id,
             )
             for block in assistant_content:
-                if settings.verbose and hasattr(block, "text"):
-                    print()
-                    print(block.text)
+                if hasattr(block, "text") and block.text.strip():
+                    if settings.verbose:
+                        print()
+                        print(block.text)
+                    if channel and channel.name != "cli":
+                        channel.send(peer_id, block.text)
                 if block.type == "tool_use":
                     if settings.verbose:
                         print()

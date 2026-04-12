@@ -6,7 +6,6 @@
 - **Tasks** — Multi-step goals that need structured tracking and dependency management.
 - **Background tasks** — Long-running shell commands (builds, tests). Use `background: true` to avoid blocking.
 - **Agent Team** — Parallel work, specialized roles, or tasks too large for a single context.
-- **notify_user** — Communicate with the user mid-task during long multi-step operations.
 
 ## Worktree Boundaries
 
