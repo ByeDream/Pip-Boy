@@ -37,6 +37,43 @@ def _detect_image_mime(data: bytes) -> str:
     return "image/jpeg"
 
 
+def _parse_ilink_aes_key(raw: str) -> bytes:
+    """Decode an iLink AES key (3 possible formats) into 16 raw bytes."""
+    import binascii
+    if len(raw) == 32:
+        try:
+            return binascii.unhexlify(raw)
+        except ValueError:
+            pass
+    decoded = base64.b64decode(raw)
+    if len(decoded) == 16:
+        return decoded
+    # base64(hex-string) → hex string → bytes
+    try:
+        return binascii.unhexlify(decoded)
+    except (ValueError, binascii.Error):
+        return decoded[:16]
+
+
+def _aes_ecb_decrypt(data: bytes, key: bytes) -> bytes:
+    """AES-128-ECB decrypt with tolerant PKCS7 unpadding.
+
+    Follows hermes-agent strategy: return raw plaintext if padding is
+    malformed rather than raising, since some CDN blobs may lack proper
+    padding.
+    """
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    cipher = Cipher(algorithms.AES(key), modes.ECB())
+    decryptor = cipher.decryptor()
+    padded = decryptor.update(data) + decryptor.finalize()
+    if not padded:
+        return padded
+    pad_len = padded[-1]
+    if 1 <= pad_len <= 16 and padded.endswith(bytes([pad_len]) * pad_len):
+        return padded[:-pad_len]
+    return padded
+
+
 # ---------------------------------------------------------------------------
 # InboundMessage
 # ---------------------------------------------------------------------------
@@ -122,6 +159,7 @@ class WeChatChannel(Channel):
 
     name = "wechat"
     ILINK_BASE = "https://ilinkai.weixin.qq.com"
+    ILINK_CDN = "https://novac2c.cdn.weixin.qq.com/c2c"
     MAX_TEXT_LEN = 2000
 
     def __init__(self, state_dir: Path) -> None:
@@ -260,6 +298,80 @@ class WeChatChannel(Channel):
         print("  [wechat] QR login timed out (5 min).")
         return False
 
+    # -- CDN media download --
+
+    def _download_cdn_media(
+        self, media: dict, aeskey_fallback: str = "", timeout: float = 30.0,
+    ) -> bytes | None:
+        """Download + AES-128-ECB decrypt a CDN media blob.
+
+        Mirrors hermes-agent: tries ``encrypt_query_param`` first, falls back
+        to ``full_url``, and only decrypts when an AES key is available.
+        """
+        eqp = media.get("encrypt_query_param", "")
+        full_url = media.get("full_url", "")
+        if not eqp and not full_url:
+            return None
+        try:
+            if eqp:
+                resp = self._http.get(
+                    f"{self.ILINK_CDN}/download",
+                    params={"encrypted_query_param": eqp},
+                    timeout=timeout,
+                )
+            else:
+                resp = self._http.get(full_url, timeout=timeout)
+            resp.raise_for_status()
+            data = resp.content
+            raw_key = aeskey_fallback or media.get("aes_key", "")
+            if raw_key:
+                key = _parse_ilink_aes_key(raw_key)
+                data = _aes_ecb_decrypt(data, key)
+            return data
+        except Exception as exc:
+            log.warning("wechat CDN download/decrypt failed: %s", exc)
+            return None
+
+    def _collect_ilink_item(
+        self, item: dict, texts: list[str], atts: list[Attachment],
+    ) -> None:
+        """Extract text / image / voice / file from a single iLink item."""
+        itype = item.get("type")
+        if itype == 1:  # TEXT
+            t = (item.get("text_item") or {}).get("text", "")
+            if t:
+                texts.append(t)
+        elif itype == 2:  # IMAGE
+            img = item.get("image_item") or {}
+            media = img.get("media") or {}
+            img_data = self._download_cdn_media(media, img.get("aeskey", ""))
+            atts.append(Attachment(
+                type="image", data=img_data,
+                mime_type=_detect_image_mime(img_data) if img_data else "",
+                text="" if img_data else "[Image]",
+            ))
+        elif itype == 3:  # VOICE
+            voice = item.get("voice_item") or {}
+            asr = voice.get("text", "")
+            atts.append(Attachment(
+                type="voice",
+                text=asr if asr else "[Voice message]",
+            ))
+        elif itype == 4:  # FILE
+            fi = item.get("file_item") or {}
+            media = fi.get("media") or {}
+            file_data = self._download_cdn_media(media, timeout=60.0)
+            fname = fi.get("file_name", "file")
+            text_content = ""
+            if file_data:
+                try:
+                    text_content = file_data.decode("utf-8")
+                except (UnicodeDecodeError, ValueError):
+                    pass
+            atts.append(Attachment(
+                type="file", data=file_data, filename=fname, text=text_content,
+            ))
+
     # -- getupdates long-poll --
 
     def poll(self) -> list[InboundMessage]:
@@ -307,14 +419,15 @@ class WeChatChannel(Channel):
                 self._context_tokens[from_user] = ctx_token
 
             texts: list[str] = []
+            atts: list[Attachment] = []
             for item in msg.get("item_list", []):
-                if item.get("type") == 1:
-                    t = item.get("text_item", {}).get("text", "")
-                    if t:
-                        texts.append(t)
+                self._collect_ilink_item(item, texts, atts)
+                ref_item = (item.get("ref_msg") or {}).get("message_item")
+                if isinstance(ref_item, dict):
+                    self._collect_ilink_item(ref_item, [], atts)
 
             text = "\n".join(texts)
-            if not text:
+            if not text and not atts:
                 continue
 
             results.append(InboundMessage(
@@ -324,6 +437,7 @@ class WeChatChannel(Channel):
                 peer_id=from_user,
                 account_id=self._account_id,
                 raw=msg,
+                attachments=atts,
             ))
 
         return results
