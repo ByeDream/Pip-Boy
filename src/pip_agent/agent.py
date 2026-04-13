@@ -603,11 +603,12 @@ def run(mode: str = "auto") -> None:
             print(f"  [wecom] Init failed: {exc}")
 
     agents_list = ", ".join(a.id for a in registry.list_agents())
+    from pip_agent import __version__
     print(
         "============================================\n"
         "  ROBCO INDUSTRIES (TM) TERMLINK PROTOCOL\n"
         "  PIP-BOY 3000 MARK IV\n"
-        "  Personal Assistant Module v0.1.0\n"
+        f"  Personal Assistant Module v{__version__}\n"
         "============================================\n"
         "  Welcome, Vault Dweller. Type '/exit' to\n"
         "  power down.\n"

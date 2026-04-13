@@ -250,14 +250,11 @@ class WeChatChannel(Channel):
         print(f"  [wechat] Scan QR code with WeChat:")
         print(f"  {qrcode_url}")
 
-        try:
-            import qrcode as _qr
-            qr = _qr.QRCode(error_correction=_qr.constants.ERROR_CORRECT_L, box_size=1, border=1)
-            qr.add_data(qrcode_url)
-            qr.make(fit=True)
-            qr.print_ascii(invert=True)
-        except ImportError:
-            pass
+        import qrcode as _qr
+        qr = _qr.QRCode(error_correction=_qr.constants.ERROR_CORRECT_L, box_size=1, border=1)
+        qr.add_data(qrcode_url)
+        qr.make(fit=True)
+        qr.print_ascii(invert=True)
 
         deadline = time.time() + 300
         while time.time() < deadline:

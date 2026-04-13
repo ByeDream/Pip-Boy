@@ -40,7 +40,7 @@ This development philosophy values clear documentation, readable code, and belie
 - Use `src/pip_agent/` layout for all package source code (`pip_agent` to avoid collision with the Python package manager)
 - Tests go in `tests/` at the project root
 - Follow PEP 8; use type hints throughout
-- Keep dependencies in `pyproject.toml`; pin versions in `requirements.txt` for deployment
+- Keep dependencies in `pyproject.toml` (single source of truth); no separate `requirements.txt` in this repo
 - All configuration via environment variables or config files — never hardcoded
 - Communicate and write plans in Chinese, keeping technical terms in English
 - All code files and documentation for commits must be written in English

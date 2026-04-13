@@ -62,32 +62,67 @@ A personal assistant agent with persistent memory and a configurable persona, pr
 
 On first run in a new project, the agent automatically creates:
 - `.pip/` directory structure (tasks, transcripts, team, skills)
-- `AGENTS.md` with injected working guide (idempotent)
 - `.pip/models.json` with default model catalog
+- `.pip/agents/pip-boy.md` default agent persona
 - `.env` from template (if missing)
 - `.gitignore` entries for `.pip/` and related paths
+- `.pip/.scaffold_manifest.json` for tracking scaffold file versions
 
-## Quick Start
+Scaffold files are version-tracked: unmodified files are auto-updated when a new version ships changes; locally modified files are left untouched with a warning.
 
-**Prerequisites:** Python ≥ 3.11
+## Installation
+
+**Prerequisites:** Python >= 3.11
 
 ```bash
-# 1. Clone and install
-git clone https://github.com/ByeDream/Pip-Boy.git
-cd Pip-Boy
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1   # Windows PowerShell
-# source .venv/bin/activate    # macOS / Linux
-pip install -e .
-
-# 2. Navigate to your target project and run
-cd /path/to/your/project
-python -m pip_agent
+pip install pip-boy
 ```
 
-On first launch, the scaffold automatically creates `.pip/` directory structure, `.env` (from template), `AGENTS.md`, and `.gitignore` entries in the target project. Edit the generated `.env` to fill in your `ANTHROPIC_API_KEY`, then run again.
+### Development (from source)
+
+```bash
+git clone https://github.com/ByeDream/Pip-Boy.git
+cd Pip-Boy
+pip install -e .
+```
+
+## Usage
+
+```bash
+# Navigate to your target project and run
+cd /path/to/your/project
+pip-boy
+
+# Or use python -m
+python -m pip_agent
+
+# CLI-only mode (no WeChat/WeCom channels)
+pip-boy --cli
+
+# Force WeChat QR login
+pip-boy --scan
+
+# Show version
+pip-boy --version
+```
+
+On first launch, the scaffold automatically creates `.pip/` directory structure, `.env` (from template), and `.gitignore` entries in the target project. Edit the generated `.env` to fill in your `ANTHROPIC_API_KEY`, then run again.
 
 The agent uses `Path.cwd()` as its working directory — always run it from the project you want to interact with.
+
+### Updating
+
+From within a running session:
+
+```
+/update
+```
+
+Or manually:
+
+```bash
+pip install --upgrade pip-boy
+```
 
 ## Configuration
 
@@ -113,7 +148,6 @@ All configuration is done via environment variables or `.env` file.
 | `*.md` | `.pip/team/` | Teammate persona definitions (YAML frontmatter + body) |
 | `_meta.json` + `*.json` | `.pip/tasks/{story}/` | Task board state |
 | `*.md` | `.pip/skills/` | User-defined skills |
-| `AGENTS.md` | Project root | Project-specific instructions (auto-scaffolded) |
 
 ## Dependencies
 
@@ -122,6 +156,8 @@ All configuration is done via environment variables or `.env` file.
 - [`tavily-python`](https://github.com/tavily-ai/tavily-python) — Web search API
 - [`ddgs`](https://github.com/deedy5/duckduckgo_search) — DuckDuckGo fallback search
 - [`pyyaml`](https://github.com/yaml/pyyaml) — YAML parsing for skills and team files
+- [`httpx`](https://github.com/encode/httpx) — HTTP client for channel communication
+- [`qrcode`](https://github.com/lincolnloop/python-qrcode) — Terminal QR code rendering for WeChat login
 - [`pyreadline3`](https://github.com/pyreadline3/pyreadline3) — Readline for Windows
 
 ## License

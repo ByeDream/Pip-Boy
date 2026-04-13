@@ -6,7 +6,7 @@ receives the current message context and returns a response string
 (or None to signal no reply needed).
 
 All commands are flat (single-level):
-  /help, /bind, /name, /unbind, /clear, /status, /exit
+  /help, /bind, /name, /unbind, /clear, /status, /update, /exit
 """
 
 from __future__ import annotations
@@ -75,6 +75,7 @@ def dispatch_command(ctx: CommandContext) -> CommandResult:
         "/memory": _cmd_memory,
         "/axioms": _cmd_axioms,
         "/recall": _cmd_recall,
+        "/update": _cmd_update,
         "/exit": _cmd_exit,
     }
 
@@ -101,6 +102,7 @@ Available commands:
   /memory                        Show memory statistics for the current agent
   /axioms                        Show current judgment principles
   /recall <query>                Search through stored memories
+  /update                        Upgrade pip-boy to latest version and restart
   /exit                          Quit Pip-Boy (CLI only)
 
 /bind options:
@@ -425,6 +427,45 @@ def _cmd_recall(ctx: CommandContext, args: str) -> CommandResult:
         return CommandResult(handled=True, response="(no matching memories)")
     lines = [f"- {r.get('text', '')} (score: {r.get('score', 0)})" for r in results]
     return CommandResult(handled=True, response="\n".join(lines))
+
+
+# ---------------------------------------------------------------------------
+# /update
+# ---------------------------------------------------------------------------
+
+def _cmd_update(ctx: CommandContext, args: str) -> CommandResult:
+    """Upgrade pip-boy to the latest PyPI version and restart the process."""
+    import os
+    import subprocess
+    import sys
+
+    from pip_agent import __version__ as current_ver
+
+    print(f"  [system] Current version: v{current_ver}")
+    print("  [system] Checking for updates...")
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--upgrade", "pip-boy"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return CommandResult(
+            handled=True,
+            response=f"Update failed:\n{result.stderr.strip()}",
+        )
+
+    from importlib.metadata import version
+    new_ver = version("pip-boy")
+
+    if new_ver == current_ver:
+        return CommandResult(
+            handled=True,
+            response=f"Already at latest version (v{current_ver}).",
+        )
+
+    print(f"  [system] Updated to v{new_ver}. Restarting...")
+    os.execv(sys.executable, [sys.executable, "-m", "pip_agent"] + sys.argv[1:])
 
 
 # ---------------------------------------------------------------------------
