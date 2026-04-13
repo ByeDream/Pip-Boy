@@ -918,7 +918,10 @@ class WecomChannel(Channel):
 
     def close(self) -> None:
         if self._ws_client:
-            self._ws_client.disconnect()
+            try:
+                self._ws_client.disconnect()
+            except RuntimeError:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -941,7 +944,10 @@ class ChannelManager:
 
     def close_all(self) -> None:
         for ch in self.channels.values():
-            ch.close()
+            try:
+                ch.close()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
