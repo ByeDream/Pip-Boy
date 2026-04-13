@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -97,6 +98,9 @@ _TOOL_KEY_PARAM: dict[str, str] = {
     "memory_write": "content",
     "memory_search": "query",
 }
+
+
+_LEADING_AT_RE = re.compile(r"^@\S*\s*")
 
 
 def _tool_summary(name: str, inputs: dict) -> str:
@@ -357,7 +361,12 @@ def _process_inbound(
     if skill_registry and skill_registry.available:
         system_prompt += "\n\n" + skill_registry.catalog_prompt()
 
-    user_text = inbound.text if isinstance(inbound.text, str) else ""
+    clean_text = (
+        _LEADING_AT_RE.sub("", inbound.text, count=1)
+        if isinstance(inbound.text, str) else inbound.text
+    )
+
+    user_text = clean_text if isinstance(clean_text, str) else ""
     if memory_store:
         system_prompt = memory_store.enrich_prompt(
             system_prompt, user_text,
@@ -367,7 +376,7 @@ def _process_inbound(
             sender_id=inbound.sender_id,
         )
 
-    user_input: str | list = inbound.text
+    user_input: str | list = clean_text
 
     sender_status = "unverified"
     if memory_store and inbound.sender_id:
@@ -381,13 +390,13 @@ def _process_inbound(
     if inbound.is_group:
         user_input = (
             f'<group-message from="{inbound.sender_id}" status="{sender_status}">'
-            f"\n{inbound.text}\n</group-message>"
+            f"\n{clean_text}\n</group-message>"
         )
     elif inbound.sender_id:
         user_input = (
             f'<message from="{inbound.channel}:{inbound.sender_id}"'
             f' status="{sender_status}">'
-            f"\n{inbound.text}\n</message>"
+            f"\n{clean_text}\n</message>"
         )
 
     if inbound.attachments:
