@@ -123,42 +123,6 @@ class TestWeChatCredentials:
 
 
 # ---------------------------------------------------------------------------
-# WeChatChannel — text splitting
-# ---------------------------------------------------------------------------
-
-class TestWeChatTextSplit:
-    @pytest.fixture
-    def wechat(self, tmp_path):
-        return WeChatChannel(tmp_path / ".pip")
-
-    def test_short_text(self, wechat):
-        assert wechat._split_text("hello") == ["hello"]
-
-    def test_long_text_splits_on_double_newline(self, wechat):
-        part1 = "A" * 1800
-        part2 = "B" * 500
-        text = part1 + "\n\n" + part2
-        chunks = wechat._split_text(text)
-        assert len(chunks) == 2
-        assert chunks[0] == part1
-        assert chunks[1] == part2
-
-    def test_long_text_splits_on_newline(self, wechat):
-        part1 = "C" * 1900
-        part2 = "D" * 500
-        text = part1 + "\n" + part2
-        chunks = wechat._split_text(text)
-        assert len(chunks) == 2
-
-    def test_long_text_hard_split(self, wechat):
-        text = "X" * 4500
-        chunks = wechat._split_text(text)
-        assert len(chunks) == 3
-        assert all(len(c) <= 2000 for c in chunks)
-        assert "".join(chunks) == text
-
-
-# ---------------------------------------------------------------------------
 # WeChatChannel — getupdates parsing
 # ---------------------------------------------------------------------------
 

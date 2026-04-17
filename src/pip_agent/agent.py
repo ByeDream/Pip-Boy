@@ -21,6 +21,7 @@ from pip_agent.channels import (
     InboundMessage,
     WeChatChannel,
     WecomChannel,
+    send_with_retry,
     wechat_poll_loop,
     wecom_ws_loop,
 )
@@ -112,6 +113,7 @@ _TOOL_KEY_PARAM: dict[str, str] = {
 
 
 _LEADING_AT_RE = re.compile(r"^@\S*\s*")
+_CRON_JOB_ID_RE = re.compile(r'<cron_task\s+job_id="([^"]+)"')
 
 
 @dataclass
@@ -515,6 +517,13 @@ def _process_inbound(
     if inbound.is_group and inbound.guild_id:
         reply_peer = inbound.guild_id
 
+    cron_job_id: str | None = None
+    if inbound.sender_id == CRON_SENDER:
+        m = _CRON_JOB_ID_RE.search(inbound.text)
+        if m:
+            cron_job_id = m.group(1)
+
+    cron_ok = True
     try:
         reply_text = agent_loop(
             ctx,
@@ -535,10 +544,12 @@ def _process_inbound(
         )
     except KeyboardInterrupt:
         print("\n  [interrupted] Returning to prompt.")
-        return
+        cron_ok = False
+        reply_text = None
     except anthropic.APIError as exc:
         print(f"\n  [api_error] {exc}")
-        return
+        cron_ok = False
+        reply_text = None
 
     if reply_text:
         if inbound.sender_id == HEARTBEAT_SENDER and "HEARTBEAT_OK" in reply_text:
@@ -549,10 +560,16 @@ def _process_inbound(
                 reply_text = f"[heartbeat] {reply_text}"
             elif inbound.sender_id == CRON_SENDER:
                 reply_text = f"[cron] {reply_text}"
-            if not ch.send(reply_peer, reply_text):
+            if not send_with_retry(ch, reply_peer, reply_text):
                 print(f"  [warning] Failed to send reply via {inbound.channel}, "
                       f"printing to terminal instead:")
                 print(reply_text)
+                cron_ok = False
+
+    if cron_job_id and ctx.scheduler:
+        cron_svc = ctx.scheduler.get_cron_service()
+        if cron_svc:
+            cron_svc.report_outcome(cron_job_id, success=cron_ok)
 
     ctx.profiler.flush()
 
@@ -801,7 +818,7 @@ def run(mode: str = "auto") -> None:
                                 if inbound.is_group and inbound.guild_id
                                 else inbound.peer_id
                             )
-                            ok = ch.send(target, result.response)
+                            ok = send_with_retry(ch, target, result.response)
                             if settings.verbose:
                                 print(f"  [dispatch] send to={target!r} ok={ok}")
                     if result.exit_requested:

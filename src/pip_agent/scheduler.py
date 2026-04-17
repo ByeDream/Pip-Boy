@@ -445,6 +445,8 @@ class CronService(BackgroundJob):
             self.jobs.append(job)
 
     def _save_jobs(self) -> None:
+        from pip_agent.fileutil import atomic_write
+
         data = {
             "jobs": [
                 {
@@ -464,10 +466,7 @@ class CronService(BackgroundJob):
                 for j in self.jobs
             ],
         }
-        self.cron_file.parent.mkdir(parents=True, exist_ok=True)
-        self.cron_file.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8",
-        )
+        atomic_write(self.cron_file, json.dumps(data, indent=2, ensure_ascii=False))
 
     # -- scheduling --
 
@@ -535,7 +534,6 @@ class CronService(BackgroundJob):
         self._enqueue(job, msg)
 
         job.last_run_at = now
-        job.consecutive_errors = 0
         job.next_run_at = self._compute_next(job, now)
         self._save_jobs()
 
@@ -690,6 +688,31 @@ class CronService(BackgroundJob):
                 self._run_job(job, time.time())
                 return f"'{job.name}' enqueued"
         return f"[error] Job '{job_id}' not found"
+
+    def report_outcome(self, job_id: str, *, success: bool) -> None:
+        """Called after an enqueued cron message has been processed.
+
+        On success: reset consecutive_errors.
+        On failure: increment consecutive_errors; auto-disable if threshold
+        is reached.
+        """
+        for job in self.jobs:
+            if job.id != job_id:
+                continue
+            if success:
+                if job.consecutive_errors != 0:
+                    job.consecutive_errors = 0
+                    self._save_jobs()
+            else:
+                job.consecutive_errors += 1
+                if job.consecutive_errors >= CRON_AUTO_DISABLE_THRESHOLD:
+                    job.enabled = False
+                    log.warning(
+                        "Cron job '%s' auto-disabled after %d consecutive errors",
+                        job.name, job.consecutive_errors,
+                    )
+                self._save_jobs()
+            return
 
 
 # ---------------------------------------------------------------------------

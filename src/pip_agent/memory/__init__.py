@@ -56,12 +56,11 @@ class MemoryStore:
                 return {}
 
     def save_state(self, state: dict[str, Any]) -> None:
+        from pip_agent.fileutil import atomic_write
+
         with self._io_lock:
             path = self.agent_dir / "state.json"
-            path.write_text(
-                json.dumps(state, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
+            atomic_write(path, json.dumps(state, indent=2, ensure_ascii=False))
 
     # ------------------------------------------------------------------
     # Observations (L1)
@@ -122,11 +121,12 @@ class MemoryStore:
             return []
 
     def save_memories(self, memories: list[Memory]) -> None:
+        from pip_agent.fileutil import atomic_write
+
         with self._io_lock:
             path = self.agent_dir / "memories.json"
-            path.write_text(
-                json.dumps(memories, indent=2, ensure_ascii=False, default=str),
-                encoding="utf-8",
+            atomic_write(
+                path, json.dumps(memories, indent=2, ensure_ascii=False, default=str),
             )
 
     # ------------------------------------------------------------------
@@ -143,9 +143,11 @@ class MemoryStore:
             return ""
 
     def save_axioms(self, text: str) -> None:
+        from pip_agent.fileutil import atomic_write
+
         with self._io_lock:
             path = self.agent_dir / "axioms.md"
-            path.write_text(text, encoding="utf-8")
+            atomic_write(path, text)
 
     # ------------------------------------------------------------------
     # User profiles (owner.md read-only + users/*.md tool-managed)

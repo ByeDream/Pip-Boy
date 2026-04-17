@@ -131,6 +131,45 @@ class Channel(ABC):
 
 
 # ---------------------------------------------------------------------------
+# send_with_retry — retry + backoff wrapper for Channel.send
+# ---------------------------------------------------------------------------
+
+BACKOFF_SCHEDULE = [2.0, 5.0, 15.0]  # seconds per retry attempt
+
+
+def send_with_retry(ch: Channel, to: str, text: str) -> bool:
+    """Chunk *text* per channel limits, then send each chunk with retries.
+
+    Returns True only if every chunk was delivered.  CLI channels skip
+    chunking and retry (stdout never fails).
+    """
+    if ch.name == "cli":
+        return ch.send(to, text)
+
+    from pip_agent.fileutil import chunk_message
+
+    chunks = chunk_message(text, ch.name)
+    all_ok = True
+    for chunk in chunks:
+        ok = ch.send(to, chunk)
+        if ok:
+            continue
+        for delay in BACKOFF_SCHEDULE:
+            jitter = delay * 0.2 * (random.random() - 0.5)
+            time.sleep(delay + jitter)
+            ok = ch.send(to, chunk)
+            if ok:
+                break
+        if not ok:
+            all_ok = False
+            log.warning(
+                "send_with_retry: gave up after %d retries to %s on %s",
+                len(BACKOFF_SCHEDULE), to, ch.name,
+            )
+    return all_ok
+
+
+# ---------------------------------------------------------------------------
 # CLIChannel
 # ---------------------------------------------------------------------------
 
@@ -160,7 +199,6 @@ class WeChatChannel(Channel):
     name = "wechat"
     ILINK_BASE = "https://ilinkai.weixin.qq.com"
     ILINK_CDN = "https://novac2c.cdn.weixin.qq.com/c2c"
-    MAX_TEXT_LEN = 2000
 
     def __init__(self, state_dir: Path) -> None:
         import httpx
@@ -448,13 +486,15 @@ class WeChatChannel(Channel):
         return bool(self._context_tokens.get(peer_id))
 
     def send(self, to: str, text: str, **kw: Any) -> bool:
+        from pip_agent.fileutil import chunk_message
+
         ctx_token = self._context_tokens.get(to, "")
         if not ctx_token:
             print(f"  [wechat] Cannot reply to {to}: no context_token")
             return False
 
         ok = True
-        for chunk in self._split_text(text):
+        for chunk in chunk_message(text, "wechat"):
             client_id = f"pip:{int(time.time()*1000)}-{uuid.uuid4().hex[:8]}"
             body = {
                 "msg": {
@@ -499,25 +539,6 @@ class WeChatChannel(Channel):
             )
         except Exception as exc:
             log.debug("wechat: send_typing failed: %s", exc)
-
-    def _split_text(self, text: str) -> list[str]:
-        if len(text) <= self.MAX_TEXT_LEN:
-            return [text]
-        chunks: list[str] = []
-        while text:
-            if len(text) <= self.MAX_TEXT_LEN:
-                chunks.append(text)
-                break
-            cut = text.rfind("\n\n", 0, self.MAX_TEXT_LEN)
-            if cut <= 0:
-                cut = text.rfind("\n", 0, self.MAX_TEXT_LEN)
-            if cut <= 0:
-                cut = text.rfind(" ", 0, self.MAX_TEXT_LEN)
-            if cut <= 0:
-                cut = self.MAX_TEXT_LEN
-            chunks.append(text[:cut])
-            text = text[cut:].lstrip("\n")
-        return chunks
 
     def close(self) -> None:
         self._closing = True
@@ -910,17 +931,21 @@ class WecomChannel(Channel):
 
     def _send_proactive(self, to: str, text: str) -> bool:
         """Fallback: proactive push via send_message (markdown)."""
+        from pip_agent.fileutil import chunk_message
+
         if not self._ws_client:
             return False
-        try:
-            self._run_async(self._ws_client.send_message(to, {
-                "msgtype": "markdown",
-                "markdown": {"content": text},
-            }))
-        except Exception as exc:
-            log.warning("wecom send_message error: %s", exc)
-            return False
-        return True
+        ok = True
+        for chunk in chunk_message(text, "wecom"):
+            try:
+                self._run_async(self._ws_client.send_message(to, {
+                    "msgtype": "markdown",
+                    "markdown": {"content": chunk},
+                }))
+            except Exception as exc:
+                log.warning("wecom send_message error: %s", exc)
+                ok = False
+        return ok
 
     def close(self) -> None:
         if self._ws_client:
