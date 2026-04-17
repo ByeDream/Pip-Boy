@@ -34,6 +34,7 @@ from pip_agent.compact import (
     save_transcript,
 )
 from pip_agent.config import settings
+from pip_agent.lanes import CommandQueue
 from pip_agent.memory import MemoryStore
 from pip_agent.profiler import Profiler
 from pip_agent.resilience import (
@@ -135,7 +136,7 @@ class RuntimeContext:
     bg_manager: BackgroundTaskManager | None = None
     memory_store: MemoryStore | None = None
     scheduler: BackgroundScheduler | None = None
-    lane_lock: threading.Lock | None = None
+    command_queue: CommandQueue | None = None
     runner: ResilienceRunner | None = None
     sim_failure: SimulatedFailure | None = None
 
@@ -319,7 +320,7 @@ def agent_loop(
                         print()
                         print(block.text)
                     if channel and channel.name != "cli":
-                        channel.send(peer_id, block.text)
+                        send_with_retry(channel, peer_id, block.text)
                 if block.type == "tool_use":
                     if settings.verbose:
                         print()
@@ -372,6 +373,43 @@ def agent_loop(
         save_transcript(messages, transcripts_dir)
 
     return final_text
+
+
+def _lane_for_inbound(
+    inbound: InboundMessage,
+    registry: AgentRegistry,
+    binding_table: BindingTable,
+) -> str:
+    """Compute the lane name used to route ``inbound`` through ``CommandQueue``.
+
+    Lane names match the session-key scheme used inside :func:`_process_inbound`,
+    so all messages for a given (agent, peer) session land in the same lane
+    and are serialized in FIFO order. Different sessions run in parallel.
+    """
+    agent_id, binding = binding_table.resolve(
+        channel=inbound.channel,
+        account_id=inbound.account_id,
+        guild_id=inbound.guild_id,
+        peer_id=inbound.peer_id,
+    )
+    if not agent_id:
+        agent_id = registry.default_agent().id
+
+    agent_cfg = registry.get_agent(agent_id) or registry.default_agent()
+    effective = resolve_effective_config(agent_cfg, binding)
+
+    if inbound.sender_id in _BG_SENDERS:
+        return f"bg:{inbound.sender_id}:{effective.id}"
+
+    session_key = build_session_key(
+        agent_id=effective.id,
+        channel=inbound.channel,
+        peer_id=inbound.peer_id,
+        guild_id=inbound.guild_id,
+        is_group=inbound.is_group,
+        dm_scope=effective.effective_dm_scope,
+    )
+    return f"main:{session_key}"
 
 
 def _process_inbound(
@@ -718,13 +756,13 @@ def run(mode: str = "auto") -> None:
     channel_mgr.register(cli_channel)
 
     stop_event = threading.Event()
-    lane_lock = threading.Lock()
+    command_queue = CommandQueue()
     msg_queue: list[InboundMessage] = []
     q_lock = threading.Lock()
     bg_threads: list[threading.Thread] = []
     has_remote_channels = False
 
-    bg_scheduler = BackgroundScheduler(lane_lock, stop_event)
+    bg_scheduler = BackgroundScheduler(command_queue, stop_event)
     bg_scheduler.register(ReflectJob(
         memory_store, client, transcripts_dir,
         model=default_agent.effective_model,
@@ -823,7 +861,7 @@ def run(mode: str = "auto") -> None:
         bg_manager=bg_manager,
         memory_store=memory_store,
         scheduler=bg_scheduler,
-        lane_lock=lane_lock,
+        command_queue=command_queue,
         runner=runner,
         sim_failure=sim_failure,
     )
@@ -863,6 +901,7 @@ def run(mode: str = "auto") -> None:
                     workdir=str(WORKDIR),
                     memory_store=memory_store,
                     scheduler=bg_scheduler,
+                    command_queue=command_queue,
                     runner=runner,
                     sim_failure=sim_failure,
                 )
@@ -885,18 +924,18 @@ def run(mode: str = "auto") -> None:
                         stop_event.set()
                     continue
 
-                # -- Background messages (heartbeat/cron): process immediately --
+                # -- Background messages (heartbeat/cron): enqueue to bg lane --
                 if inbound.sender_id in _BG_SENDERS:
                     if settings.verbose:
-                        print(f"  [{inbound.sender_id}] processing")
-                    lane_lock.acquire()
-                    try:
-                        _process_inbound(
-                            inbound, conversations, channel_mgr, rt_ctx,
+                        print(f"  [{inbound.sender_id}] dispatching")
+                    bg_lane = _lane_for_inbound(inbound, registry, binding_table)
+                    command_queue.enqueue(
+                        bg_lane,
+                        (lambda m=inbound: _process_inbound(
+                            m, conversations, channel_mgr, rt_ctx,
                             plan_managers, **common_kwargs,
-                        )
-                    finally:
-                        lane_lock.release()
+                        )),
+                    )
                     continue
 
                 # -- Legacy CLI-only commands --
@@ -919,14 +958,14 @@ def run(mode: str = "auto") -> None:
                     if settings.verbose:
                         print(f"\n  [cli] {inbound.text[:80]}")
 
-                    lane_lock.acquire()
-                    try:
-                        _process_inbound(
-                            inbound, conversations, channel_mgr, rt_ctx,
+                    cli_lane = _lane_for_inbound(inbound, registry, binding_table)
+                    command_queue.enqueue(
+                        cli_lane,
+                        (lambda m=inbound: _process_inbound(
+                            m, conversations, channel_mgr, rt_ctx,
                             plan_managers, **common_kwargs,
-                        )
-                    finally:
-                        lane_lock.release()
+                        )),
+                    )
                 else:
                     buf_key = f"{inbound.channel}:{inbound.guild_id or inbound.peer_id}"
                     remote_buffers.setdefault(buf_key, []).append(inbound)
@@ -947,32 +986,32 @@ def run(mode: str = "auto") -> None:
                 ready.append(sk)
 
             if ready:
-                lane_lock.acquire()
-                try:
-                    for sk in ready:
-                        msgs = remote_buffers[sk]
-                        remote_buffers[sk] = []
-                        first = msgs[0]
+                for sk in ready:
+                    msgs = remote_buffers[sk]
+                    remote_buffers[sk] = []
+                    first = msgs[0]
 
-                        all_atts: list[Attachment] = []
-                        for m in msgs:
-                            all_atts.extend(m.attachments)
-                        combined = InboundMessage(
-                            text="\n".join(m.text for m in msgs if m.text),
-                            sender_id=first.sender_id,
-                            channel=first.channel,
-                            peer_id=first.peer_id,
-                            guild_id=first.guild_id,
-                            account_id=first.account_id,
-                            is_group=first.is_group,
-                            attachments=all_atts,
-                        )
-                        _process_inbound(
-                            combined, conversations, channel_mgr, rt_ctx,
+                    all_atts: list[Attachment] = []
+                    for m in msgs:
+                        all_atts.extend(m.attachments)
+                    combined = InboundMessage(
+                        text="\n".join(m.text for m in msgs if m.text),
+                        sender_id=first.sender_id,
+                        channel=first.channel,
+                        peer_id=first.peer_id,
+                        guild_id=first.guild_id,
+                        account_id=first.account_id,
+                        is_group=first.is_group,
+                        attachments=all_atts,
+                    )
+                    remote_lane = _lane_for_inbound(combined, registry, binding_table)
+                    command_queue.enqueue(
+                        remote_lane,
+                        (lambda c=combined: _process_inbound(
+                            c, conversations, channel_mgr, rt_ctx,
                             plan_managers, **common_kwargs,
-                        )
-                finally:
-                    lane_lock.release()
+                        )),
+                    )
 
             # drain scheduler output
             for out_msg in bg_scheduler.drain_output():
@@ -1052,6 +1091,7 @@ def run(mode: str = "auto") -> None:
                     workdir=str(WORKDIR),
                     memory_store=memory_store,
                     scheduler=bg_scheduler,
+                    command_queue=command_queue,
                     runner=runner,
                     sim_failure=sim_failure,
                 )
@@ -1087,14 +1127,27 @@ def run(mode: str = "auto") -> None:
                 sender_id="cli-user",
             )
 
-            lane_lock.acquire()
-            try:
-                reply_text = agent_loop(
+            # CLI-only mode preserves a synchronous REPL: enqueue onto the
+            # CLI session lane, then wait for the result. Background lanes
+            # (heartbeat / reflect / ...) still run in parallel while we
+            # block here.
+            cli_lane = (
+                "main:"
+                + build_session_key(
+                    agent_id=default_agent.id,
+                    channel="cli",
+                    peer_id="cli-user",
+                    dm_scope=default_agent.effective_dm_scope,
+                )
+            )
+
+            def _run_cli_turn(_input: str = user_input, _prompt: str = cli_system_prompt) -> str | None:
+                return agent_loop(
                     rt_ctx,
                     messages,
-                    user_input,
+                    _input,
                     plan_manager,
-                    system_prompt=cli_system_prompt,
+                    system_prompt=_prompt,
                     model=default_agent.effective_model,
                     max_tokens=default_agent.effective_max_tokens,
                     compact_threshold=default_agent.effective_compact_threshold,
@@ -1107,6 +1160,10 @@ def run(mode: str = "auto") -> None:
                     team_manager=default_tm,
                     worktree_manager=default_wm,
                 )
+
+            cli_future = command_queue.enqueue(cli_lane, _run_cli_turn)
+            try:
+                reply_text = cli_future.result()
             except KeyboardInterrupt:
                 print("\n  [interrupted] Returning to prompt.")
                 continue
@@ -1116,8 +1173,6 @@ def run(mode: str = "auto") -> None:
             except anthropic.APIError as exc:
                 print(f"\n  [api_error] {exc}")
                 continue
-            finally:
-                lane_lock.release()
 
             if reply_text:
                 cli_channel.send("cli-user", reply_text)
@@ -1128,19 +1183,21 @@ def run(mode: str = "auto") -> None:
                     print(f"  [scheduler] {out_msg[:120]}")
                 cli_channel.send("cli-user", out_msg)
 
-            # process background messages queued by HeartbeatJob / CronService
+            # dispatch background messages queued by HeartbeatJob / CronService
+            # to their own lanes; they run concurrently with the next user
+            # input rather than blocking the REPL.
             with q_lock:
                 bg_batch = [m for m in msg_queue if m.sender_id in _BG_SENDERS]
                 msg_queue[:] = [m for m in msg_queue if m.sender_id not in _BG_SENDERS]
             for bg_msg in bg_batch:
-                lane_lock.acquire()
-                try:
-                    _process_inbound(
-                        bg_msg, conversations, channel_mgr, rt_ctx,
+                bg_lane = _lane_for_inbound(bg_msg, registry, binding_table)
+                command_queue.enqueue(
+                    bg_lane,
+                    (lambda m=bg_msg: _process_inbound(
+                        m, conversations, channel_mgr, rt_ctx,
                         plan_managers, **common_kwargs,
-                    )
-                finally:
-                    lane_lock.release()
+                    )),
+                )
 
             while bg_manager.has_pending():
                 if settings.verbose:

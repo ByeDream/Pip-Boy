@@ -30,6 +30,7 @@ from pip_agent.routing import (
 )
 
 if TYPE_CHECKING:
+    from pip_agent.lanes import CommandQueue
     from pip_agent.memory import MemoryStore
     from pip_agent.resilience import ResilienceRunner, SimulatedFailure
 
@@ -43,6 +44,7 @@ class CommandContext:
     workdir: str = ""
     memory_store: MemoryStore | None = None
     scheduler: Any | None = None
+    command_queue: CommandQueue | None = None
     runner: ResilienceRunner | None = None
     sim_failure: SimulatedFailure | None = None
 
@@ -83,6 +85,7 @@ def dispatch_command(ctx: CommandContext) -> CommandResult:
         "/update": _cmd_update,
         "/exit": _cmd_exit,
         "/scheduler": _cmd_scheduler,
+        "/lanes": _cmd_lanes,
         "/heartbeat": _cmd_heartbeat,
         "/trigger": _cmd_trigger,
         "/cron": _cmd_cron,
@@ -137,6 +140,7 @@ Available commands (require admin or owner privileges):
   /recall <query>                Search through stored memories
   /admin grant|revoke|list       Manage admin privileges (owner only)
   /scheduler                     Show background scheduler status
+  /lanes                         Show per-lane queue stats
   /heartbeat                     Show heartbeat status and configuration
   /trigger                       Manually fire the heartbeat now
   /cron                          List all scheduled cron jobs
@@ -591,9 +595,37 @@ def _cmd_scheduler(ctx: CommandContext, _args: str) -> CommandResult:
         "**Scheduler Status**",
         f"  Running: {info['running']}",
         f"  Jobs: {info['job_count']} ({', '.join(info['jobs'])})",
-        f"  Lane lock held: {info['lane_lock_held']}",
         f"  Tick interval: {info['tick_interval']}",
     ]
+    lane_stats = info.get("lanes") or {}
+    if lane_stats:
+        lines.append("  Lanes:")
+        for name, st in lane_stats.items():
+            lines.append(
+                f"    {name}: active={st['active']}/{st['max_concurrency']} "
+                f"queued={st['queue_depth']}"
+            )
+    return CommandResult(handled=True, response="\n".join(lines))
+
+
+def _cmd_lanes(ctx: CommandContext, _args: str) -> CommandResult:
+    cq = ctx.command_queue
+    if cq is None and ctx.scheduler is not None:
+        cq = getattr(ctx.scheduler, "command_queue", None)
+    if cq is None:
+        return CommandResult(handled=True, response="No command queue available.")
+
+    snapshot = cq.stats()
+    if not snapshot:
+        return CommandResult(handled=True, response="No lanes registered yet.")
+
+    lines = ["**Lane Queue Stats**"]
+    for name in sorted(snapshot.keys()):
+        st = snapshot[name]
+        lines.append(
+            f"  {name}: active={st['active']}/{st['max_concurrency']} "
+            f"queued={st['queue_depth']}"
+        )
     return CommandResult(handled=True, response="\n".join(lines))
 
 

@@ -1,8 +1,10 @@
 """Unified background scheduler for all periodic tasks.
 
-Manages reflect, dream, heartbeat, and user-defined cron jobs in a single
-daemon thread.  A lane lock ensures user messages always take priority
-over background LLM calls.
+Manages reflect, dream, heartbeat, and user-defined cron jobs. Each job is
+routed to a named lane in a shared :class:`CommandQueue`; lanes run
+independently so jobs never starve each other. The scheduler itself only
+polls for due jobs and dispatches them; actual execution happens on lane
+worker threads.
 """
 
 from __future__ import annotations
@@ -18,6 +20,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from pip_agent.lanes import CommandQueue
+
 if TYPE_CHECKING:
     import anthropic
 
@@ -27,6 +31,12 @@ log = logging.getLogger(__name__)
 
 TICK_INTERVAL = 10
 CRON_AUTO_DISABLE_THRESHOLD = 5
+
+# Standard lane names used by built-in background jobs.
+LANE_REFLECT = "reflect"
+LANE_DREAM = "dream"
+LANE_HEARTBEAT = "heartbeat"
+LANE_CRON = "cron"
 
 _ID_RE = re.compile(r"[^a-z0-9_-]+")
 
@@ -40,10 +50,15 @@ def _slug(name: str) -> str:
 # ---------------------------------------------------------------------------
 
 class BackgroundJob(ABC):
-    """Base class for all scheduler jobs."""
+    """Base class for all scheduler jobs.
+
+    ``lane_name`` selects which :class:`~pip_agent.lanes.LaneQueue` the job
+    runs on. Jobs on different lanes run in parallel; jobs on the same lane
+    are serialized in FIFO order.
+    """
 
     name: str = "job"
-    needs_lane_lock: bool = False
+    lane_name: str = "default"
 
     @abstractmethod
     def should_run(self, now: float) -> tuple[bool, str]:
@@ -61,7 +76,7 @@ class BackgroundJob(ABC):
 
 class ReflectJob(BackgroundJob):
     name = "reflect"
-    needs_lane_lock = True
+    lane_name = LANE_REFLECT
 
     def __init__(
         self,
@@ -170,7 +185,7 @@ class ReflectJob(BackgroundJob):
 
 class DreamJob(BackgroundJob):
     name = "dream"
-    needs_lane_lock = True
+    lane_name = LANE_DREAM
 
     def __init__(
         self,
@@ -256,7 +271,7 @@ class HeartbeatJob(BackgroundJob):
     """
 
     name = "heartbeat"
-    needs_lane_lock = False  # no direct LLM call; main loop handles locking
+    lane_name = LANE_HEARTBEAT
 
     def __init__(
         self,
@@ -394,7 +409,7 @@ class CronService(BackgroundJob):
     """
 
     name = "cron"
-    needs_lane_lock = False  # enqueues messages; main loop handles locking
+    lane_name = LANE_CRON
 
     def __init__(
         self,
@@ -722,14 +737,21 @@ class CronService(BackgroundJob):
 # ---------------------------------------------------------------------------
 
 class BackgroundScheduler:
-    """Single daemon thread running all background jobs with lane-lock priority."""
+    """Polls registered jobs and dispatches due work to lane queues.
+
+    The scheduler runs a single daemon thread that wakes every
+    :data:`TICK_INTERVAL` seconds. For each due job, it checks whether the
+    job's lane is busy and, if not, enqueues the job's ``execute`` callable
+    into that lane. Actual work runs on the lane's own worker thread, so
+    slow jobs never block ``_tick`` or other lanes.
+    """
 
     def __init__(
         self,
-        lane_lock: threading.Lock,
+        command_queue: CommandQueue,
         stop_event: threading.Event,
     ) -> None:
-        self.lane_lock = lane_lock
+        self.command_queue = command_queue
         self.stop_event = stop_event
         self._jobs: list[BackgroundJob] = []
         self._output_queue: list[str] = []
@@ -738,6 +760,8 @@ class BackgroundScheduler:
 
     def register(self, job: BackgroundJob) -> None:
         self._jobs.append(job)
+        # Pre-create the lane so stats() shows it even before first dispatch.
+        self.command_queue.get_or_create_lane(job.lane_name)
 
     def start(self) -> None:
         if self._thread is not None:
@@ -769,24 +793,32 @@ class BackgroundScheduler:
             if self.stop_event.is_set():
                 break
             try:
-                ok, reason = job.should_run(now)
+                ok, _reason = job.should_run(now)
             except Exception:
                 log.exception("should_run error for %s", job.name)
                 continue
             if not ok:
                 continue
 
-            if job.needs_lane_lock:
-                acquired = self.lane_lock.acquire(blocking=False)
-                if not acquired:
-                    log.debug("Lane lock held, skipping %s", job.name)
-                    continue
-                try:
-                    job.execute(now, self._output_queue, self._queue_lock)
-                finally:
-                    self.lane_lock.release()
-            else:
+            if self.command_queue.lane_busy(job.lane_name):
+                log.debug("Lane '%s' busy, skipping %s", job.lane_name, job.name)
+                continue
+
+            self._dispatch(job, now)
+
+    def _dispatch(self, job: BackgroundJob, now: float) -> None:
+        """Enqueue ``job.execute`` into its lane. Errors are logged, not raised."""
+
+        def _run() -> None:
+            try:
                 job.execute(now, self._output_queue, self._queue_lock)
+            except Exception:
+                log.exception("Job '%s' execute error", job.name)
+
+        try:
+            self.command_queue.enqueue(job.lane_name, _run)
+        except Exception:
+            log.exception("Failed to enqueue job '%s' on lane '%s'", job.name, job.lane_name)
 
     # -- public API for CLI / tools --
 
@@ -797,14 +829,12 @@ class BackgroundScheduler:
             return items
 
     def status(self) -> dict[str, Any]:
-        locked = not self.lane_lock.acquire(blocking=False)
-        if not locked:
-            self.lane_lock.release()
+        lane_stats = self.command_queue.stats()
         return {
             "running": self._thread is not None and self._thread.is_alive(),
             "job_count": len(self._jobs),
             "jobs": [j.name for j in self._jobs],
-            "lane_lock_held": locked,
+            "lanes": lane_stats,
             "tick_interval": f"{TICK_INTERVAL}s",
         }
 

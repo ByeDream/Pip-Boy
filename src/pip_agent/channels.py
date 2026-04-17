@@ -111,6 +111,22 @@ class InboundMessage:
 class Channel(ABC):
     name: str = "unknown"
 
+    @property
+    def send_lock(self) -> threading.Lock:
+        """Per-instance lock that serializes outbound writes.
+
+        Multiple lanes may call ``send`` concurrently once agent turns run
+        in parallel. Chunked messages must not interleave on the wire, and
+        underlying async / HTTP clients are not universally thread-safe,
+        so every network-facing send should hold this lock.
+        """
+        lk = getattr(self, "_send_lock", None)
+        if lk is None:
+            lk = threading.Lock()
+            # object.__setattr__ so dataclass-like subclasses still work.
+            object.__setattr__(self, "_send_lock", lk)
+        return lk
+
     @abstractmethod
     def send(self, to: str, text: str, **kw: Any) -> bool:
         ...
@@ -141,31 +157,35 @@ def send_with_retry(ch: Channel, to: str, text: str) -> bool:
     """Chunk *text* per channel limits, then send each chunk with retries.
 
     Returns True only if every chunk was delivered.  CLI channels skip
-    chunking and retry (stdout never fails).
+    chunking and retry (stdout never fails). Holds ``ch.send_lock`` so that
+    concurrent callers (one per lane) never interleave chunks or trigger
+    races inside the underlying HTTP / WebSocket client.
     """
     if ch.name == "cli":
-        return ch.send(to, text)
+        with ch.send_lock:
+            return ch.send(to, text)
 
     from pip_agent.fileutil import chunk_message
 
     chunks = chunk_message(text, ch.name)
     all_ok = True
-    for chunk in chunks:
-        ok = ch.send(to, chunk)
-        if ok:
-            continue
-        for delay in BACKOFF_SCHEDULE:
-            jitter = delay * 0.2 * (random.random() - 0.5)
-            time.sleep(delay + jitter)
+    with ch.send_lock:
+        for chunk in chunks:
             ok = ch.send(to, chunk)
             if ok:
-                break
-        if not ok:
-            all_ok = False
-            log.warning(
-                "send_with_retry: gave up after %d retries to %s on %s",
-                len(BACKOFF_SCHEDULE), to, ch.name,
-            )
+                continue
+            for delay in BACKOFF_SCHEDULE:
+                jitter = delay * 0.2 * (random.random() - 0.5)
+                time.sleep(delay + jitter)
+                ok = ch.send(to, chunk)
+                if ok:
+                    break
+            if not ok:
+                all_ok = False
+                log.warning(
+                    "send_with_retry: gave up after %d retries to %s on %s",
+                    len(BACKOFF_SCHEDULE), to, ch.name,
+                )
     return all_ok
 
 
