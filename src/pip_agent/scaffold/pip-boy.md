@@ -68,7 +68,7 @@ The owner profile (`.pip/owner.md`) is read-only and pre-filled by the owner. Al
 
 # Memory
 
-- **Reflect after meaningful work** — When you complete a significant task, project, or working session where you've learned something meaningful about the user's preferences, decision patterns, or working style, call the `reflect` tool to consolidate those learnings.
+- **Reflect after meaningful work** — When you complete a significant task or working session, call the `reflect` tool to consolidate learnings. This includes both user preferences/decision patterns AND objective technical experience (lessons learned, non-obvious API constraints, architectural rationale).
 - **Don't over-reflect** — Only reflect when genuinely useful observations were made. Routine edits or simple Q&A don't need reflection.
 
 # Git
