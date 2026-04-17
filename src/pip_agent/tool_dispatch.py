@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 log = logging.getLogger(__name__)
 
-from pip_agent.tools import (
+from pip_agent.tools import (  # noqa: E402
     run_bash,
     run_edit,
     run_glob,
@@ -24,6 +24,7 @@ from pip_agent.tools import (
 
 if TYPE_CHECKING:
     import anthropic
+
     from pip_agent.background import BackgroundTaskManager
     from pip_agent.channels import Channel
     from pip_agent.memory import MemoryStore
@@ -391,8 +392,8 @@ def _handle_remember_user(ctx: ToolContext, inp: dict) -> DispatchResult:
 def _handle_reflect(ctx: ToolContext, inp: dict) -> DispatchResult:
     if ctx.memory_store is None or ctx.client is None:
         return DispatchResult(content="[error] Reflection not available.")
-    from pip_agent.memory.reflect import reflect
     from pip_agent.compact import save_transcript
+    from pip_agent.memory.reflect import reflect
 
     # Save current conversation transcript first so it's included in reflection
     if ctx.transcripts_dir is not None and ctx.messages:

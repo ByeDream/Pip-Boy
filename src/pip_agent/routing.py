@@ -297,7 +297,8 @@ _BUILTIN_DEFAULT = AgentConfig(
         "- **Direct execution** — Simple, single-step requests. Just use your tools.\n"
         "- **Tasks** — Multi-step goals that need structured tracking.\n"
         "- **Background tasks** — Long-running shell commands. Use `background: true`.\n"
-        "- **Agent Team** — Parallel work, specialized roles, or tasks too large for a single context."
+        "- **Agent Team** — Parallel work, specialized roles, "
+        "or tasks too large for a single context."
     ),
     model=DEFAULT_MODEL,
     max_tokens=DEFAULT_MAX_TOKENS,

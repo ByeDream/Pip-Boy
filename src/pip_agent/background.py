@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass, field
 from collections.abc import Callable
+from dataclasses import dataclass
 
 MAX_RESULT_CHARS = 50_000
 MAX_FINISHED_TASKS = 50

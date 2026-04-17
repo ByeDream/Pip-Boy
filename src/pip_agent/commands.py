@@ -15,7 +15,7 @@ import re
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pip_agent.channels import InboundMessage
 from pip_agent.routing import (
@@ -27,8 +27,6 @@ from pip_agent.routing import (
     normalize_agent_id,
     resolve_effective_config,
 )
-
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from pip_agent.memory import MemoryStore
@@ -195,7 +193,10 @@ def _auto_create_agent(
 
 def _cmd_bind(ctx: CommandContext, args: str) -> CommandResult:
     if not args.strip():
-        return CommandResult(handled=True, response="Usage: /bind <agent-id> [options]\nType /help for details.")
+        return CommandResult(
+            handled=True,
+            response="Usage: /bind <agent-id> [options]\nType /help for details.",
+        )
 
     try:
         tokens = shlex.split(args)
@@ -313,7 +314,10 @@ def _cmd_unbind(ctx: CommandContext, args: str) -> CommandResult:
 
     if removed:
         ctx.bindings.save(ctx.bindings_path)
-        return CommandResult(handled=True, response="Binding removed. Falling back to default agent.")
+        return CommandResult(
+            handled=True,
+            response="Binding removed. Falling back to default agent.",
+        )
     return CommandResult(handled=True, response="No binding found for this context.")
 
 
@@ -480,7 +484,10 @@ def _cmd_axioms(ctx: CommandContext, args: str) -> CommandResult:
         return CommandResult(handled=True, response="Memory system not initialized.")
     axioms = ctx.memory_store.load_axioms()
     if not axioms:
-        return CommandResult(handled=True, response="No axioms yet. They emerge after enough conversations.")
+        return CommandResult(
+            handled=True,
+            response="No axioms yet. They emerge after enough conversations.",
+        )
     return CommandResult(handled=True, response=axioms)
 
 
@@ -588,23 +595,23 @@ def _update_via_launcher(current_ver: str) -> CommandResult:
 
     script_path = os.path.join(tempfile.gettempdir(), "pip_boy_update.cmd")
     with open(script_path, "w", encoding="utf-8") as f:
-        f.write(f"@echo off\n")
-        f.write(f"title pip-boy updater\n")
+        f.write("@echo off\n")
+        f.write("title pip-boy updater\n")
         f.write(f"echo [pip-boy] Waiting for current process (PID {pid}) to exit...\n")
-        f.write(f":wait\n")
+        f.write(":wait\n")
         f.write(f'tasklist /FI "PID eq {pid}" 2>NUL | find /I "{pid}" >NUL\n')
-        f.write(f"if not errorlevel 1 (\n")
-        f.write(f"    timeout /t 1 /nobreak >NUL\n")
-        f.write(f"    goto wait\n")
-        f.write(f")\n")
-        f.write(f"echo [pip-boy] Upgrading pip-boy...\n")
+        f.write("if not errorlevel 1 (\n")
+        f.write("    timeout /t 1 /nobreak >NUL\n")
+        f.write("    goto wait\n")
+        f.write(")\n")
+        f.write("echo [pip-boy] Upgrading pip-boy...\n")
         f.write(f'"{python}" -m pip install --upgrade pip-boy\n')
-        f.write(f"if errorlevel 1 (\n")
-        f.write(f"    echo [pip-boy] Update failed. Press any key to close.\n")
-        f.write(f"    pause >NUL\n")
-        f.write(f"    exit /b 1\n")
-        f.write(f")\n")
-        f.write(f"echo [pip-boy] Restarting pip-boy...\n")
+        f.write("if errorlevel 1 (\n")
+        f.write("    echo [pip-boy] Update failed. Press any key to close.\n")
+        f.write("    pause >NUL\n")
+        f.write("    exit /b 1\n")
+        f.write(")\n")
+        f.write("echo [pip-boy] Restarting pip-boy...\n")
         f.write(f'cd /d "{cwd}"\n')
         f.write(f'"{python}" -m pip_agent\n')
 

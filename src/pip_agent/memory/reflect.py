@@ -12,11 +12,10 @@ import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
-
-from pip_agent.types import Observation
 
 import anthropic
+
+from pip_agent.types import Observation
 
 log = logging.getLogger(__name__)
 
@@ -42,10 +41,14 @@ _REFLECT_SYSTEM_BASE = (
     "  User behavior: decision, judgment, communication, value, preference\n"
     "  Objective experience: lesson, knowledge, pattern\n\n"
     "Examples:\n"
-    '  GOOD: {"text": "User prefers configuring via env vars + pydantic-settings over per-agent YAML for global settings", "category": "decision"}\n'
-    '  GOOD: {"text": "pydantic-settings silently ignores .env unless model_config sets env_file", "category": "lesson"}\n'
-    '  GOOD: {"text": "WeChat access_token expires after 2 hours and must be cached server-side", "category": "knowledge"}\n'
-    '  BAD:  {"text": "Fixed bug on line 42 of agent.py", "category": "lesson"} -- too specific, not reusable\n\n'
+    '  GOOD: {"text": "User prefers env vars + pydantic-settings '
+    'over per-agent YAML", "category": "decision"}\n'
+    '  GOOD: {"text": "pydantic-settings ignores .env unless '
+    'model_config sets env_file", "category": "lesson"}\n'
+    '  GOOD: {"text": "WeChat access_token expires after 2h; '
+    'must be cached server-side", "category": "knowledge"}\n'
+    '  BAD:  {"text": "Fixed bug on line 42", '
+    '"category": "lesson"} -- too specific\n\n'
     "Output 3-10 observations. If there is nothing meaningful, output [].\n"
     "Output all observations in English, regardless of the transcript language.\n"
     "Return ONLY the JSON array, no markdown fences or extra text."

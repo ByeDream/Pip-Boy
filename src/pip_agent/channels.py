@@ -119,7 +119,10 @@ class Channel(ABC):
         """Send an image. Subclasses override; default is no-op."""
         return False
 
-    def send_file(self, to: str, file_data: bytes, filename: str = "", caption: str = "", **kw: Any) -> bool:
+    def send_file(
+        self, to: str, file_data: bytes, filename: str = "",
+        caption: str = "", **kw: Any,
+    ) -> bool:
         """Send a file. Subclasses override; default is no-op."""
         return False
 
@@ -162,6 +165,7 @@ class WeChatChannel(Channel):
     def __init__(self, state_dir: Path) -> None:
         import httpx
 
+        self._httpx = httpx
         self._state_dir = state_dir
         self._state_dir.mkdir(parents=True, exist_ok=True)
         self._cred_path = state_dir / "wechat_session.json"
@@ -246,7 +250,7 @@ class WeChatChannel(Channel):
             print(f"  [wechat] Unexpected QR response: {data}")
             return False
 
-        print(f"  [wechat] Scan QR code with WeChat:")
+        print("  [wechat] Scan QR code with WeChat:")
         print(f"  {qrcode_url}")
 
         import qrcode as _qr
@@ -265,7 +269,7 @@ class WeChatChannel(Channel):
                     timeout=40.0,
                 )
                 status_data = resp.json()
-            except _httpx.TimeoutException:
+            except self._httpx.TimeoutException:
                 continue
             except Exception as exc:
                 print(f"  [wechat] QR poll error: {exc}")
@@ -881,7 +885,10 @@ class WecomChannel(Channel):
             log.warning("wecom send_image error: %s", exc)
             return False
 
-    def send_file(self, to: str, file_data: bytes, filename: str = "", caption: str = "", **kw: Any) -> bool:
+    def send_file(
+        self, to: str, file_data: bytes, filename: str = "",
+        caption: str = "", **kw: Any,
+    ) -> bool:
         if not self._ws_client or not file_data:
             return False
         try:

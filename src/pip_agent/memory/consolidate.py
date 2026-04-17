@@ -11,14 +11,12 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 import uuid
 from pathlib import Path
-from typing import Any
-
-from pip_agent.types import Memory, Observation
 
 import anthropic
+
+from pip_agent.types import Memory, Observation
 
 log = logging.getLogger(__name__)
 
@@ -181,7 +179,11 @@ def consolidate(
 
     # ROB-2: guard against LLM returning empty or drastically reduced list
     if memories and not updated:
-        log.warning("consolidate: LLM returned empty array with %d existing memories, preserving originals", len(memories))
+        log.warning(
+            "consolidate: LLM returned empty array with %d existing memories,"
+            " preserving originals",
+            len(memories),
+        )
         return memories
     if memories and len(updated) < len(memories) * 0.2:
         log.warning(

@@ -15,8 +15,10 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    import anthropic
     from pathlib import Path
+
+    import anthropic
+
     from pip_agent.memory import MemoryStore
 
 log = logging.getLogger(__name__)

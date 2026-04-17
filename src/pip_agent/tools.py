@@ -141,7 +141,10 @@ GLOB_SCHEMA = {
             },
             "path": {
                 "type": "string",
-                "description": "Base directory for the search (relative to working directory). Default: '.'.",
+                "description": (
+                    "Base directory for the search"
+                    " (relative to working directory). Default: '.'."
+                ),
             },
         },
         "required": ["pattern"],
@@ -241,7 +244,10 @@ TASK_CREATE_SCHEMA = {
                         "blocked_by": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "IDs that must complete first (stories or tasks at same level).",
+                            "description": (
+                                "IDs that must complete first"
+                                " (stories or tasks at same level)."
+                            ),
                         },
                     },
                     "required": ["id", "title"],
@@ -306,12 +312,18 @@ TASK_UPDATE_SCHEMA = {
                         "add_blocked_by": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "IDs to add to blocking list (ignored if blocked_by is set).",
+                            "description": (
+                                "IDs to add to blocking list"
+                                " (ignored if blocked_by is set)."
+                            ),
                         },
                         "remove_blocked_by": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "IDs to remove from blocking list (ignored if blocked_by is set).",
+                            "description": (
+                                "IDs to remove from blocking list"
+                                " (ignored if blocked_by is set)."
+                            ),
                         },
                         "owner": {
                             "type": "string",
@@ -480,7 +492,10 @@ TEAM_SEND_SCHEMA = {
 
 TEAM_STATUS_SCHEMA = {
     "name": "team_status",
-    "description": "Show the teammate roster with descriptions, models, and current status (available/working).",
+    "description": (
+        "Show the teammate roster with descriptions,"
+        " models, and current status (available/working)."
+    ),
     "input_schema": {
         "type": "object",
         "properties": {},
@@ -498,7 +513,10 @@ TEAM_READ_INBOX_SCHEMA = {
 
 TEAM_LIST_MODELS_SCHEMA = {
     "name": "team_list_models",
-    "description": "List available models with descriptions. Use to choose a model when spawning teammates.",
+    "description": (
+        "List available models with descriptions."
+        " Use to choose a model when spawning teammates."
+    ),
     "input_schema": {
         "type": "object",
         "properties": {},
@@ -617,7 +635,10 @@ REMEMBER_USER_SCHEMA = {
             },
             "notes": {
                 "type": "string",
-                "description": "Additional notes about the user (append, don't overwrite). Always write in English.",
+                "description": (
+                    "Additional notes about the user"
+                    " (append, don't overwrite). Always write in English."
+                ),
             },
         },
     },
@@ -1033,7 +1054,11 @@ def run_grep(tool_input: dict, *, workdir: Path | None = None) -> str:
                 return
             if pattern.search(line):
                 rel = str(fp.relative_to(wd))
-                display = line if len(line) <= _GREP_MAX_LINE_LEN else line[:_GREP_MAX_LINE_LEN] + "..."
+                display = (
+                    line
+                    if len(line) <= _GREP_MAX_LINE_LEN
+                    else line[:_GREP_MAX_LINE_LEN] + "..."
+                )
                 matches.append(f"{rel}:{lineno}: {display}")
 
     if base.is_file():

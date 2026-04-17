@@ -24,7 +24,7 @@ from pip_agent.channels import (
     wechat_poll_loop,
     wecom_ws_loop,
 )
-from pip_agent.commands import CommandContext, CommandResult, dispatch_command
+from pip_agent.commands import CommandContext, dispatch_command
 from pip_agent.compact import (
     auto_compact,
     estimate_tokens,
@@ -32,6 +32,8 @@ from pip_agent.compact import (
     save_transcript,
 )
 from pip_agent.config import settings
+from pip_agent.memory import MemoryStore
+from pip_agent.memory.scheduler import MemoryScheduler
 from pip_agent.profiler import Profiler
 from pip_agent.routing import (
     AgentRegistry,
@@ -42,8 +44,6 @@ from pip_agent.routing import (
 from pip_agent.skills import SkillRegistry
 from pip_agent.task_graph import PlanManager
 from pip_agent.team import TeamManager
-from pip_agent.memory import MemoryStore
-from pip_agent.memory.scheduler import MemoryScheduler
 from pip_agent.tool_dispatch import ToolContext, dispatch_tool
 from pip_agent.tools import (
     TASK_TOOL_NAMES,
@@ -301,13 +301,20 @@ def agent_loop(
             rounds_since_todo = 0 if used_task_tool else rounds_since_todo + 1
             if plan_manager.has_tasks() and rounds_since_todo >= NAG_THRESHOLD:
                 tool_results.append(
-                    {"type": "text", "text": "<system_reminder>Update your tasks.</system_reminder>"}
+                    {
+                        "type": "text",
+                        "text": "<system_reminder>Update your tasks.</system_reminder>",
+                    }
                 )
             messages.append({"role": "user", "content": tool_results})
 
             if compact_requested or last_input_tokens > effective_compact_threshold:
                 if settings.verbose:
-                    reason = "tool:compact" if compact_requested else f"input_tokens={last_input_tokens}"
+                    reason = (
+                        "tool:compact"
+                        if compact_requested
+                        else f"input_tokens={last_input_tokens}"
+                    )
                     print(f"  [context] auto_compact triggered ({reason})")
                 if transcripts_dir is not None:
                     auto_compact(
@@ -756,7 +763,11 @@ def run(mode: str = "auto") -> None:
                     if result.response:
                         ch = channel_mgr.get(inbound.channel)
                         if ch:
-                            target = inbound.guild_id if inbound.is_group and inbound.guild_id else inbound.peer_id
+                            target = (
+                                inbound.guild_id
+                                if inbound.is_group and inbound.guild_id
+                                else inbound.peer_id
+                            )
                             ok = ch.send(target, result.response)
                             if settings.verbose:
                                 print(f"  [dispatch] send to={target!r} ok={ok}")

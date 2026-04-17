@@ -14,13 +14,15 @@ import yaml
 
 log = logging.getLogger(__name__)
 
-from pip_agent.config import settings
-from pip_agent.profiler import Profiler
-from pip_agent.tool_dispatch import TeammateToolSurface, ToolContext, dispatch_tool
-from pip_agent.tools import VALID_MSG_TYPES, WORKDIR as _DEFAULT_WORKDIR, tools_for_role
+from pip_agent.config import settings  # noqa: E402
+from pip_agent.profiler import Profiler  # noqa: E402
+from pip_agent.tool_dispatch import TeammateToolSurface, ToolContext, dispatch_tool  # noqa: E402
+from pip_agent.tools import VALID_MSG_TYPES, tools_for_role  # noqa: E402
+from pip_agent.tools import WORKDIR as _DEFAULT_WORKDIR  # noqa: E402
 
 if TYPE_CHECKING:
     import anthropic
+
     from pip_agent.skills import SkillRegistry
     from pip_agent.task_graph import PlanManager
     from pip_agent.worktree import WorktreeManager
