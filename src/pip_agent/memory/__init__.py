@@ -266,6 +266,9 @@ class MemoryStore:
         A registered sender is locked to their own profile.
         An unregistered sender may join an existing profile by name or create new.
         """
+        if sender_id and channel and self.is_owner(channel, sender_id):
+            return "This sender is the owner. Owner profile is read-only."
+
         new_id = f"{channel}:{sender_id}" if sender_id and channel else ""
         users_dir = self.agent_dir / "users"
         users_dir.mkdir(parents=True, exist_ok=True)
