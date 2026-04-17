@@ -251,7 +251,7 @@ class TestDistillAxioms:
 
 class TestMemoryScheduler:
     def test_tick_triggers_reflect(self, tmp_path):
-        from pip_agent.memory.scheduler import REFLECT_TRANSCRIPT_THRESHOLD
+        from pip_agent.config import settings
 
         store = MemoryStore(base_dir=tmp_path, agent_id="test-agent")
         store.save_state({"last_reflect_transcript_ts": 0})
@@ -263,7 +263,7 @@ class TestMemoryScheduler:
             {"role": "user", "content": "hello"},
             {"role": "assistant", "content": "hi"},
         ]
-        for i in range(REFLECT_TRANSCRIPT_THRESHOLD + 1):
+        for i in range(settings.reflect_transcript_threshold + 1):
             (transcripts_dir / f"{now + i}.json").write_text(
                 json.dumps(data), encoding="utf-8",
             )

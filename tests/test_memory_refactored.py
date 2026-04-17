@@ -21,12 +21,8 @@ from pip_agent.memory.reflect import reflect, _format_transcript, _load_transcri
 from pip_agent.memory.consolidate import (
     consolidate, distill_axioms, _load_sop, MAX_MEMORIES,
 )
-from pip_agent.memory.scheduler import (
-    MemoryScheduler,
-    REFLECT_TRANSCRIPT_THRESHOLD,
-    DREAM_HOUR,
-    DREAM_MIN_OBSERVATIONS,
-)
+from pip_agent.config import settings
+from pip_agent.memory.scheduler import MemoryScheduler
 from pip_agent.memory.utils import extract_json_array
 
 
@@ -268,7 +264,7 @@ class TestSchedulerReflectTrigger:
         store = MemoryStore(tmp_path / "agents", "test-agent")
         tdir = tmp_path / "transcripts"
         base_ts = int(time.time())
-        for i in range(REFLECT_TRANSCRIPT_THRESHOLD + 1):
+        for i in range(settings.reflect_transcript_threshold + 1):
             _write_transcript(tdir, base_ts + i, [
                 {"role": "user", "content": f"msg {i}"},
                 {"role": "assistant", "content": f"reply {i}"},
@@ -299,7 +295,7 @@ class TestSchedulerReflectTrigger:
         store = MemoryStore(tmp_path / "agents", "test-agent")
         tdir = tmp_path / "transcripts"
         base_ts = int(time.time())
-        for i in range(REFLECT_TRANSCRIPT_THRESHOLD + 1):
+        for i in range(settings.reflect_transcript_threshold + 1):
             _write_transcript(tdir, base_ts + i, [
                 {"role": "user", "content": f"msg {i}"},
                 {"role": "assistant", "content": f"reply {i}"},
@@ -346,7 +342,7 @@ class TestSchedulerDream:
     def test_dream_does_not_trigger_outside_hour(self, tmp_path):
         store = MemoryStore(tmp_path / "agents", "test-agent")
         # Write enough observations
-        for i in range(DREAM_MIN_OBSERVATIONS):
+        for i in range(settings.dream_min_observations):
             store.write_observations([{"ts": time.time(), "text": f"obs {i}", "category": "test", "source": "auto"}])
 
         state = {}
@@ -363,7 +359,7 @@ class TestSchedulerDream:
 
     def test_dream_triggers_at_correct_hour(self, tmp_path):
         store = MemoryStore(tmp_path / "agents", "test-agent")
-        for i in range(DREAM_MIN_OBSERVATIONS):
+        for i in range(settings.dream_min_observations):
             store.write_observations([{"ts": time.time(), "text": f"obs {i}", "category": "test", "source": "auto"}])
 
         state = {"last_activity_at": time.time() - 3600}
@@ -372,14 +368,14 @@ class TestSchedulerDream:
         mock_client = MagicMock()
         sched = MemoryScheduler(store, mock_client, tmp_path / "t", stop, model="test")
 
-        dream_dt = datetime(2026, 4, 15, DREAM_HOUR, 30, 0)
+        dream_dt = datetime(2026, 4, 15, settings.dream_hour, 30, 0)
         with patch("pip_agent.memory.scheduler.datetime") as mock_dt:
             mock_dt.fromtimestamp.return_value = dream_dt
             assert sched._should_dream(state, now) is True
 
     def test_dream_blocked_when_active(self, tmp_path):
         store = MemoryStore(tmp_path / "agents", "test-agent")
-        for i in range(DREAM_MIN_OBSERVATIONS):
+        for i in range(settings.dream_min_observations):
             store.write_observations([{"ts": time.time(), "text": f"obs {i}", "category": "test", "source": "auto"}])
 
         active = threading.Event()
@@ -389,16 +385,16 @@ class TestSchedulerDream:
         mock_client = MagicMock()
         sched = MemoryScheduler(store, mock_client, tmp_path / "t", stop, model="test", active_event=active)
 
-        dream_dt = datetime(2026, 4, 15, DREAM_HOUR, 30, 0)
+        dream_dt = datetime(2026, 4, 15, settings.dream_hour, 30, 0)
         with patch("pip_agent.memory.scheduler.datetime") as mock_dt:
             mock_dt.fromtimestamp.return_value = dream_dt
             assert sched._should_dream(state, time.time()) is False
 
     def test_dream_clears_observations(self, tmp_path):
         store = MemoryStore(tmp_path / "agents", "test-agent")
-        for i in range(DREAM_MIN_OBSERVATIONS):
+        for i in range(settings.dream_min_observations):
             store.write_observations([{"ts": time.time(), "text": f"obs {i}", "category": "test", "source": "auto"}])
-        assert len(store.load_all_observations()) >= DREAM_MIN_OBSERVATIONS
+        assert len(store.load_all_observations()) >= settings.dream_min_observations
 
         mock_client = MagicMock()
         mock_client.messages.create.return_value = _make_llm_response("[]")

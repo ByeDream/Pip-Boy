@@ -21,26 +21,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Configurable constants
-# ---------------------------------------------------------------------------
-
 POLL_INTERVAL = 60
-
-REFLECT_TRANSCRIPT_THRESHOLD = 10
-"""Number of new transcripts required to trigger a reflection."""
-
-TRANSCRIPT_RETENTION_DAYS = 7
-"""Transcripts older than this AND already reflected upon are deleted."""
-
-DREAM_HOUR = 2
-"""Local hour (0-23) at which Dream may run."""
-
-DREAM_MIN_OBSERVATIONS = 20
-"""Minimum observation count required to trigger Dream."""
-
-DREAM_INACTIVE_MINUTES = 30
-"""Agent must have been idle for this long before Dream can run."""
 
 
 class MemoryScheduler:
@@ -87,12 +68,14 @@ class MemoryScheduler:
     # ------------------------------------------------------------------
 
     def _tick(self) -> None:
+        from pip_agent.config import settings
+
         state = self.store.load_state()
         now = time.time()
 
         # --- L1: Reflect when enough new transcripts have accumulated ---
         new_count = self._count_new_transcripts(state)
-        if new_count >= REFLECT_TRANSCRIPT_THRESHOLD:
+        if new_count >= settings.reflect_transcript_threshold:
             self._run_reflect(state, now)
             self._cleanup_transcripts(state, now)
 
@@ -170,7 +153,8 @@ class MemoryScheduler:
         """Remove transcripts that are old AND already reflected upon."""
         if not self.transcripts_dir.is_dir():
             return
-        cutoff = now - TRANSCRIPT_RETENTION_DAYS * 86400
+        from pip_agent.config import settings
+        cutoff = now - settings.transcript_retention_days * 86400
         last_reflected_ts = state.get("last_reflect_transcript_ts", 0)
         removed = 0
         for fp in self.transcripts_dir.glob("*.json"):
@@ -190,29 +174,27 @@ class MemoryScheduler:
     # ------------------------------------------------------------------
 
     def _should_dream(self, state: dict, now: float) -> bool:
+        from pip_agent.config import settings
+
         local_now = datetime.fromtimestamp(now)
 
-        # Condition 1: within the configured Dream hour
-        if local_now.hour != DREAM_HOUR:
+        if local_now.hour != settings.dream_hour:
             return False
 
-        # Condition 2: haven't dreamed today
         last_dream = state.get("last_dream_at", 0)
         if last_dream > 0:
             last_dream_date = datetime.fromtimestamp(last_dream).date()
             if last_dream_date == local_now.date():
                 return False
 
-        # Condition 3: enough observations
         obs_count = len(self.store.load_all_observations())
-        if obs_count < DREAM_MIN_OBSERVATIONS:
+        if obs_count < settings.dream_min_observations:
             return False
 
-        # Condition 4: system is inactive
         if self.active_event is not None and self.active_event.is_set():
             return False
         last_activity = state.get("last_activity_at", 0)
-        if last_activity > 0 and (now - last_activity) < DREAM_INACTIVE_MINUTES * 60:
+        if last_activity > 0 and (now - last_activity) < settings.dream_inactive_minutes * 60:
             return False
 
         return True

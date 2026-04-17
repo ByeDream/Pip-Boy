@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     compact_threshold: int = Field(default=50_000)
     compact_micro_age: int = Field(default=3)
 
+    # Memory pipeline settings (global, not per-agent).
+    reflect_transcript_threshold: int = Field(default=10)
+    transcript_retention_days: int = Field(default=7)
+    dream_hour: int = Field(default=2)
+    dream_min_observations: int = Field(default=20)
+    dream_inactive_minutes: int = Field(default=30)
+
     def check_required(self) -> None:
         errors: list[str] = []
         if not self.anthropic_api_key:
