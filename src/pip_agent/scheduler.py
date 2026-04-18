@@ -14,6 +14,8 @@ import logging
 import re
 import threading
 import time
+
+import yaml
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -288,16 +290,34 @@ class HeartbeatJob(BackgroundJob):
         # interval, not immediately after launch.
         self.last_run_at: float = time.time()
 
+    _FM_RE = re.compile(r"^---\n(.*?)\n---\n?(.*)", re.DOTALL)
+
+    def _parse_heartbeat(self) -> tuple[dict, str]:
+        """Read HEARTBEAT.md and split YAML frontmatter from body.
+
+        Returns (meta, body) where *meta* may contain ``channel`` and
+        ``peer_id`` to override the default reply destination.
+        """
+        raw = self.heartbeat_path.read_text(encoding="utf-8").strip()
+        m = self._FM_RE.match(raw)
+        if not m:
+            return {}, raw
+        try:
+            meta = yaml.safe_load(m.group(1)) or {}
+        except yaml.YAMLError:
+            meta = {}
+        return meta, m.group(2).strip()
+
     def should_run(self, now: float) -> tuple[bool, str]:
         from pip_agent.config import settings
 
         if not self.heartbeat_path.exists():
             return False, "HEARTBEAT.md not found"
         try:
-            content = self.heartbeat_path.read_text(encoding="utf-8").strip()
+            _meta, body = self._parse_heartbeat()
         except OSError:
             return False, "HEARTBEAT.md read error"
-        if not content:
+        if not body:
             return False, "HEARTBEAT.md is empty"
 
         elapsed = now - self.last_run_at
@@ -314,28 +334,38 @@ class HeartbeatJob(BackgroundJob):
         return True, "all checks passed"
 
     def execute(self, now: float, output_queue: list[str], queue_lock: threading.Lock) -> None:
-        instructions = self.heartbeat_path.read_text(encoding="utf-8").strip()
+        meta, instructions = self._parse_heartbeat()
         if not instructions:
             return
-        self._enqueue(f"<heartbeat>\n{instructions}\n</heartbeat>")
+        channel = meta.get("channel", "cli")
+        peer_id = meta.get("peer_id", "cli-user")
+        self._enqueue(
+            f"<heartbeat>\n{instructions}\n</heartbeat>",
+            channel=channel, peer_id=peer_id,
+        )
         self.last_run_at = time.time()
-        log.debug("Heartbeat message enqueued")
+        log.debug("Heartbeat message enqueued (channel=%s, peer_id=%s)", channel, peer_id)
 
     def trigger(self) -> str:
         """Manual trigger, bypasses interval check."""
         if not self.heartbeat_path.exists():
             return "HEARTBEAT.md not found"
         try:
-            instructions = self.heartbeat_path.read_text(encoding="utf-8").strip()
+            meta, instructions = self._parse_heartbeat()
         except OSError:
             return "HEARTBEAT.md read error"
         if not instructions:
             return "HEARTBEAT.md is empty"
-        self._enqueue(f"<heartbeat>\n{instructions}\n</heartbeat>")
+        channel = meta.get("channel", "cli")
+        peer_id = meta.get("peer_id", "cli-user")
+        self._enqueue(
+            f"<heartbeat>\n{instructions}\n</heartbeat>",
+            channel=channel, peer_id=peer_id,
+        )
         self.last_run_at = time.time()
         return "heartbeat enqueued"
 
-    def _enqueue(self, text: str) -> None:
+    def _enqueue(self, text: str, channel: str = "cli", peer_id: str = "cli-user") -> None:
         if self.msg_queue is None or self.q_lock is None:
             log.warning("HeartbeatJob: msg_queue not configured, cannot enqueue")
             return
@@ -344,8 +374,8 @@ class HeartbeatJob(BackgroundJob):
         msg = InboundMessage(
             text=text,
             sender_id=HEARTBEAT_SENDER,
-            channel="cli",
-            peer_id="cli-user",
+            channel=channel,
+            peer_id=peer_id,
         )
         with self.q_lock:
             self.msg_queue.append(msg)

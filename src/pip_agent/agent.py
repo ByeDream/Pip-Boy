@@ -57,8 +57,10 @@ from pip_agent.scheduler import (
 _BG_SENDERS = frozenset({HEARTBEAT_SENDER, CRON_SENDER})
 from pip_agent.routing import (
     AgentRegistry,
+    Binding,
     BindingTable,
     build_session_key,
+    normalize_agent_id,
     resolve_effective_config,
 )
 from pip_agent.skills import SkillRegistry
@@ -670,7 +672,7 @@ def _stdin_reader_thread(
                 queue.append(msg)
 
 
-def run(mode: str = "auto") -> None:
+def run(mode: str = "auto", bind_agent: str | None = None) -> None:
     sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
     sys.stdin.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
 
@@ -805,6 +807,20 @@ def run(mode: str = "auto") -> None:
                 t.start()
                 bg_threads.append(t)
                 has_remote_channels = True
+                if bind_agent:
+                    aid = normalize_agent_id(bind_agent)
+                    if registry.get_agent(aid):
+                        binding_table.remove("channel", "wechat")
+                        binding_table.add(Binding(
+                            agent_id=aid, tier=4,
+                            match_key="channel", match_value="wechat",
+                        ))
+                        binding_table.save(BINDINGS_PATH)
+                        print(f"  [wechat] Bound to agent: {aid}")
+                    else:
+                        available = ", ".join(a.id for a in registry.list_agents())
+                        print(f"  [wechat] Agent '{aid}' not found, skipping bind. "
+                              f"Available: {available}")
         except Exception as exc:
             print(f"  [wechat] Init failed: {exc}")
 

@@ -1,3 +1,13 @@
+<!--
+Optional YAML frontmatter to route heartbeat replies to a specific channel:
+
+---
+channel: wechat
+peer_id: friend-user-id
+---
+
+If omitted, replies are sent to the CLI (channel: cli, peer_id: cli-user).
+-->
 You are performing a periodic background check. You have full tool access.
 
 ## What to check
