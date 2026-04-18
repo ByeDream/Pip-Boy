@@ -240,12 +240,28 @@ def micro_compact(messages: list[dict], *, max_age: int | None = None) -> int:
     return replaced
 
 
+_session_transcripts: dict[int, Path] = {}
+
+
 def save_transcript(messages: list[dict], directory: Path) -> Path:
-    """Save the current messages to a timestamped JSONL file."""
+    """Save the current messages, replacing any previous snapshot for this session.
+
+    Uses ``id(messages)`` to identify the session — the same list object
+    persists across turns within a single conversation, so each session
+    produces exactly one transcript file that is overwritten on every turn.
+    """
     directory.mkdir(parents=True, exist_ok=True)
+    key = id(messages)
+    previous = _session_transcripts.get(key)
+
     filename = f"{int(time.time())}.json"
     path = directory / filename
     path.write_text(_serialize_messages(messages), encoding="utf-8")
+
+    if previous is not None and previous != path:
+        previous.unlink(missing_ok=True)
+
+    _session_transcripts[key] = path
     return path
 
 

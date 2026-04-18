@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from pip_agent.compact import (
+    _session_transcripts,
     auto_compact,
     estimate_tokens,
     micro_compact,
@@ -172,6 +173,9 @@ class TestMicroCompact:
 
 
 class TestSaveTranscript:
+    def setup_method(self):
+        _session_transcripts.clear()
+
     def test_creates_file(self, tmp_path: Path):
         msgs = [{"role": "user", "content": "hello"}]
         path = save_transcript(msgs, tmp_path)
@@ -194,6 +198,32 @@ class TestSaveTranscript:
         path = save_transcript(msgs, target)
         assert target.is_dir()
         assert path.exists()
+
+    def test_replaces_previous_for_same_session(self, tmp_path: Path):
+        import time
+        msgs = [{"role": "user", "content": "turn1"}]
+        path1 = save_transcript(msgs, tmp_path)
+        assert path1.exists()
+
+        time.sleep(1.1)
+        msgs.append({"role": "assistant", "content": "reply1"})
+        path2 = save_transcript(msgs, tmp_path)
+
+        assert path2.exists()
+        assert not path1.exists(), "previous snapshot should be deleted"
+        assert len(list(tmp_path.glob("*.json"))) == 1
+
+    def test_different_sessions_kept_separate(self, tmp_path: Path):
+        import time
+        session_a = [{"role": "user", "content": "a"}]
+        session_b = [{"role": "user", "content": "b"}]
+        path_a = save_transcript(session_a, tmp_path)
+        time.sleep(1.1)
+        path_b = save_transcript(session_b, tmp_path)
+
+        assert path_a.exists()
+        assert path_b.exists()
+        assert len(list(tmp_path.glob("*.json"))) == 2
 
 
 # ---------------------------------------------------------------------------
