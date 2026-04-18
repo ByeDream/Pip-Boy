@@ -619,7 +619,11 @@ REMEMBER_USER_SCHEMA = {
         "properties": {
             "sender_id": {
                 "type": "string",
-                "description": "The target user's sender_id (from message tag).",
+                "description": (
+                    "The target user's sender_id — the raw ID without "
+                    "the channel prefix (e.g. 'T04060017A', not "
+                    "'wecom:T04060017A')."
+                ),
             },
             "name": {
                 "type": "string",

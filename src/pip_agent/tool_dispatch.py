@@ -382,6 +382,8 @@ def _handle_remember_user(ctx: ToolContext, inp: dict) -> DispatchResult:
         return DispatchResult(content="Unknown tool: remember_user")
     ch_name = ctx.channel.name if ctx.channel else "cli"
     sid = inp.get("sender_id") or ctx.sender_id
+    if sid and ch_name and sid.startswith(f"{ch_name}:"):
+        sid = sid[len(ch_name) + 1:]
     result = ctx.memory_store.update_user_profile(
         sender_id=sid,
         channel=ch_name,

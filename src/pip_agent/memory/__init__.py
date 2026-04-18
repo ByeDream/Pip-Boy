@@ -190,13 +190,25 @@ class MemoryStore:
         if not sender_id:
             return None
         target = f"{channel}:{sender_id}"
-        for path in self._all_profile_paths():
+        expected = f"- `{target}`"
+        paths = self._all_profile_paths()
+        log.debug(
+            "find_profile_by_sender: expected=%r paths=%d", expected, len(paths),
+        )
+        for path in paths:
             try:
                 for line in path.read_text(encoding="utf-8").splitlines():
-                    if line.strip() == f"- `{target}`":
+                    stripped = line.strip()
+                    if stripped == expected:
                         return path
+                    if stripped.startswith("- `") and ":" in stripped:
+                        log.debug(
+                            "  candidate in %s: %r (match=%s)",
+                            path.name, stripped, stripped == expected,
+                        )
             except OSError:
                 continue
+        log.debug("find_profile_by_sender: no match for %r", expected)
         return None
 
     def _find_in_users(
@@ -270,6 +282,9 @@ class MemoryStore:
         A registered sender is locked to their own profile.
         An unregistered sender may join an existing profile by name or create new.
         """
+        if sender_id and channel and sender_id.startswith(f"{channel}:"):
+            sender_id = sender_id[len(channel) + 1:]
+
         if sender_id and channel and channel != "cli" and self.is_owner(channel, sender_id):
             return "This sender is the owner. Owner profile is read-only."
 

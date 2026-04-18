@@ -549,10 +549,16 @@ def _process_inbound(
         if _profile:
             _name = ctx.memory_store.extract_profile_name(_profile)
             sender_status = f"verified:{_name}" if _name else "verified"
+        if settings.verbose:
+            print(
+                f"  [verify] channel={inbound.channel} sender={inbound.sender_id!r}"
+                f" status={sender_status} profile={_profile.name if _profile else None}"
+            )
 
     if inbound.is_group:
         user_input = (
-            f'<user_query from="{inbound.sender_id}" status="{sender_status}" group="true">'
+            f'<user_query from="{inbound.channel}:{inbound.sender_id}"'
+            f' status="{sender_status}" group="true">'
             f"\n{clean_text}\n</user_query>"
         )
     elif inbound.sender_id:
