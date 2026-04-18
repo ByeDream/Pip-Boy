@@ -730,7 +730,10 @@ CRON_ADD_SCHEMA = {
             },
             "message": {
                 "type": "string",
-                "description": "The prompt/instruction to execute when the task fires. Always write in English.",
+                "description": (
+                    "The prompt/instruction to execute when the task fires. "
+                    "Always write in English."
+                ),
             },
         },
         "required": ["name", "schedule_kind", "schedule_config", "message"],
@@ -929,6 +932,7 @@ _LEAD_ONLY = frozenset({
     "team_list_models", "team_create", "team_edit", "team_delete",
     "check_background", "compact",
     "cron_add", "cron_remove", "cron_update", "cron_list",
+    "remember_user", "reflect", "memory_search", "memory_write",
 })
 
 _TEAMMATE_ONLY = frozenset({
@@ -1247,9 +1251,26 @@ def run_web_fetch(tool_input: dict) -> str:
         return blocked
 
     max_chars = 8000
+    max_redirects = 10
     try:
-        resp = httpx.get(url, follow_redirects=True, timeout=30)
-        resp.raise_for_status()
+        current_url = url
+        with httpx.Client(timeout=30, follow_redirects=False) as client:
+            for _ in range(max_redirects + 1):
+                resp = client.get(current_url)
+                if resp.is_redirect:
+                    location = resp.headers.get("location", "")
+                    if not location:
+                        return "[fetch error: redirect without Location header]"
+                    next_url = str(resp.url.join(location))
+                    redirect_blocked = _validate_fetch_url(next_url)
+                    if redirect_blocked:
+                        return redirect_blocked
+                    current_url = next_url
+                    continue
+                resp.raise_for_status()
+                break
+            else:
+                return "[fetch error: too many redirects]"
     except httpx.HTTPError as e:
         return f"[fetch error: {e}]"
 

@@ -41,6 +41,8 @@ def _serialize_messages(messages: list[dict]) -> str:
     """Serialize the messages list to JSON for transcript saving."""
     safe: list[dict] = []
     for msg in messages:
+        if "role" not in msg:
+            continue
         content = msg.get("content")
         if isinstance(content, list):
             content = [_serialize_block(b) for b in content]
@@ -52,7 +54,7 @@ def _format_for_summary(messages: list[dict]) -> str:
     """Convert messages into a readable transcript for the summarizer."""
     lines: list[str] = []
     for msg in messages:
-        role = msg["role"].upper()
+        role = msg.get("role", "unknown").upper()
         content = msg.get("content")
         if isinstance(content, str):
             lines.append(f"[{role}]\n{content}")

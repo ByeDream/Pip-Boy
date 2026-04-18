@@ -69,12 +69,13 @@ git push && git push --tags
 
 ### 6. Verify CI
 
-The `v*` tag push triggers two GitHub Actions workflows:
+The `v*` tag push triggers the **Publish** workflow, which includes its own test step:
 
-1. **CI** (`ci.yml`) — Runs the test suite on multiple Python versions and OS combinations
-2. **Publish** (`publish.yml`) — Builds the package and publishes it to PyPI via Trusted Publisher
+- **Publish** (`publish.yml`) — Runs tests, builds the package, and publishes it to PyPI via Trusted Publisher
 
-Check the [Actions tab](https://github.com/ByeDream/Pip-Boy/actions) to verify both workflows succeed.
+Note: `ci.yml` only runs on pushes and pull requests to `main`, not on tag pushes. The publish workflow has its own test job to ensure correctness before publishing.
+
+Check the [Actions tab](https://github.com/ByeDream/Pip-Boy/actions) to verify the publish workflow succeeds.
 
 ### 7. Verify on PyPI
 

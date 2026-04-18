@@ -3,20 +3,18 @@
 from __future__ import annotations
 
 import json
-import time
 import threading
-from pathlib import Path
+import time
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from pip_agent.memory import MemoryStore
-from pip_agent.memory.recall import search_memories, tokenize, temporal_decay
-from pip_agent.memory.reflect import reflect, _format_transcript, _load_transcripts
 from pip_agent.memory.consolidate import consolidate, distill_axioms
-from pip_agent.memory.scheduler import MemoryScheduler
-
+from pip_agent.memory.recall import search_memories, temporal_decay, tokenize
+from pip_agent.memory.reflect import _format_transcript, _load_transcripts, reflect
+from pip_agent.scheduler import ReflectJob
 
 # ---------------------------------------------------------------------------
 # recall.py
@@ -249,8 +247,8 @@ class TestDistillAxioms:
 # ---------------------------------------------------------------------------
 
 
-class TestMemoryScheduler:
-    def test_tick_triggers_reflect(self, tmp_path):
+class TestReflectJobIntegration:
+    def test_execute_triggers_reflect(self, tmp_path):
         from pip_agent.config import settings
 
         store = MemoryStore(base_dir=tmp_path, agent_id="test-agent")
@@ -274,24 +272,27 @@ class TestMemoryScheduler:
             content=[SimpleNamespace(text=json.dumps(observations))],
         )
 
-        stop = threading.Event()
-        sched = MemoryScheduler(
-            store, mock_client, transcripts_dir, stop, model="test-model",
-        )
-        sched._tick()
+        stores = {"test-agent": store}
+        job = ReflectJob(stores, mock_client, model="test-model")
+        ok, _reason = job.should_run(time.time())
+        assert ok
+
+        output_queue: list[str] = []
+        lock = threading.Lock()
+        job.execute(time.time(), output_queue, lock)
 
         state = store.load_state()
         assert state["last_reflect_at"] > 0
         assert state["last_reflect_transcript_ts"] > 0
         assert len(store.load_all_observations()) >= 1
 
-    def test_stop_event_ends_loop(self, tmp_path):
+    def test_should_run_below_threshold(self, tmp_path):
         store = MemoryStore(base_dir=tmp_path, agent_id="test-agent")
-        mock_client = MagicMock()
-        stop = threading.Event()
-        stop.set()
+        transcripts_dir = store.agent_dir / "transcripts"
+        transcripts_dir.mkdir(parents=True, exist_ok=True)
 
-        sched = MemoryScheduler(
-            store, mock_client, tmp_path, stop, model="test-model",
-        )
-        sched.run()
+        mock_client = MagicMock()
+        stores = {"test-agent": store}
+        job = ReflectJob(stores, mock_client, model="test-model")
+        ok, _reason = job.should_run(time.time())
+        assert not ok

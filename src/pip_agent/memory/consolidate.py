@@ -192,11 +192,15 @@ def consolidate(
         )
         return memories
 
+    cleaned = []
     for mem in updated:
+        if not isinstance(mem, dict):
+            continue
         if not mem.get("id"):
             mem["id"] = uuid.uuid4().hex[:12]
+        cleaned.append(mem)
 
-    return updated
+    return cleaned
 
 
 def distill_axioms(

@@ -43,6 +43,7 @@ _COOLDOWN_UNKNOWN = 120.0
 _COOLDOWN_OVERFLOW_EXHAUSTED = 600.0
 
 
+
 # ---------------------------------------------------------------------------
 # 1. FailoverReason + classifier
 # ---------------------------------------------------------------------------
@@ -70,7 +71,10 @@ def classify_failure(exc: Exception) -> FailoverReason:
     if isinstance(exc, anthropic.APITimeoutError):
         return FailoverReason.timeout
     if isinstance(exc, anthropic.PermissionDeniedError):
-        return FailoverReason.billing
+        msg = str(exc).lower()
+        if "billing" in msg or "credit" in msg or "payment" in msg:
+            return FailoverReason.billing
+        return FailoverReason.unknown
     if isinstance(exc, anthropic.BadRequestError):
         m = str(exc).lower()
         if (
@@ -106,6 +110,26 @@ def classify_failure(exc: Exception) -> FailoverReason:
     ):
         return FailoverReason.overflow
     return FailoverReason.unknown
+
+
+_COOLDOWN_BY_REASON: dict[FailoverReason, float] = {
+    FailoverReason.auth: _COOLDOWN_AUTH,
+    FailoverReason.billing: _COOLDOWN_BILLING,
+    FailoverReason.rate_limit: _COOLDOWN_RATE,
+    FailoverReason.timeout: _COOLDOWN_TIMEOUT,
+}
+
+
+def _classify_and_mark(
+    profile_manager: ProfileManager,
+    profile: object,
+    exc: Exception,
+) -> FailoverReason:
+    """Classify *exc*, mark the profile, and return the reason."""
+    reason = classify_failure(exc)
+    cd = _COOLDOWN_BY_REASON.get(reason, _COOLDOWN_UNKNOWN)
+    profile_manager.mark_failure(profile, reason, cd)
+    return reason
 
 
 # ---------------------------------------------------------------------------
@@ -359,16 +383,8 @@ class ResilienceRunner:
                             break
                         continue
 
-                    if reason == FailoverReason.auth:
-                        self.profile_manager.mark_failure(profile, reason, _COOLDOWN_AUTH)
-                    elif reason == FailoverReason.billing:
-                        self.profile_manager.mark_failure(profile, reason, _COOLDOWN_BILLING)
-                    elif reason == FailoverReason.rate_limit:
-                        self.profile_manager.mark_failure(profile, reason, _COOLDOWN_RATE)
-                    elif reason == FailoverReason.timeout:
-                        self.profile_manager.mark_failure(profile, reason, _COOLDOWN_TIMEOUT)
-                    else:
-                        self.profile_manager.mark_failure(profile, reason, _COOLDOWN_UNKNOWN)
+                    cd = _COOLDOWN_BY_REASON.get(reason, _COOLDOWN_UNKNOWN)
+                    self.profile_manager.mark_failure(profile, reason, cd)
                     break
                 else:
                     self.profile_manager.mark_success(profile)
@@ -408,6 +424,7 @@ class ResilienceRunner:
             except Exception as exc:
                 last_exc = exc
                 self.total_failures += 1
+                _classify_and_mark(self.profile_manager, profile, exc)
                 self._log(f"fallback '{fb_model}' failed: {exc}")
                 continue
             else:

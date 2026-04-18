@@ -14,13 +14,13 @@ import logging
 import re
 import threading
 import time
-
-import yaml
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+import yaml
 
 from pip_agent.lanes import CommandQueue
 
@@ -82,61 +82,72 @@ class ReflectJob(BackgroundJob):
 
     def __init__(
         self,
-        memory_store: MemoryStore,
+        memory_stores: dict[str, MemoryStore],
         client: anthropic.Anthropic,
-        transcripts_dir: Path,
         *,
         model: str = "",
     ) -> None:
-        self.store = memory_store
+        self.stores = memory_stores
         self.client = client
-        self.transcripts_dir = transcripts_dir
         self.model = model
 
     def should_run(self, now: float) -> tuple[bool, str]:
         from pip_agent.config import settings
 
-        count = self._count_new_transcripts()
-        if count < settings.reflect_transcript_threshold:
-            return False, f"transcripts {count}/{settings.reflect_transcript_threshold}"
+        total = 0
+        for store in list(self.stores.values()):
+            total += self._count_new_transcripts_for(store)
+        threshold = settings.reflect_transcript_threshold
+        if total < threshold:
+            return False, f"transcripts {total}/{threshold}"
         return True, "transcript threshold reached"
 
     def execute(self, now: float, output_queue: list[str], queue_lock: threading.Lock) -> None:
         from pip_agent.memory.reflect import reflect
 
-        state = self.store.load_state()
-        since = state.get("last_reflect_transcript_ts", 0)
+        for agent_id, store in list(self.stores.items()):
+            transcripts_dir = store.agent_dir / "transcripts"
+            if not transcripts_dir.is_dir():
+                continue
 
-        observations = reflect(
-            self.client,
-            self.transcripts_dir,
-            self.store.agent_id,
-            since,
-            model=self.model,
-        )
+            state = store.load_state()
+            since = state.get("last_reflect_transcript_ts", 0)
 
-        if observations:
-            self.store.write_observations(observations)
-            log.info(
-                "L1 reflect: %d observations for agent %s",
-                len(observations), self.store.agent_id,
+            if self._count_new_transcripts_for(store) == 0:
+                continue
+
+            observations = reflect(
+                self.client,
+                transcripts_dir,
+                agent_id,
+                since,
+                model=self.model,
             )
 
-        latest = self._latest_transcript_ts()
-        if latest > 0:
-            state["last_reflect_transcript_ts"] = latest
-        state["last_reflect_at"] = now
-        self.store.save_state(state)
+            if observations:
+                store.write_observations(observations)
+                log.info(
+                    "L1 reflect: %d observations for agent %s",
+                    len(observations), agent_id,
+                )
 
-        self._cleanup_transcripts(state, now)
+            latest = self._latest_transcript_ts(transcripts_dir)
+            if latest > 0:
+                state["last_reflect_transcript_ts"] = latest
+            state["last_reflect_at"] = now
+            store.save_state(state)
 
-    def _count_new_transcripts(self) -> int:
-        if not self.transcripts_dir.is_dir():
+            self._cleanup_transcripts(store, transcripts_dir, state, now)
+
+    @staticmethod
+    def _count_new_transcripts_for(store: MemoryStore) -> int:
+        transcripts_dir = store.agent_dir / "transcripts"
+        if not transcripts_dir.is_dir():
             return 0
-        state = self.store.load_state()
+        state = store.load_state()
         last_ts = state.get("last_reflect_transcript_ts", 0)
         count = 0
-        for fp in self.transcripts_dir.glob("*.json"):
+        for fp in transcripts_dir.glob("*.json"):
             try:
                 ts = int(fp.stem)
             except ValueError:
@@ -145,11 +156,12 @@ class ReflectJob(BackgroundJob):
                 count += 1
         return count
 
-    def _latest_transcript_ts(self) -> int:
-        if not self.transcripts_dir.is_dir():
+    @staticmethod
+    def _latest_transcript_ts(transcripts_dir: Path) -> int:
+        if not transcripts_dir.is_dir():
             return 0
         latest = 0
-        for fp in self.transcripts_dir.glob("*.json"):
+        for fp in transcripts_dir.glob("*.json"):
             try:
                 ts = int(fp.stem)
             except ValueError:
@@ -158,15 +170,18 @@ class ReflectJob(BackgroundJob):
                 latest = ts
         return latest
 
-    def _cleanup_transcripts(self, state: dict, now: float) -> None:
-        if not self.transcripts_dir.is_dir():
+    @staticmethod
+    def _cleanup_transcripts(
+        store: MemoryStore, transcripts_dir: Path, state: dict, now: float,
+    ) -> None:
+        if not transcripts_dir.is_dir():
             return
         from pip_agent.config import settings
 
         cutoff = now - settings.transcript_retention_days * 86400
         last_reflected_ts = state.get("last_reflect_transcript_ts", 0)
         removed = 0
-        for fp in self.transcripts_dir.glob("*.json"):
+        for fp in transcripts_dir.glob("*.json"):
             try:
                 ts = int(fp.stem)
             except ValueError:
@@ -177,7 +192,7 @@ class ReflectJob(BackgroundJob):
         if removed:
             log.info(
                 "Transcript cleanup: removed %d old files for agent %s",
-                removed, self.store.agent_id,
+                removed, store.agent_id,
             )
 
 
@@ -191,15 +206,13 @@ class DreamJob(BackgroundJob):
 
     def __init__(
         self,
-        memory_store: MemoryStore,
+        memory_stores: dict[str, MemoryStore],
         client: anthropic.Anthropic,
-        transcripts_dir: Path,
         *,
         model: str = "",
     ) -> None:
-        self.store = memory_store
+        self.stores = memory_stores
         self.client = client
-        self.transcripts_dir = transcripts_dir
         self.model = model
 
     def should_run(self, now: float) -> tuple[bool, str]:
@@ -210,50 +223,70 @@ class DreamJob(BackgroundJob):
         if local_now.hour != settings.dream_hour:
             return False, f"not dream hour (current={local_now.hour}, target={settings.dream_hour})"
 
-        state = self.store.load_state()
-        last_dream = state.get("last_dream_at", 0)
-        if last_dream > 0:
-            last_dream_date = datetime.fromtimestamp(last_dream).date()
-            if last_dream_date == local_now.date():
-                return False, "already dreamed today"
+        for store in list(self.stores.values()):
+            state = store.load_state()
+            last_dream = state.get("last_dream_at", 0)
+            if last_dream > 0:
+                last_dream_date = datetime.fromtimestamp(last_dream).date()
+                if last_dream_date == local_now.date():
+                    continue
 
-        obs_count = len(self.store.load_all_observations())
-        if obs_count < settings.dream_min_observations:
-            return False, f"observations {obs_count}/{settings.dream_min_observations}"
+            obs_count = len(store.load_all_observations())
+            if obs_count < settings.dream_min_observations:
+                continue
 
-        last_activity = state.get("last_activity_at", 0)
-        if last_activity > 0 and (now - last_activity) < settings.dream_inactive_minutes * 60:
-            return False, "system recently active"
+            last_activity = state.get("last_activity_at", 0)
+            if last_activity > 0 and (now - last_activity) < settings.dream_inactive_minutes * 60:
+                continue
 
-        return True, "dream conditions met"
+            return True, f"dream conditions met for agent {store.agent_id}"
+
+        return False, "no agent ready to dream"
 
     def execute(self, now: float, output_queue: list[str], queue_lock: threading.Lock) -> None:
+        from pip_agent.config import settings
         from pip_agent.memory.consolidate import consolidate, distill_axioms
 
-        state = self.store.load_state()
-        observations = self.store.load_all_observations()
-        memories = self.store.load_memories()
-        cycle = state.get("consolidate_cycle", 0) + 1
+        local_now = datetime.fromtimestamp(now)
 
-        updated = consolidate(
-            self.client, observations, memories, cycle, model=self.model,
-        )
-        self.store.save_memories(updated)
+        for agent_id, store in list(self.stores.items()):
+            state = store.load_state()
+            last_dream = state.get("last_dream_at", 0)
+            if last_dream > 0:
+                last_dream_date = datetime.fromtimestamp(last_dream).date()
+                if last_dream_date == local_now.date():
+                    continue
 
-        axioms_text = distill_axioms(self.client, updated, model=self.model)
-        if axioms_text:
-            self.store.save_axioms(axioms_text)
+            observations = store.load_all_observations()
+            if len(observations) < settings.dream_min_observations:
+                continue
 
-        cleared = self.store.clear_observations()
+            last_activity = state.get("last_activity_at", 0)
+            if last_activity > 0 and (now - last_activity) < settings.dream_inactive_minutes * 60:
+                continue
 
-        state["last_dream_at"] = now
-        state["consolidate_cycle"] = cycle
-        self.store.save_state(state)
+            memories = store.load_memories()
+            cycle = state.get("consolidate_cycle", 0) + 1
 
-        log.info(
-            "Dream complete: %d memories, axioms=%s, cleared %d obs files for agent %s",
-            len(updated), bool(axioms_text), cleared, self.store.agent_id,
-        )
+            updated = consolidate(
+                self.client, observations, memories, cycle, model=self.model,
+            )
+            store.save_memories(updated)
+
+            axioms_text = distill_axioms(self.client, updated, model=self.model)
+            if axioms_text:
+                store.save_axioms(axioms_text)
+
+            cleared = store.clear_observations()
+
+            state["last_dream_at"] = now
+            state["consolidate_cycle"] = cycle
+            store.save_state(state)
+
+            log.info(
+                "Dream complete: %d memories, axioms=%s, cleared %d obs files for agent %s",
+                len(updated), bool(axioms_text), cleared, agent_id,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -264,12 +297,12 @@ HEARTBEAT_SENDER = "__heartbeat__"
 
 
 class HeartbeatJob(BackgroundJob):
-    """Heartbeat job that enqueues a synthetic message into the main loop.
+    """Heartbeat job that enqueues synthetic messages into the main loop.
 
-    Instead of calling LLM directly, the heartbeat pushes an InboundMessage
-    into the shared msg_queue.  The main loop processes it through the normal
-    agent_loop pipeline, giving the heartbeat full tool access, memory
-    enrichment, and conversation management.
+    Scans all agent directories under ``agents_dir`` for HEARTBEAT.md files.
+    Each agent with a valid heartbeat config gets its own message enqueued
+    through the normal agent_loop pipeline, giving every agent full tool
+    access, memory enrichment, and conversation management.
     """
 
     name = "heartbeat"
@@ -277,28 +310,21 @@ class HeartbeatJob(BackgroundJob):
 
     def __init__(
         self,
-        agent_dir: Path,
+        agents_dir: Path,
         *,
         msg_queue: list | None = None,
         q_lock: threading.Lock | None = None,
     ) -> None:
-        self.agent_dir = agent_dir
-        self.heartbeat_path = agent_dir / "HEARTBEAT.md"
+        self.agents_dir = agents_dir
         self.msg_queue = msg_queue
         self.q_lock = q_lock
-        # Seed with startup time so the first heartbeat fires after a full
-        # interval, not immediately after launch.
         self.last_run_at: float = time.time()
 
     _FM_RE = re.compile(r"^---\n(.*?)\n---\n?(.*)", re.DOTALL)
 
-    def _parse_heartbeat(self) -> tuple[dict, str]:
-        """Read HEARTBEAT.md and split YAML frontmatter from body.
-
-        Returns (meta, body) where *meta* may contain ``channel`` and
-        ``peer_id`` to override the default reply destination.
-        """
-        raw = self.heartbeat_path.read_text(encoding="utf-8").strip()
+    def _parse_heartbeat(self, heartbeat_path: Path) -> tuple[dict, str]:
+        """Read HEARTBEAT.md and split YAML frontmatter from body."""
+        raw = heartbeat_path.read_text(encoding="utf-8", errors="replace").strip()
         m = self._FM_RE.match(raw)
         if not m:
             return {}, raw
@@ -308,64 +334,101 @@ class HeartbeatJob(BackgroundJob):
             meta = {}
         return meta, m.group(2).strip()
 
+    def _iter_heartbeats(self) -> list[Path]:
+        """Return all HEARTBEAT.md files across agent directories."""
+        results: list[Path] = []
+        if not self.agents_dir.is_dir():
+            return results
+        for child in self.agents_dir.iterdir():
+            if not child.is_dir():
+                continue
+            hb = child / "HEARTBEAT.md"
+            if hb.is_file():
+                results.append(hb)
+        return results
+
     def should_run(self, now: float) -> tuple[bool, str]:
         from pip_agent.config import settings
 
-        if not self.heartbeat_path.exists():
-            return False, "HEARTBEAT.md not found"
-        try:
-            _meta, body = self._parse_heartbeat()
-        except OSError:
-            return False, "HEARTBEAT.md read error"
-        if not body:
-            return False, "HEARTBEAT.md is empty"
+        heartbeats = self._iter_heartbeats()
+        if not heartbeats:
+            return False, "no HEARTBEAT.md found"
 
         elapsed = now - self.last_run_at
         if elapsed < settings.heartbeat_interval:
             remaining = settings.heartbeat_interval - elapsed
             return False, f"interval not elapsed ({remaining:.0f}s remaining)"
 
-        hour = datetime.now().hour
+        hour = datetime.fromtimestamp(now).hour
         s, e = settings.heartbeat_active_start, settings.heartbeat_active_end
         in_hours = (s <= hour < e) if s <= e else not (e <= hour < s)
         if not in_hours:
             return False, f"outside active hours ({s}:00-{e}:00)"
 
-        return True, "all checks passed"
+        for hb_path in heartbeats:
+            try:
+                _meta, body = self._parse_heartbeat(hb_path)
+            except OSError:
+                continue
+            if body:
+                return True, "all checks passed"
+
+        return False, "all HEARTBEAT.md files are empty"
 
     def execute(self, now: float, output_queue: list[str], queue_lock: threading.Lock) -> None:
-        meta, instructions = self._parse_heartbeat()
-        if not instructions:
-            return
-        channel = meta.get("channel", "cli")
-        peer_id = meta.get("peer_id", "cli-user")
-        self._enqueue(
-            f"<heartbeat>\n{instructions}\n</heartbeat>",
-            channel=channel, peer_id=peer_id,
-        )
+        for hb_path in self._iter_heartbeats():
+            try:
+                meta, instructions = self._parse_heartbeat(hb_path)
+            except OSError:
+                continue
+            if not instructions:
+                continue
+            agent_id = hb_path.parent.name
+            channel = meta.get("channel", "cli")
+            peer_id = meta.get("peer_id", "cli-user")
+            self._enqueue(
+                f"<heartbeat>\n{instructions}\n</heartbeat>",
+                channel=channel, peer_id=peer_id,
+                agent_id=agent_id,
+            )
+            log.debug(
+                "Heartbeat enqueued for %s (channel=%s, peer_id=%s)",
+                agent_id, channel, peer_id,
+            )
         self.last_run_at = time.time()
-        log.debug("Heartbeat message enqueued (channel=%s, peer_id=%s)", channel, peer_id)
 
     def trigger(self) -> str:
         """Manual trigger, bypasses interval check."""
-        if not self.heartbeat_path.exists():
-            return "HEARTBEAT.md not found"
-        try:
-            meta, instructions = self._parse_heartbeat()
-        except OSError:
-            return "HEARTBEAT.md read error"
-        if not instructions:
-            return "HEARTBEAT.md is empty"
-        channel = meta.get("channel", "cli")
-        peer_id = meta.get("peer_id", "cli-user")
-        self._enqueue(
-            f"<heartbeat>\n{instructions}\n</heartbeat>",
-            channel=channel, peer_id=peer_id,
-        )
+        heartbeats = self._iter_heartbeats()
+        if not heartbeats:
+            return "No HEARTBEAT.md found"
+        enqueued = 0
+        for hb_path in heartbeats:
+            try:
+                meta, instructions = self._parse_heartbeat(hb_path)
+            except OSError:
+                continue
+            if not instructions:
+                continue
+            agent_id = hb_path.parent.name
+            channel = meta.get("channel", "cli")
+            peer_id = meta.get("peer_id", "cli-user")
+            self._enqueue(
+                f"<heartbeat>\n{instructions}\n</heartbeat>",
+                channel=channel, peer_id=peer_id,
+                agent_id=agent_id,
+            )
+            enqueued += 1
         self.last_run_at = time.time()
-        return "heartbeat enqueued"
+        return f"heartbeat enqueued for {enqueued} agent(s)"
 
-    def _enqueue(self, text: str, channel: str = "cli", peer_id: str = "cli-user") -> None:
+    def _enqueue(
+        self,
+        text: str,
+        channel: str = "cli",
+        peer_id: str = "cli-user",
+        agent_id: str = "",
+    ) -> None:
         if self.msg_queue is None or self.q_lock is None:
             log.warning("HeartbeatJob: msg_queue not configured, cannot enqueue")
             return
@@ -376,6 +439,7 @@ class HeartbeatJob(BackgroundJob):
             sender_id=HEARTBEAT_SENDER,
             channel=channel,
             peer_id=peer_id,
+            agent_id=agent_id,
         )
         with self.q_lock:
             self.msg_queue.append(msg)
@@ -385,10 +449,15 @@ class HeartbeatJob(BackgroundJob):
 
         now = time.time()
         elapsed = now - self.last_run_at if self.last_run_at > 0 else None
-        next_in = max(0.0, settings.heartbeat_interval - elapsed) if elapsed is not None else settings.heartbeat_interval
+        if elapsed is not None:
+            next_in = max(0.0, settings.heartbeat_interval - elapsed)
+        else:
+            next_in = settings.heartbeat_interval
         ok, reason = self.should_run(now)
+        hb_count = len(self._iter_heartbeats())
         return {
-            "enabled": self.heartbeat_path.exists(),
+            "enabled": hb_count > 0,
+            "agents": hb_count,
             "should_run": ok,
             "reason": reason,
             "last_run": (
@@ -397,7 +466,10 @@ class HeartbeatJob(BackgroundJob):
             ),
             "next_in": f"{round(next_in)}s",
             "interval": f"{settings.heartbeat_interval}s",
-            "active_hours": f"{settings.heartbeat_active_start}:00-{settings.heartbeat_active_end}:00",
+            "active_hours": (
+                f"{settings.heartbeat_active_start}:00"
+                f"-{settings.heartbeat_active_end}:00"
+            ),
         }
 
 
@@ -434,6 +506,7 @@ class CronJob:
 class CronService(BackgroundJob):
     """Manages user-defined scheduled tasks from CRON.json.
 
+    Scans all agent directories under ``agents_dir`` for CRON.json files.
     Instead of calling LLM directly, enqueues synthetic InboundMessages
     into the shared msg_queue for processing by the main agent loop.
     """
@@ -443,38 +516,61 @@ class CronService(BackgroundJob):
 
     def __init__(
         self,
-        cron_file: Path,
+        agents_dir: Path,
         *,
         msg_queue: list | None = None,
         q_lock: threading.Lock | None = None,
     ) -> None:
-        self.cron_file = cron_file
+        self.agents_dir = agents_dir
         self.msg_queue = msg_queue
         self.q_lock = q_lock
+        self._lock = threading.Lock()
         self.jobs: list[CronJob] = []
-        self._run_log = cron_file.parent / "cron-runs.jsonl"
+        self._cron_files: dict[str, Path] = {}
         self.load_jobs()
 
     # -- persistence --
 
+    def _iter_cron_files(self) -> list[Path]:
+        """Return all CRON.json files across agent directories."""
+        results: list[Path] = []
+        if not self.agents_dir.is_dir():
+            return results
+        for child in self.agents_dir.iterdir():
+            if not child.is_dir():
+                continue
+            cf = child / "CRON.json"
+            if cf.is_file():
+                results.append(cf)
+        return results
+
     def load_jobs(self) -> None:
         self.jobs.clear()
-        if not self.cron_file.exists():
-            return
-        try:
-            raw = json.loads(self.cron_file.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
-            log.warning("CRON.json load error: %s", exc)
-            return
+        self._cron_files.clear()
         now = time.time()
+        for cron_file in self._iter_cron_files():
+            self._load_from_file(cron_file, now)
+
+    def _load_from_file(self, cron_file: Path, now: float) -> None:
+        try:
+            raw = json.loads(cron_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+            log.warning("CRON.json load error (%s): %s", cron_file, exc)
+            return
+        agent_prefix = cron_file.parent.name
         for jd in raw.get("jobs", []):
             sched = jd.get("schedule", {})
             kind = sched.get("kind", "")
             if kind not in ("at", "every", "cron"):
                 continue
             src = jd.get("source", {})
+            raw_id = jd.get("id", _slug(jd.get("name", "")))
+            qualified_id = (
+                raw_id if raw_id.startswith(f"{agent_prefix}/")
+                else f"{agent_prefix}/{raw_id}"
+            )
             job = CronJob(
-                id=jd.get("id", _slug(jd.get("name", ""))),
+                id=qualified_id,
                 name=jd.get("name", ""),
                 enabled=jd.get("enabled", True),
                 schedule_kind=kind,
@@ -490,30 +586,44 @@ class CronService(BackgroundJob):
             )
             job.next_run_at = self._compute_next(job, now)
             self.jobs.append(job)
+            self._cron_files[job.id] = cron_file
+
+    @property
+    def cron_file(self) -> Path:
+        """Default cron file path (first agent dir) for backward compat."""
+        if self._cron_files:
+            return next(iter(self._cron_files.values()))
+        return self.agents_dir / "CRON.json"
 
     def _save_jobs(self) -> None:
         from pip_agent.fileutil import atomic_write
 
-        data = {
-            "jobs": [
-                {
-                    "id": j.id, "name": j.name, "enabled": j.enabled,
-                    "schedule": {
-                        "kind": j.schedule_kind, **j.schedule_config,
-                    },
-                    "payload": j.payload,
-                    "source": {
-                        "channel": j.source.channel,
-                        "peer_id": j.source.peer_id,
-                        "sender_id": j.source.sender_id,
-                    },
-                    "delete_after_run": j.delete_after_run,
-                    "consecutive_errors": j.consecutive_errors,
-                }
-                for j in self.jobs
-            ],
-        }
-        atomic_write(self.cron_file, json.dumps(data, indent=2, ensure_ascii=False))
+        by_file: dict[Path, list[CronJob]] = {}
+        for job in self.jobs:
+            cf = self._cron_files.get(job.id, self.cron_file)
+            by_file.setdefault(cf, []).append(job)
+
+        for cron_file, jobs in by_file.items():
+            data = {
+                "jobs": [
+                    {
+                        "id": j.id, "name": j.name, "enabled": j.enabled,
+                        "schedule": {
+                            "kind": j.schedule_kind, **j.schedule_config,
+                        },
+                        "payload": j.payload,
+                        "source": {
+                            "channel": j.source.channel,
+                            "peer_id": j.source.peer_id,
+                            "sender_id": j.source.sender_id,
+                        },
+                        "delete_after_run": j.delete_after_run,
+                        "consecutive_errors": j.consecutive_errors,
+                    }
+                    for j in jobs
+                ],
+            }
+            atomic_write(cron_file, json.dumps(data, indent=2, ensure_ascii=False))
 
     # -- scheduling --
 
@@ -549,22 +659,24 @@ class CronService(BackgroundJob):
     # -- BackgroundJob interface --
 
     def should_run(self, now: float) -> tuple[bool, str]:
-        for job in self.jobs:
-            if job.enabled and job.next_run_at > 0 and now >= job.next_run_at:
-                return True, f"job '{job.name}' is due"
+        with self._lock:
+            for job in self.jobs:
+                if job.enabled and job.next_run_at > 0 and now >= job.next_run_at:
+                    return True, f"job '{job.name}' is due"
         return False, "no jobs due"
 
     def execute(self, now: float, output_queue: list[str], queue_lock: threading.Lock) -> None:
-        remove_ids: list[str] = []
-        for job in self.jobs:
-            if not job.enabled or job.next_run_at <= 0 or now < job.next_run_at:
-                continue
-            self._run_job(job, now)
-            if job.delete_after_run and job.schedule_kind == "at":
-                remove_ids.append(job.id)
-        if remove_ids:
-            self.jobs = [j for j in self.jobs if j.id not in remove_ids]
-            self._save_jobs()
+        with self._lock:
+            remove_ids: list[str] = []
+            for job in self.jobs:
+                if not job.enabled or job.next_run_at <= 0 or now < job.next_run_at:
+                    continue
+                self._run_job(job, now)
+                if job.delete_after_run and job.schedule_kind == "at":
+                    remove_ids.append(job.id)
+            if remove_ids:
+                self.jobs = [j for j in self.jobs if j.id not in remove_ids]
+                self._save_jobs()
 
     def _run_job(self, job: CronJob, now: float) -> None:
         payload = job.payload
@@ -589,13 +701,18 @@ class CronService(BackgroundJob):
             "run_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
             "status": "enqueued",
         }
+        cron_file = self._cron_files.get(job.id, self.cron_file)
+        run_log = cron_file.parent / "cron-runs.jsonl"
         try:
-            with open(self._run_log, "a", encoding="utf-8") as f:
+            with open(run_log, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except OSError:
             pass
 
-        log.debug("Cron job '%s' enqueued to %s:%s", job.name, job.source.channel, job.source.peer_id)
+        log.debug(
+            "Cron job '%s' enqueued to %s:%s",
+            job.name, job.source.channel, job.source.peer_id,
+        )
 
     def _enqueue(self, job: CronJob, message: str) -> None:
         if self.msg_queue is None or self.q_lock is None:
@@ -630,31 +747,46 @@ class CronService(BackgroundJob):
         channel: str = "cli",
         peer_id: str = "cli-user",
         sender_id: str = "",
+        agent_id: str = "",
     ) -> str:
         if schedule_kind not in ("at", "every", "cron"):
             return f"[error] Invalid schedule_kind: {schedule_kind}"
 
-        job_id = _slug(name)
-        base = job_id
-        counter = 1
-        existing_ids = {j.id for j in self.jobs}
-        while job_id in existing_ids:
-            counter += 1
-            job_id = f"{base}-{counter}"
+        with self._lock:
+            prefix = agent_id or "default"
+            job_id = f"{prefix}/{_slug(name)}"
+            base = job_id
+            counter = 1
+            existing_ids = {j.id for j in self.jobs}
+            while job_id in existing_ids:
+                counter += 1
+                job_id = f"{base}-{counter}"
 
-        auto_delete = delete_after_run if delete_after_run is not None else (schedule_kind == "at")
+            auto_delete = (
+                delete_after_run
+                if delete_after_run is not None
+                else (schedule_kind == "at")
+            )
 
-        job = CronJob(
-            id=job_id, name=name, enabled=True,
-            schedule_kind=schedule_kind,
-            schedule_config={"kind": schedule_kind, **schedule_config},
-            payload={"kind": "agent_turn", "message": message},
-            source=CronJobSource(channel=channel, peer_id=peer_id, sender_id=sender_id),
-            delete_after_run=auto_delete,
-        )
-        job.next_run_at = self._compute_next(job, time.time())
-        self.jobs.append(job)
-        self._save_jobs()
+            job = CronJob(
+                id=job_id, name=name, enabled=True,
+                schedule_kind=schedule_kind,
+                schedule_config={"kind": schedule_kind, **schedule_config},
+                payload={"kind": "agent_turn", "message": message},
+                source=CronJobSource(
+                    channel=channel, peer_id=peer_id, sender_id=sender_id,
+                ),
+                delete_after_run=auto_delete,
+            )
+            if agent_id:
+                target_file = self.agents_dir / agent_id / "CRON.json"
+            else:
+                target_file = self.cron_file
+            self._cron_files[job_id] = target_file
+
+            job.next_run_at = self._compute_next(job, time.time())
+            self.jobs.append(job)
+            self._save_jobs()
 
         next_str = (
             datetime.fromtimestamp(job.next_run_at).strftime("%Y-%m-%d %H:%M:%S")
@@ -663,49 +795,54 @@ class CronService(BackgroundJob):
         return f"Created job '{name}' (id={job_id}, next_run={next_str})"
 
     def remove_job(self, job_id: str) -> str:
-        before = len(self.jobs)
-        self.jobs = [j for j in self.jobs if j.id != job_id]
-        if len(self.jobs) < before:
-            self._save_jobs()
-            return f"Removed job '{job_id}'"
+        with self._lock:
+            before = len(self.jobs)
+            self.jobs = [j for j in self.jobs if j.id != job_id]
+            if len(self.jobs) < before:
+                self._save_jobs()
+                return f"Removed job '{job_id}'"
         return f"[error] Job '{job_id}' not found"
 
     def update_job(self, job_id: str, **fields: Any) -> str:
-        for job in self.jobs:
-            if job.id != job_id:
-                continue
+        with self._lock:
+            for job in self.jobs:
+                if job.id != job_id:
+                    continue
 
-            updated: list[str] = []
-            if "enabled" in fields:
-                job.enabled = bool(fields["enabled"])
-                updated.append(f"enabled={job.enabled}")
-            if "name" in fields:
-                job.name = str(fields["name"])
-                updated.append(f"name={job.name}")
-            if "schedule_kind" in fields:
-                kind = str(fields["schedule_kind"])
-                if kind not in ("at", "every", "cron"):
-                    return f"[error] Invalid schedule_kind: {kind}"
-                job.schedule_kind = kind
-                updated.append(f"schedule_kind={kind}")
-            if "schedule_config" in fields:
-                cfg = fields["schedule_config"]
-                if isinstance(cfg, dict):
-                    job.schedule_config = {"kind": job.schedule_kind, **cfg}
-                    updated.append("schedule_config updated")
-            if "message" in fields:
-                job.payload = {"kind": "agent_turn", "message": str(fields["message"])}
-                updated.append("message updated")
+                updated: list[str] = []
+                if "enabled" in fields:
+                    job.enabled = bool(fields["enabled"])
+                    updated.append(f"enabled={job.enabled}")
+                if "name" in fields:
+                    job.name = str(fields["name"])
+                    updated.append(f"name={job.name}")
+                if "schedule_kind" in fields:
+                    kind = str(fields["schedule_kind"])
+                    if kind not in ("at", "every", "cron"):
+                        return f"[error] Invalid schedule_kind: {kind}"
+                    job.schedule_kind = kind
+                    updated.append(f"schedule_kind={kind}")
+                if "schedule_config" in fields:
+                    cfg = fields["schedule_config"]
+                    if isinstance(cfg, dict):
+                        job.schedule_config = {"kind": job.schedule_kind, **cfg}
+                        updated.append("schedule_config updated")
+                if "message" in fields:
+                    job.payload = {
+                        "kind": "agent_turn",
+                        "message": str(fields["message"]),
+                    }
+                    updated.append("message updated")
 
-            if "schedule_kind" in fields or "schedule_config" in fields:
-                job.next_run_at = self._compute_next(job, time.time())
-                job.consecutive_errors = 0
+                if "schedule_kind" in fields or "schedule_config" in fields:
+                    job.next_run_at = self._compute_next(job, time.time())
+                    job.consecutive_errors = 0
 
-            if not updated:
-                return "No fields to update."
+                if not updated:
+                    return "No fields to update."
 
-            self._save_jobs()
-            return f"Updated job '{job_id}': {', '.join(updated)}"
+                self._save_jobs()
+                return f"Updated job '{job_id}': {', '.join(updated)}"
 
         return f"[error] Job '{job_id}' not found"
 

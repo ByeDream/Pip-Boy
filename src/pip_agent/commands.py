@@ -15,7 +15,6 @@ import re
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
-import json
 from typing import TYPE_CHECKING, Any
 
 from pip_agent.channels import InboundMessage
@@ -103,20 +102,22 @@ def dispatch_command(ctx: CommandContext) -> CommandResult:
         return CommandResult(handled=False)
 
     # --- ACL gate ---
+    _NO_ACL: set[str] = {"/help", "/status"}
     ms = ctx.memory_store
     ch, sid = ctx.inbound.channel, ctx.inbound.sender_id
     owner = ms.is_owner(ch, sid) if ms else (ch == "cli")
 
-    _OWNER_ONLY: set[str] = {"/admin"}
-    if cmd in _OWNER_ONLY and not owner:
-        return CommandResult(handled=True, response="Permission denied: owner only.")
-    if not owner:
-        admin = ms.is_admin(ch, sid) if ms else False
-        if not admin:
-            return CommandResult(
-                handled=True,
-                response="Permission denied: admin privileges required.",
-            )
+    if cmd not in _NO_ACL:
+        _OWNER_ONLY: set[str] = {"/admin"}
+        if cmd in _OWNER_ONLY and not owner:
+            return CommandResult(handled=True, response="Permission denied: owner only.")
+        if not owner:
+            admin = ms.is_admin(ch, sid) if ms else False
+            if not admin:
+                return CommandResult(
+                    handled=True,
+                    response="Permission denied: admin privileges required.",
+                )
 
     return handler(ctx, args)
 
@@ -274,7 +275,12 @@ def _cmd_bind(ctx: CommandContext, args: str) -> CommandResult:
             return CommandResult(handled=True, response=f"Unknown option: {tok}")
 
     inbound = ctx.inbound
-    if inbound.is_group and inbound.guild_id:
+    if inbound.is_group:
+        if not inbound.guild_id:
+            return CommandResult(
+                handled=True,
+                response="Cannot bind in group: missing guild_id.",
+            )
         tier, match_key, match_value = 2, "guild_id", inbound.guild_id
     else:
         tier, match_key, match_value = 1, "peer_id", inbound.peer_id

@@ -100,6 +100,7 @@ class InboundMessage:
     guild_id: str = ""          # group/guild id (e.g. WeCom chatid)
     account_id: str = ""        # bot account id (for T3 routing)
     is_group: bool = False
+    agent_id: str = ""          # routing override: skip binding_table.resolve
     raw: dict = field(default_factory=dict)
     attachments: list[Attachment] = field(default_factory=list)
 
@@ -599,6 +600,7 @@ class WecomChannel(Channel):
         self._q_lock = q_lock
 
         self._ws_client: Any = None
+        self._ws_loop: Any = None
         self._pending_frames: dict[str, Any] = {}
 
     _DOWNLOAD_TIMEOUT = 30  # seconds
@@ -815,6 +817,7 @@ class WecomChannel(Channel):
             _enqueue(frame, text, atts)
 
         async def _run():
+            self._ws_loop = asyncio.get_running_loop()
             await ws.connect()
             while not stop_event.is_set():
                 await asyncio.sleep(0.5)
@@ -893,20 +896,24 @@ class WecomChannel(Channel):
         })
 
     def _run_async(self, coro: Any) -> Any:
-        """Schedule an async coroutine from a sync context."""
+        """Schedule an async coroutine on the WS thread's event loop."""
         import asyncio
+        import concurrent.futures
+
+        loop = self._ws_loop
+        if loop is None or loop.is_closed():
+            log.warning("wecom _run_async: WS loop not available")
+            return None
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.ensure_future(coro)
-                return None
-            return loop.run_until_complete(coro)
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            try:
-                return loop.run_until_complete(coro)
-            finally:
-                loop.close()
+            return future.result(timeout=30)
+        except concurrent.futures.TimeoutError:
+            log.warning("wecom _run_async: timed out")
+            future.cancel()
+            return None
+        except Exception:
+            log.exception("wecom _run_async: coroutine failed")
+            return None
 
     def send_image(self, to: str, image_data: bytes, caption: str = "", **kw: Any) -> bool:
         if not self._ws_client or not image_data:

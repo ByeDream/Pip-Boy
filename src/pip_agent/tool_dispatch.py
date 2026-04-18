@@ -135,12 +135,14 @@ def _handle_load_skill(ctx: ToolContext, inp: dict) -> DispatchResult:
 
 
 def _handle_bash(ctx: ToolContext, inp: dict) -> DispatchResult:
-    if inp.get("background") and ctx.bg_manager is not None:
-        from functools import partial
-        task_id = uuid.uuid4().hex[:8]
-        fn = partial(run_bash, workdir=ctx.workdir) if ctx.workdir else run_bash
-        ctx.bg_manager.spawn(task_id, inp["command"], fn, inp)
-        return DispatchResult(content=f"[background:{task_id}] started")
+    if inp.get("background"):
+        if ctx.bg_manager is not None:
+            from functools import partial
+            task_id = uuid.uuid4().hex[:8]
+            fn = partial(run_bash, workdir=ctx.workdir) if ctx.workdir else run_bash
+            ctx.bg_manager.spawn(task_id, inp["command"], fn, inp)
+            return DispatchResult(content=f"[background:{task_id}] started")
+        log.warning("background=True requested but bg_manager is None; running foreground")
     return DispatchResult(content=_wrap_simple(run_bash, inp, workdir=ctx.workdir))
 
 
@@ -447,7 +449,10 @@ def _handle_memory_search(ctx: ToolContext, inp: dict) -> DispatchResult:
     query = inp.get("query", "").strip()
     if not query:
         return DispatchResult(content="[error] 'query' is required")
-    top_k = inp.get("top_k", 5)
+    try:
+        top_k = int(inp.get("top_k", 5))
+    except (ValueError, TypeError):
+        top_k = 5
     results = ctx.memory_store.search(query, top_k=top_k)
     if not results:
         return DispatchResult(content="(no matching memories)")
@@ -479,6 +484,7 @@ def _handle_cron_add(ctx: ToolContext, inp: dict) -> DispatchResult:
         channel=ctx.channel.name if ctx.channel else "cli",
         peer_id=ctx.peer_id or "cli-user",
         sender_id=ctx.sender_id,
+        agent_id=ctx.memory_store.agent_id if ctx.memory_store else "",
     )
     return DispatchResult(content=result)
 
@@ -498,7 +504,7 @@ def _handle_cron_update(ctx: ToolContext, inp: dict) -> DispatchResult:
     cs = ctx.scheduler.get_cron_service()
     if cs is None:
         return DispatchResult(content="Cron service not available.")
-    job_id = inp.pop("job_id", "")
+    job_id = inp.get("job_id", "")
     if not job_id:
         return DispatchResult(content="[error] job_id is required.")
     return DispatchResult(content=cs.update_job(job_id, **inp))
@@ -582,6 +588,9 @@ def dispatch_tool(ctx: ToolContext, name: str, tool_input: dict) -> DispatchResu
         ctx.profiler.start(f"tool:{name}")
     try:
         return handler(ctx, tool_input)
+    except Exception as exc:
+        log.exception("tool '%s' raised: %s", name, exc)
+        return DispatchResult(content=f"[error] tool '{name}' failed: {exc}")
     finally:
         if profile:
             ctx.profiler.stop()

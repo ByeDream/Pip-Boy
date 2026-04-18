@@ -411,6 +411,11 @@ class Teammate:
             last = messages[-1]
             if isinstance(last["content"], list):
                 last["content"].extend(new_content)
+            elif isinstance(last["content"], str):
+                last["content"] = [
+                    {"type": "text", "text": last["content"]},
+                    *new_content,
+                ]
             else:
                 messages.append({"role": "user", "content": new_content})
         else:
@@ -565,17 +570,25 @@ class Teammate:
         new_inbox = self._bus.read_inbox(self.spec.name)
         if not new_inbox:
             return
-        parts = [_format_team_message(msg) for msg in new_inbox]
+        new_content = [
+            {"type": "text", "text": _format_team_message(msg)}
+            for msg in new_inbox
+        ]
         last = messages[-1]
         if last["role"] == "user" and isinstance(last["content"], list):
-            for text in parts:
-                last["content"].append({"type": "text", "text": text})
-        elif settings.verbose:
-            print(
-                f"  [{self.spec.name}] inbox DROPPED {len(parts)} msg(s), "
-                f"last role={last['role']}, "
-                f"content type={type(last.get('content')).__name__}"
+            last["content"].extend(new_content)
+        elif last["role"] == "user" and isinstance(last["content"], str):
+            last["content"] = [
+                {"type": "text", "text": last["content"]},
+                *new_content,
+            ]
+        else:
+            log.warning(
+                "[%s] inbox: cannot inject %d msg(s), last role=%s; "
+                "appending new user turn",
+                self.spec.name, len(new_content), last["role"],
             )
+            messages.append({"role": "user", "content": new_content})
 
     # -- Tool dispatch ------------------------------------------------------
 
@@ -807,10 +820,6 @@ class TeamManager:
     def spawn(
         self, name: str, prompt: str, *, model: str, max_turns: int,
     ) -> str:
-        with self._active_lock:
-            if name in self._active:
-                state = self._active[name].status
-                return f"[error] '{name}' is currently {state}."
         valid = self._valid_models()
         if valid and model not in valid:
             return (
@@ -824,9 +833,12 @@ class TeamManager:
         if spec is None:
             available = ", ".join(sorted(self._roster.keys())) or "(none)"
             return f"[error] Unknown teammate '{name}'. Available: {available}"
-        teammate = self._make_teammate(spec, model=model, max_turns=max_turns)
-        teammate.start()
         with self._active_lock:
+            if name in self._active:
+                state = self._active[name].status
+                return f"[error] '{name}' is currently {state}."
+            teammate = self._make_teammate(spec, model=model, max_turns=max_turns)
+            teammate.start()
             self._active[name] = teammate
         self._bus.send(self.LEAD, name, prompt, "message")
         return f"Spawned '{name}' ({model}, max {max_turns} turns)."

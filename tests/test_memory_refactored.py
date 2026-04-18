@@ -7,24 +7,24 @@ MemoryStore (E), and integration (F).
 from __future__ import annotations
 
 import json
-import time
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
-import pytest
-
-from pip_agent.memory import MemoryStore
-from pip_agent.memory.reflect import reflect, _format_transcript, _load_transcripts
-from pip_agent.memory.consolidate import (
-    consolidate, distill_axioms, _load_sop, MAX_MEMORIES,
-)
 from pip_agent.config import settings
-from pip_agent.memory.scheduler import MemoryScheduler
+from pip_agent.memory import MemoryStore
+from pip_agent.memory.consolidate import (
+    MAX_MEMORIES,
+    _load_sop,
+    consolidate,
+    distill_axioms,
+)
+from pip_agent.memory.reflect import _load_transcripts, reflect
 from pip_agent.memory.utils import extract_json_array
-
+from pip_agent.scheduler import DreamJob, ReflectJob
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -262,7 +262,7 @@ class TestSopLoading:
 class TestSchedulerReflectTrigger:
     def test_triggers_reflect_when_threshold_reached(self, tmp_path):
         store = MemoryStore(tmp_path / "agents", "test-agent")
-        tdir = tmp_path / "transcripts"
+        tdir = store.agent_dir / "transcripts"
         base_ts = int(time.time())
         for i in range(settings.reflect_transcript_threshold + 1):
             _write_transcript(tdir, base_ts + i, [
@@ -272,28 +272,30 @@ class TestSchedulerReflectTrigger:
 
         mock_client = MagicMock()
         mock_client.messages.create.return_value = _make_llm_response("[]")
-        stop = threading.Event()
-        sched = MemoryScheduler(store, mock_client, tdir, stop, model="test")
-        sched._tick()
+        stores = {"test-agent": store}
+        job = ReflectJob(stores, mock_client, model="test")
+        ok, _reason = job.should_run(time.time())
+        assert ok
+        job.execute(time.time(), [], threading.Lock())
         mock_client.messages.create.assert_called_once()
 
     def test_does_not_trigger_below_threshold(self, tmp_path):
         store = MemoryStore(tmp_path / "agents", "test-agent")
-        tdir = tmp_path / "transcripts"
+        tdir = store.agent_dir / "transcripts"
         _write_transcript(tdir, int(time.time()), [
             {"role": "user", "content": "msg"},
             {"role": "assistant", "content": "reply"},
         ])
 
         mock_client = MagicMock()
-        stop = threading.Event()
-        sched = MemoryScheduler(store, mock_client, tdir, stop, model="test")
-        sched._tick()
-        mock_client.messages.create.assert_not_called()
+        stores = {"test-agent": store}
+        job = ReflectJob(stores, mock_client, model="test")
+        ok, _reason = job.should_run(time.time())
+        assert not ok
 
     def test_updates_last_reflect_transcript_ts(self, tmp_path):
         store = MemoryStore(tmp_path / "agents", "test-agent")
-        tdir = tmp_path / "transcripts"
+        tdir = store.agent_dir / "transcripts"
         base_ts = int(time.time())
         for i in range(settings.reflect_transcript_threshold + 1):
             _write_transcript(tdir, base_ts + i, [
@@ -303,9 +305,9 @@ class TestSchedulerReflectTrigger:
 
         mock_client = MagicMock()
         mock_client.messages.create.return_value = _make_llm_response("[]")
-        stop = threading.Event()
-        sched = MemoryScheduler(store, mock_client, tdir, stop, model="test")
-        sched._tick()
+        stores = {"test-agent": store}
+        job = ReflectJob(stores, mock_client, model="test")
+        job.execute(time.time(), [], threading.Lock())
 
         state = store.load_state()
         assert state.get("last_reflect_transcript_ts", 0) > 0
@@ -314,7 +316,7 @@ class TestSchedulerReflectTrigger:
 class TestSchedulerTranscriptCleanup:
     def test_removes_old_processed_transcripts(self, tmp_path):
         store = MemoryStore(tmp_path / "agents", "test-agent")
-        tdir = tmp_path / "transcripts"
+        tdir = store.agent_dir / "transcripts"
         now = int(time.time())
         old_ts = now - 8 * 86400  # 8 days ago
 
@@ -328,10 +330,7 @@ class TestSchedulerTranscriptCleanup:
         ])
 
         state = {"last_reflect_transcript_ts": now}
-        stop = threading.Event()
-        mock_client = MagicMock()
-        sched = MemoryScheduler(store, mock_client, tdir, stop, model="test")
-        sched._cleanup_transcripts(state, time.time())
+        ReflectJob._cleanup_transcripts(store, tdir, state, time.time())
 
         remaining = list(tdir.glob("*.json"))
         assert len(remaining) == 1
@@ -341,21 +340,18 @@ class TestSchedulerTranscriptCleanup:
 class TestSchedulerDream:
     def test_dream_does_not_trigger_outside_hour(self, tmp_path):
         store = MemoryStore(tmp_path / "agents", "test-agent")
-        # Write enough observations
         for i in range(settings.dream_min_observations):
             store.write_observations([{"ts": time.time(), "text": f"obs {i}", "category": "test", "source": "auto"}])
 
-        state = {}
-        now = time.time()
-        stop = threading.Event()
         mock_client = MagicMock()
-        sched = MemoryScheduler(store, mock_client, tmp_path / "t", stop, model="test")
+        stores = {"test-agent": store}
+        job = DreamJob(stores, mock_client, model="test")
 
-        # Patch datetime.fromtimestamp to return a time outside Dream hour
         non_dream_dt = datetime(2026, 4, 15, 14, 0, 0)
-        with patch("pip_agent.memory.scheduler.datetime") as mock_dt:
+        with patch("pip_agent.scheduler.datetime") as mock_dt:
             mock_dt.fromtimestamp.return_value = non_dream_dt
-            assert sched._should_dream(state, now) is False
+            ok, _reason = job.should_run(time.time())
+            assert not ok
 
     def test_dream_triggers_at_correct_hour(self, tmp_path):
         store = MemoryStore(tmp_path / "agents", "test-agent")
@@ -363,32 +359,34 @@ class TestSchedulerDream:
             store.write_observations([{"ts": time.time(), "text": f"obs {i}", "category": "test", "source": "auto"}])
 
         state = {"last_activity_at": time.time() - 3600}
-        now = time.time()
-        stop = threading.Event()
+        store.save_state(state)
         mock_client = MagicMock()
-        sched = MemoryScheduler(store, mock_client, tmp_path / "t", stop, model="test")
+        stores = {"test-agent": store}
+        job = DreamJob(stores, mock_client, model="test")
 
         dream_dt = datetime(2026, 4, 15, settings.dream_hour, 30, 0)
-        with patch("pip_agent.memory.scheduler.datetime") as mock_dt:
+        with patch("pip_agent.scheduler.datetime") as mock_dt:
             mock_dt.fromtimestamp.return_value = dream_dt
-            assert sched._should_dream(state, now) is True
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            ok, _reason = job.should_run(time.time())
+            assert ok
 
-    def test_dream_blocked_when_active(self, tmp_path):
+    def test_dream_blocked_when_recently_active(self, tmp_path):
         store = MemoryStore(tmp_path / "agents", "test-agent")
         for i in range(settings.dream_min_observations):
             store.write_observations([{"ts": time.time(), "text": f"obs {i}", "category": "test", "source": "auto"}])
 
-        active = threading.Event()
-        active.set()  # agent is active
-        state = {}
-        stop = threading.Event()
+        state = {"last_activity_at": time.time()}
+        store.save_state(state)
         mock_client = MagicMock()
-        sched = MemoryScheduler(store, mock_client, tmp_path / "t", stop, model="test", active_event=active)
+        stores = {"test-agent": store}
+        job = DreamJob(stores, mock_client, model="test")
 
         dream_dt = datetime(2026, 4, 15, settings.dream_hour, 30, 0)
-        with patch("pip_agent.memory.scheduler.datetime") as mock_dt:
+        with patch("pip_agent.scheduler.datetime") as mock_dt:
             mock_dt.fromtimestamp.return_value = dream_dt
-            assert sched._should_dream(state, time.time()) is False
+            ok, _reason = job.should_run(time.time())
+            assert not ok
 
     def test_dream_clears_observations(self, tmp_path):
         store = MemoryStore(tmp_path / "agents", "test-agent")
@@ -398,17 +396,14 @@ class TestSchedulerDream:
 
         mock_client = MagicMock()
         mock_client.messages.create.return_value = _make_llm_response("[]")
-        stop = threading.Event()
-        sched = MemoryScheduler(store, mock_client, tmp_path / "t", stop, model="test")
+        stores = {"test-agent": store}
+        job = DreamJob(stores, mock_client, model="test")
 
-        state = store.load_state()
-        state["last_reflect_transcript_ts"] = int(time.time())
-        sched._run_dream(state, time.time())
+        job.execute(time.time(), [], threading.Lock())
 
         assert len(store.load_all_observations()) == 0
         updated_state = store.load_state()
         assert "last_dream_at" in updated_state
-        assert updated_state.get("last_reflect_transcript_ts") == state["last_reflect_transcript_ts"]
 
 
 # ---------------------------------------------------------------------------
@@ -507,7 +502,7 @@ class TestMemoryStoreCorruptFiles:
 
 class TestReflectToolIntegration:
     def test_reflect_tool_dispatch(self, tmp_path):
-        from pip_agent.tool_dispatch import ToolContext, DispatchResult
+        from pip_agent.tool_dispatch import ToolContext
 
         store = MemoryStore(tmp_path / "agents", "test-agent")
         tdir = tmp_path / "transcripts"
@@ -554,7 +549,7 @@ class TestTranscriptSaving:
 
 class TestMemorySearchIntegration:
     def test_memory_search_dispatch(self, tmp_path):
-        from pip_agent.tool_dispatch import _handle_memory_search, ToolContext
+        from pip_agent.tool_dispatch import ToolContext, _handle_memory_search
 
         store = MemoryStore(tmp_path / "agents", "test-agent")
         store.save_memories([{

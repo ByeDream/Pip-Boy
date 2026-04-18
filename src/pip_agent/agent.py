@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import re
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import anthropic
@@ -44,6 +45,14 @@ from pip_agent.resilience import (
     SimulatedFailure,
     load_profiles,
 )
+from pip_agent.routing import (
+    AgentRegistry,
+    Binding,
+    BindingTable,
+    build_session_key,
+    normalize_agent_id,
+    resolve_effective_config,
+)
 from pip_agent.scheduler import (
     CRON_SENDER,
     HEARTBEAT_SENDER,
@@ -52,16 +61,6 @@ from pip_agent.scheduler import (
     DreamJob,
     HeartbeatJob,
     ReflectJob,
-)
-
-_BG_SENDERS = frozenset({HEARTBEAT_SENDER, CRON_SENDER})
-from pip_agent.routing import (
-    AgentRegistry,
-    Binding,
-    BindingTable,
-    build_session_key,
-    normalize_agent_id,
-    resolve_effective_config,
 )
 from pip_agent.skills import SkillRegistry
 from pip_agent.task_graph import PlanManager
@@ -74,6 +73,20 @@ from pip_agent.tools import (
     tools_for_role,
 )
 from pip_agent.worktree import WorktreeManager
+
+log = logging.getLogger(__name__)
+
+_BG_SENDERS = frozenset({HEARTBEAT_SENDER, CRON_SENDER})
+
+
+def _log_future_exception(future: object) -> None:
+    """Callback for CommandQueue futures: log exceptions instead of losing them."""
+    try:
+        exc = future.exception()  # type: ignore[union-attr]
+    except Exception:
+        return
+    if exc is not None:
+        log.error("lane worker raised: %s", exc, exc_info=exc)
 
 BUILTIN_SKILLS_DIR = Path(__file__).resolve().parent / "skills"
 USER_SKILLS_DIR = WORKDIR / ".pip" / "skills"
@@ -425,14 +438,19 @@ def _process_inbound(
     binding_table: BindingTable,
     team_managers: dict[str, TeamManager] | None = None,
     worktree_managers: dict[str, WorktreeManager] | None = None,
+    memory_stores: dict[str, MemoryStore] | None = None,
 ) -> None:
     """Run agent_loop for one InboundMessage and route the reply."""
-    agent_id, binding = binding_table.resolve(
-        channel=inbound.channel,
-        account_id=inbound.account_id,
-        guild_id=inbound.guild_id,
-        peer_id=inbound.peer_id,
-    )
+    if inbound.agent_id:
+        agent_id = inbound.agent_id
+        binding = None
+    else:
+        agent_id, binding = binding_table.resolve(
+            channel=inbound.channel,
+            account_id=inbound.account_id,
+            guild_id=inbound.guild_id,
+            peer_id=inbound.peer_id,
+        )
     if not agent_id:
         agent_id = registry.default_agent().id
 
@@ -474,6 +492,11 @@ def _process_inbound(
             )
             team_managers[effective.id].patch_model_enum(ctx.tools)
         team_manager = team_managers[effective.id]
+
+    if memory_stores is not None:
+        if effective.id not in memory_stores:
+            memory_stores[effective.id] = MemoryStore(AGENTS_DIR, effective.id)
+        ctx = replace(ctx, memory_store=memory_stores[effective.id])
 
     if settings.verbose:
         print(
@@ -725,11 +748,11 @@ def run(mode: str = "auto", bind_agent: str | None = None) -> None:
     worktree_managers: dict[str, WorktreeManager] = {}
     worktree_managers[default_agent.id] = WorktreeManager(WORKDIR, agent_id=default_agent.id)
 
-    transcripts_dir = AGENTS_DIR / default_agent.id / "transcripts"
     memory_store = MemoryStore(
         base_dir=AGENTS_DIR,
         agent_id=default_agent.id,
     )
+    memory_stores: dict[str, MemoryStore] = {default_agent.id: memory_store}
     default_team_dir = AGENTS_DIR / default_agent.id / "team"
     default_team_dir.mkdir(parents=True, exist_ok=True)
 
@@ -766,19 +789,18 @@ def run(mode: str = "auto", bind_agent: str | None = None) -> None:
 
     bg_scheduler = BackgroundScheduler(command_queue, stop_event)
     bg_scheduler.register(ReflectJob(
-        memory_store, client, transcripts_dir,
+        memory_stores, client,
         model=default_agent.effective_model,
     ))
     bg_scheduler.register(DreamJob(
-        memory_store, client, transcripts_dir,
+        memory_stores, client,
         model=default_agent.effective_model,
     ))
-    agent_dir = AGENTS_DIR / default_agent.id
     bg_scheduler.register(HeartbeatJob(
-        agent_dir, msg_queue=msg_queue, q_lock=q_lock,
+        AGENTS_DIR, msg_queue=msg_queue, q_lock=q_lock,
     ))
     bg_scheduler.register(CronService(
-        agent_dir / "CRON.json", msg_queue=msg_queue, q_lock=q_lock,
+        AGENTS_DIR, msg_queue=msg_queue, q_lock=q_lock,
     ))
     bg_scheduler.start()
 
@@ -860,6 +882,12 @@ def run(mode: str = "auto", bind_agent: str | None = None) -> None:
         "============================================"
     )
 
+    # Shared dicts below are accessed from lane worker threads. Each session
+    # writes to its own key, and CPython's GIL makes single dict operations
+    # (get, setdefault, __setitem__) atomic. This is sufficient for the
+    # current access pattern; a threading.Lock would be needed if we ever
+    # perform compound read-then-write sequences on the same key from
+    # different threads.
     conversations: dict[str, list[dict]] = {}
     cli_session_key = build_session_key(
         agent_id=default_agent.id,
@@ -887,6 +915,7 @@ def run(mode: str = "auto", bind_agent: str | None = None) -> None:
         binding_table=binding_table,
         team_managers=team_managers,
         worktree_managers=worktree_managers,
+        memory_stores=memory_stores,
     )
 
     if has_remote_channels:
@@ -909,13 +938,22 @@ def run(mode: str = "auto", bind_agent: str | None = None) -> None:
                 # -- Unified slash command dispatch (all channels) --
                 if settings.verbose:
                     print(f"  [dispatch] channel={inbound.channel} text={inbound.text!r}")
+                _cmd_aid, _ = binding_table.resolve(
+                    channel=inbound.channel,
+                    account_id=inbound.account_id,
+                    guild_id=inbound.guild_id,
+                    peer_id=inbound.peer_id,
+                )
+                _cmd_eff_aid = _cmd_aid or default_agent.id
+                if _cmd_eff_aid not in memory_stores:
+                    memory_stores[_cmd_eff_aid] = MemoryStore(AGENTS_DIR, _cmd_eff_aid)
                 cmd_ctx = CommandContext(
                     inbound=inbound,
                     registry=registry,
                     bindings=binding_table,
                     bindings_path=BINDINGS_PATH,
                     workdir=str(WORKDIR),
-                    memory_store=memory_store,
+                    memory_store=memory_stores[_cmd_eff_aid],
                     scheduler=bg_scheduler,
                     command_queue=command_queue,
                     runner=runner,
@@ -945,13 +983,14 @@ def run(mode: str = "auto", bind_agent: str | None = None) -> None:
                     if settings.verbose:
                         print(f"  [{inbound.sender_id}] dispatching")
                     bg_lane = _lane_for_inbound(inbound, registry, binding_table)
-                    command_queue.enqueue(
+                    fut = command_queue.enqueue(
                         bg_lane,
                         (lambda m=inbound: _process_inbound(
                             m, conversations, channel_mgr, rt_ctx,
                             plan_managers, **common_kwargs,
                         )),
                     )
+                    fut.add_done_callback(_log_future_exception)
                     continue
 
                 # -- Legacy CLI-only commands --
@@ -959,11 +998,20 @@ def run(mode: str = "auto", bind_agent: str | None = None) -> None:
                     if inbound.text.lower() == "exit":
                         stop_event.set()
                         break
+                    _cli_aid = (
+                        inbound.agent_id
+                        or binding_table.resolve(
+                            channel="cli", peer_id="cli-user",
+                        )[0]
+                        or default_agent.id
+                    )
                     if inbound.text == "/team":
-                        print(team_managers[default_agent.id].status())
+                        tm = team_managers.get(_cli_aid) or team_managers.get(default_agent.id)
+                        print(tm.status() if tm else "(no team manager)")
                         continue
                     if inbound.text == "/inbox":
-                        inbox = team_managers[default_agent.id].peek_inbox()
+                        tm = team_managers.get(_cli_aid) or team_managers.get(default_agent.id)
+                        inbox = tm.peek_inbox() if tm else []
                         print(json.dumps(inbox, indent=2) if inbox else "(no messages)")
                         continue
                     if inbound.text == "/channels":
@@ -975,13 +1023,14 @@ def run(mode: str = "auto", bind_agent: str | None = None) -> None:
                         print(f"\n  [cli] {inbound.text[:80]}")
 
                     cli_lane = _lane_for_inbound(inbound, registry, binding_table)
-                    command_queue.enqueue(
+                    fut = command_queue.enqueue(
                         cli_lane,
                         (lambda m=inbound: _process_inbound(
                             m, conversations, channel_mgr, rt_ctx,
                             plan_managers, **common_kwargs,
                         )),
                     )
+                    fut.add_done_callback(_log_future_exception)
                 else:
                     buf_key = f"{inbound.channel}:{inbound.guild_id or inbound.peer_id}"
                     remote_buffers.setdefault(buf_key, []).append(inbound)
@@ -1021,13 +1070,14 @@ def run(mode: str = "auto", bind_agent: str | None = None) -> None:
                         attachments=all_atts,
                     )
                     remote_lane = _lane_for_inbound(combined, registry, binding_table)
-                    command_queue.enqueue(
+                    fut = command_queue.enqueue(
                         remote_lane,
                         (lambda c=combined: _process_inbound(
                             c, conversations, channel_mgr, rt_ctx,
                             plan_managers, **common_kwargs,
                         )),
                     )
+                    fut.add_done_callback(_log_future_exception)
 
             # drain scheduler output
             for out_msg in bg_scheduler.drain_output():
@@ -1037,8 +1087,19 @@ def run(mode: str = "auto", bind_agent: str | None = None) -> None:
                 if cli_ch:
                     cli_ch.send("cli-user", out_msg)
 
-            # drain background tasks for CLI session
-            cli_messages = conversations.get(cli_session_key, [])
+            # drain background tasks for active CLI session
+            _active_cli_aid, _ = binding_table.resolve(
+                channel="cli", peer_id="cli-user",
+            )
+            _active_cli_key = build_session_key(
+                agent_id=_active_cli_aid or default_agent.id,
+                channel="cli", peer_id="cli-user",
+                dm_scope=(
+                    registry.get_agent(_active_cli_aid or default_agent.id)
+                    or default_agent
+                ).effective_dm_scope,
+            )
+            cli_messages = conversations.get(_active_cli_key, [])
             while bg_manager.has_pending():
                 if settings.verbose:
                     print("  (waiting for background tasks...)")
@@ -1072,12 +1133,58 @@ def run(mode: str = "auto", bind_agent: str | None = None) -> None:
                 time.sleep(0.3)
     else:
         # CLI-only mode: original blocking REPL (preserves readline, etc.)
-        default_tm = team_managers[default_agent.id]
-        default_wm = worktree_managers[default_agent.id]
-        messages = conversations[cli_session_key]
-        cli_system_prompt_base = default_agent.system_prompt(workdir=str(WORKDIR))
-        if skill_registry.available:
-            cli_system_prompt_base += "\n\n" + skill_registry.catalog_prompt()
+
+        def _resolve_cli_agent() -> tuple:
+            """Resolve the effective agent for CLI based on bindings."""
+            aid, bnd = binding_table.resolve(
+                channel="cli", peer_id="cli-user",
+            )
+            if not aid:
+                aid = default_agent.id
+            cfg = registry.get_agent(aid) or default_agent
+            eff = resolve_effective_config(cfg, bnd)
+
+            if eff.id not in memory_stores:
+                memory_stores[eff.id] = MemoryStore(AGENTS_DIR, eff.id)
+            if eff.id not in plan_managers:
+                plan_managers[eff.id] = PlanManager(AGENTS_DIR / eff.id / "tasks")
+            if eff.id not in worktree_managers:
+                worktree_managers[eff.id] = WorktreeManager(WORKDIR, agent_id=eff.id)
+            if eff.id not in team_managers:
+                td = AGENTS_DIR / eff.id / "team"
+                td.mkdir(parents=True, exist_ok=True)
+                team_managers[eff.id] = TeamManager(
+                    BUILTIN_TEAM_DIR, td, client, profiler,
+                    max_tokens=eff.effective_max_tokens,
+                    skill_registry=skill_registry,
+                    plan_manager=plan_managers[eff.id],
+                    worktree_manager=worktree_managers[eff.id],
+                    pip_dir=WORKDIR / ".pip",
+                    workdir=WORKDIR,
+                )
+                team_managers[eff.id].patch_model_enum(tools)
+
+            store = memory_stores[eff.id]
+            pm = plan_managers[eff.id]
+            tm = team_managers[eff.id]
+            wm = worktree_managers[eff.id]
+            tdir = AGENTS_DIR / eff.id / "transcripts"
+            tdir.mkdir(parents=True, exist_ok=True)
+
+            base_prompt = eff.system_prompt(workdir=str(WORKDIR))
+            if skill_registry.available:
+                base_prompt += "\n\n" + skill_registry.catalog_prompt()
+
+            sk = build_session_key(
+                agent_id=eff.id,
+                channel="cli",
+                peer_id="cli-user",
+                dm_scope=eff.effective_dm_scope,
+            )
+            if sk not in conversations:
+                conversations[sk] = []
+
+            return eff, store, pm, tm, wm, tdir, base_prompt, conversations[sk], sk
 
         while True:
             try:
@@ -1090,6 +1197,10 @@ def run(mode: str = "auto", bind_agent: str | None = None) -> None:
 
             if not user_input:
                 continue
+
+            # -- Resolve effective agent for this turn --
+            cli_eff, cli_store, cli_pm, cli_tm, cli_wm, \
+                cli_tdir, cli_base_prompt, messages, cli_sk = _resolve_cli_agent()
 
             # -- Unified slash command dispatch --
             if user_input.startswith("/"):
@@ -1105,7 +1216,7 @@ def run(mode: str = "auto", bind_agent: str | None = None) -> None:
                     bindings=binding_table,
                     bindings_path=BINDINGS_PATH,
                     workdir=str(WORKDIR),
-                    memory_store=memory_store,
+                    memory_store=cli_store,
                     scheduler=bg_scheduler,
                     command_queue=command_queue,
                     runner=runner,
@@ -1128,53 +1239,53 @@ def run(mode: str = "auto", bind_agent: str | None = None) -> None:
                 break
 
             if user_input == "/team":
-                print(default_tm.status())
+                print(cli_tm.status())
                 continue
             if user_input == "/inbox":
-                inbox = default_tm.peek_inbox()
+                inbox = cli_tm.peek_inbox()
                 print(json.dumps(inbox, indent=2) if inbox else "(no messages)")
                 continue
 
-            cli_system_prompt = memory_store.enrich_prompt(
-                cli_system_prompt_base, user_input,
+            cli_system_prompt = cli_store.enrich_prompt(
+                cli_base_prompt, user_input,
                 channel="cli",
-                agent_id=default_agent.id,
+                agent_id=cli_eff.id,
                 workdir=str(WORKDIR),
                 sender_id="cli-user",
             )
 
-            # CLI-only mode preserves a synchronous REPL: enqueue onto the
-            # CLI session lane, then wait for the result. Background lanes
-            # (heartbeat / reflect / ...) still run in parallel while we
-            # block here.
-            cli_lane = (
-                "main:"
-                + build_session_key(
-                    agent_id=default_agent.id,
-                    channel="cli",
-                    peer_id="cli-user",
-                    dm_scope=default_agent.effective_dm_scope,
-                )
-            )
+            cli_lane = "main:" + cli_sk
 
-            def _run_cli_turn(_input: str = user_input, _prompt: str = cli_system_prompt) -> str | None:
+            cli_ctx = replace(rt_ctx, memory_store=cli_store)
+
+            def _run_cli_turn(
+                _input: str = user_input,
+                _prompt: str = cli_system_prompt,
+                _ctx: RuntimeContext = cli_ctx,
+                _msgs: list = messages,
+                _pm: PlanManager = cli_pm,
+                _eff = cli_eff,
+                _tm: TeamManager = cli_tm,
+                _wm: WorktreeManager = cli_wm,
+                _tdir: Path = cli_tdir,
+            ) -> str | None:
                 return agent_loop(
-                    rt_ctx,
-                    messages,
+                    _ctx,
+                    _msgs,
                     _input,
-                    plan_manager,
+                    _pm,
                     system_prompt=_prompt,
-                    model=default_agent.effective_model,
-                    max_tokens=default_agent.effective_max_tokens,
-                    compact_threshold=default_agent.effective_compact_threshold,
-                    compact_micro_age=default_agent.effective_compact_micro_age,
-                    fallback_models=default_agent.fallback_models,
+                    model=_eff.effective_model,
+                    max_tokens=_eff.effective_max_tokens,
+                    compact_threshold=_eff.effective_compact_threshold,
+                    compact_micro_age=_eff.effective_compact_micro_age,
+                    fallback_models=_eff.fallback_models,
                     channel=cli_channel,
                     peer_id="cli-user",
                     sender_id="cli-user",
-                    transcripts_dir=transcripts_dir,
-                    team_manager=default_tm,
-                    worktree_manager=default_wm,
+                    transcripts_dir=_tdir,
+                    team_manager=_tm,
+                    worktree_manager=_wm,
                 )
 
             cli_future = command_queue.enqueue(cli_lane, _run_cli_turn)
@@ -1207,13 +1318,14 @@ def run(mode: str = "auto", bind_agent: str | None = None) -> None:
                 msg_queue[:] = [m for m in msg_queue if m.sender_id not in _BG_SENDERS]
             for bg_msg in bg_batch:
                 bg_lane = _lane_for_inbound(bg_msg, registry, binding_table)
-                command_queue.enqueue(
+                fut = command_queue.enqueue(
                     bg_lane,
                     (lambda m=bg_msg: _process_inbound(
                         m, conversations, channel_mgr, rt_ctx,
                         plan_managers, **common_kwargs,
                     )),
                 )
+                fut.add_done_callback(_log_future_exception)
 
             while bg_manager.has_pending():
                 if settings.verbose:

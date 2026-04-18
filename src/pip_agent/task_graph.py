@@ -167,6 +167,13 @@ class _NodeGraph:
                 continue
             try:
                 t = Task.from_dict(json.loads(p.read_text(encoding="utf-8")))
+                if t.id != p.stem and t.id in tasks:
+                    log.warning(
+                        "Task file %s has id '%s' which conflicts with "
+                        "an already loaded task; skipping",
+                        p.name, t.id,
+                    )
+                    continue
                 tasks[t.id] = t
             except (json.JSONDecodeError, KeyError) as exc:
                 log.warning("Skipping corrupted task file %s: %s", p.name, exc)
@@ -760,15 +767,16 @@ class PlanManager:
 
     def format_task(self, story_id: str, task_id: str) -> str:
         """Single-task summary for tooling. Returns ``[error] ...`` on failure."""
-        if not self._story_exists(story_id):
-            return f"[error] Story '{story_id}' not found"
-        if self._is_story_blocked(story_id):
-            return f"[error] Story '{story_id}' is blocked by dependencies"
-        ng = self._task_graph(story_id)
-        tasks = ng.load_all()
-        if task_id not in tasks:
-            return f"[error] Task '{task_id}' not found in story '{story_id}'"
-        t = tasks[task_id]
+        with self._claim_lock:
+            if not self._story_exists(story_id):
+                return f"[error] Story '{story_id}' not found"
+            if self._is_story_blocked(story_id):
+                return f"[error] Story '{story_id}' is blocked by dependencies"
+            ng = self._task_graph(story_id)
+            tasks = ng.load_all()
+            if task_id not in tasks:
+                return f"[error] Task '{task_id}' not found in story '{story_id}'"
+            t = tasks[task_id]
         lines = [
             f"Task: {t.title}",
             f"  id: {t.id}",
@@ -788,9 +796,10 @@ class PlanManager:
     # ------------------------------------------------------------------
 
     def render(self, story: str | None = None) -> str:
-        if story is not None:
-            return self._render_story(story)
-        return self._render_overview()
+        with self._claim_lock:
+            if story is not None:
+                return self._render_story(story)
+            return self._render_overview()
 
     def _render_story(self, story_id: str) -> str:
         if not self._story_exists(story_id):

@@ -191,7 +191,7 @@ class Binding:
             match_key=d["match_key"],
             match_value=d["match_value"],
             priority=int(d.get("priority", 0)),
-            overrides=d.get("overrides", {}),
+            overrides=d.get("overrides") or {},
         )
 
 
@@ -255,8 +255,14 @@ class BindingTable:
             return
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, list):
+                log.warning("bindings file %s: expected list, got %s", path, type(data).__name__)
+                return
+            new_bindings: list[Binding] = []
             for item in data:
-                self.add(Binding.from_dict(item))
+                new_bindings.append(Binding.from_dict(item))
+            self._bindings.clear()
+            self._bindings.extend(new_bindings)
         except Exception as exc:
             log.warning("Failed to load bindings from %s: %s", path, exc)
 
@@ -362,6 +368,7 @@ class AgentRegistry:
         """Remove an agent from the registry and optionally delete its data."""
         import shutil
 
+        agent_id = normalize_agent_id(agent_id)
         if agent_id == DEFAULT_AGENT_ID:
             return False
         if agent_id not in self._agents:
@@ -396,12 +403,12 @@ def resolve_effective_config(
         kwargs["dm_scope"] = ov["scope"]
     if "model" in ov:
         kwargs["model"] = ov["model"]
-    if "max_tokens" in ov:
-        kwargs["max_tokens"] = int(ov["max_tokens"])
-    if "compact_threshold" in ov:
-        kwargs["compact_threshold"] = int(ov["compact_threshold"])
-    if "compact_micro_age" in ov:
-        kwargs["compact_micro_age"] = int(ov["compact_micro_age"])
+    for key in ("max_tokens", "compact_threshold", "compact_micro_age"):
+        if key in ov:
+            try:
+                kwargs[key] = int(ov[key])
+            except (ValueError, TypeError):
+                log.warning("Invalid override %s=%r, skipping", key, ov[key])
     if "fallback_models" in ov:
         raw = ov["fallback_models"]
         if isinstance(raw, str):

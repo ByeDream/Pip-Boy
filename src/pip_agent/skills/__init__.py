@@ -46,12 +46,14 @@ class SkillRegistry:
     @staticmethod
     def _parse_frontmatter(path: Path) -> tuple[dict, str]:
         text = path.read_text(encoding="utf-8")
-        match = re.match(r"^---\n(.*?)\n---\n?(.*)", text, re.DOTALL)
+        match = re.match(r"^---\r?\n(.*?)\r?\n---\r?\n?(.*)", text, re.DOTALL)
         if not match:
             return {}, text
         try:
             meta = yaml.safe_load(match.group(1)) or {}
         except yaml.YAMLError:
+            meta = {}
+        if not isinstance(meta, dict):
             meta = {}
         return meta, match.group(2).strip()
 
@@ -83,6 +85,7 @@ class SkillRegistry:
         return "\n".join(lines)
 
     def _rescan(self) -> None:
+        self._skills.clear()
         self._scan_dir(self._builtin_dir)
         self._scan_dir(self._user_dir)
 

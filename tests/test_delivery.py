@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
-from pip_agent.channels import Channel, CLIChannel, send_with_retry, BACKOFF_SCHEDULE
-from pip_agent.scheduler import CronService, CronJob, CronJobSource, CRON_AUTO_DISABLE_THRESHOLD
-
+from pip_agent.channels import BACKOFF_SCHEDULE, Channel, CLIChannel, send_with_retry
+from pip_agent.scheduler import CRON_AUTO_DISABLE_THRESHOLD, CronService
 
 # ---------------------------------------------------------------------------
 # send_with_retry
@@ -94,7 +92,9 @@ class TestSendWithRetry:
 class TestCronReportOutcome:
     @pytest.fixture
     def cron_svc(self, tmp_path: Path):
-        cron_file = tmp_path / "CRON.json"
+        agent_dir = tmp_path / "test-agent"
+        agent_dir.mkdir()
+        cron_file = agent_dir / "CRON.json"
         cron_file.write_text(json.dumps({
             "jobs": [
                 {
@@ -109,27 +109,29 @@ class TestCronReportOutcome:
                 },
             ],
         }), encoding="utf-8")
-        return CronService(cron_file)
+        return CronService(tmp_path)
 
     def test_success_resets_errors(self, cron_svc: CronService):
         job = cron_svc.jobs[0]
         job.consecutive_errors = 3
-        cron_svc.report_outcome("test-job", success=True)
+        cron_svc.report_outcome(job.id, success=True)
         assert job.consecutive_errors == 0
 
     def test_failure_increments_errors(self, cron_svc: CronService):
-        cron_svc.report_outcome("test-job", success=False)
-        assert cron_svc.jobs[0].consecutive_errors == 1
+        job = cron_svc.jobs[0]
+        cron_svc.report_outcome(job.id, success=False)
+        assert job.consecutive_errors == 1
 
     def test_auto_disable_on_threshold(self, cron_svc: CronService):
-        for _ in range(CRON_AUTO_DISABLE_THRESHOLD):
-            cron_svc.report_outcome("test-job", success=False)
         job = cron_svc.jobs[0]
+        for _ in range(CRON_AUTO_DISABLE_THRESHOLD):
+            cron_svc.report_outcome(job.id, success=False)
         assert job.enabled is False
         assert job.consecutive_errors == CRON_AUTO_DISABLE_THRESHOLD
 
     def test_persists_to_disk(self, cron_svc: CronService):
-        cron_svc.report_outcome("test-job", success=False)
+        job = cron_svc.jobs[0]
+        cron_svc.report_outcome(job.id, success=False)
         data = json.loads(cron_svc.cron_file.read_text(encoding="utf-8"))
         assert data["jobs"][0]["consecutive_errors"] == 1
 

@@ -459,7 +459,7 @@ class TestACL:
     def test_non_admin_blocked(self, registry, bindings_path, tmp_path):
         ms = MemoryStore(tmp_path / "agents", "pip-boy")
         ctx = _make_ctx(
-            "/status", registry, bindings_path,
+            "/reset", registry, bindings_path,
             channel="wecom", memory_store=ms,
         )
         result = dispatch_command(ctx)

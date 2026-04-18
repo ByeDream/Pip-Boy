@@ -91,19 +91,20 @@ class MemoryStore:
         if not obs_dir.is_dir():
             return []
         result: list[Observation] = []
-        for fp in sorted(obs_dir.glob("*.jsonl")):
-            try:
-                lines = fp.read_text(encoding="utf-8").splitlines()
-            except OSError:
-                continue
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
+        with self._io_lock:
+            for fp in sorted(obs_dir.glob("*.jsonl")):
                 try:
-                    result.append(json.loads(line))
-                except json.JSONDecodeError:
+                    lines = fp.read_text(encoding="utf-8").splitlines()
+                except OSError:
                     continue
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        result.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
         return result
 
     # ------------------------------------------------------------------
@@ -114,11 +115,12 @@ class MemoryStore:
         path = self.agent_dir / "memories.json"
         if not path.is_file():
             return []
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return data if isinstance(data, list) else []
-        except (json.JSONDecodeError, OSError):
-            return []
+        with self._io_lock:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                return data if isinstance(data, list) else []
+            except (json.JSONDecodeError, OSError):
+                return []
 
     def save_memories(self, memories: list[Memory]) -> None:
         from pip_agent.fileutil import atomic_write
@@ -264,11 +266,11 @@ class MemoryStore:
     ) -> str:
         """Create or update a user profile in users/. Returns confirmation.
 
-        Only operates on .pip/users/ — never touches owner.md.
+        Only operates on per-agent users/ directory — never touches owner.md.
         A registered sender is locked to their own profile.
         An unregistered sender may join an existing profile by name or create new.
         """
-        if sender_id and channel and self.is_owner(channel, sender_id):
+        if sender_id and channel and channel != "cli" and self.is_owner(channel, sender_id):
             return "This sender is the owner. Owner profile is read-only."
 
         new_id = f"{channel}:{sender_id}" if sender_id and channel else ""
@@ -573,13 +575,14 @@ class MemoryStore:
 
         Does not touch persona.md, users/, owner.md, or bindings.
         """
-        obs_dir = self.agent_dir / "observations"
-        if obs_dir.is_dir():
-            for fp in obs_dir.glob("*.jsonl"):
-                fp.unlink(missing_ok=True)
-        for name in ("memories.json", "axioms.md", "state.json"):
-            p = self.agent_dir / name
-            p.unlink(missing_ok=True)
+        with self._io_lock:
+            obs_dir = self.agent_dir / "observations"
+            if obs_dir.is_dir():
+                for fp in obs_dir.glob("*.jsonl"):
+                    fp.unlink(missing_ok=True)
+            for name in ("memories.json", "axioms.md", "state.json"):
+                p = self.agent_dir / name
+                p.unlink(missing_ok=True)
 
     # ------------------------------------------------------------------
     # Stats
