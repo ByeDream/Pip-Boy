@@ -663,13 +663,22 @@ class WecomChannel(Channel):
                 return None
 
         async def _collect_quote_attachments(body: dict) -> list[Attachment]:
-            """Download media from a quoted (reply-to) message."""
+            """Download media from a quoted (reply-to) message.
+
+            Field-based detection (like the main handler) so we don't
+            depend on the quote's msgtype being accurate.
+            """
             quote = body.get("quote")
             if not quote:
                 return []
             atts: list[Attachment] = []
-            qt = quote.get("msgtype", "")
-            if qt == "image" and quote.get("image", {}).get("url"):
+
+            log.debug(
+                "wecom quote: msgtype=%s keys=%s",
+                quote.get("msgtype", ""), sorted(quote.keys()),
+            )
+
+            if quote.get("image", {}).get("url"):
                 img = quote["image"]
                 data = await _download_media(img["url"], img.get("aeskey"))
                 atts.append(Attachment(
@@ -677,25 +686,44 @@ class WecomChannel(Channel):
                     mime_type=_detect_image_mime(data) if data else "",
                     text="" if data else "[Quoted image]",
                 ))
-            elif qt == "file" and quote.get("file", {}).get("url"):
+
+            if quote.get("file", {}).get("url"):
                 fi = quote["file"]
                 data = await _download_media(fi["url"], fi.get("aeskey"))
-                fname = fi.get("filename", "file")
-                text_content = ""
-                if data:
-                    try:
-                        text_content = data.decode("utf-8")
-                    except (UnicodeDecodeError, ValueError):
-                        pass
-                atts.append(Attachment(
-                    type="file", data=data, filename=fname, text=text_content,
-                ))
-            elif qt == "voice" and quote.get("voice", {}).get("content"):
+                fname = (
+                    fi.get("filename") or fi.get("file_name")
+                    or fi.get("name") or "file"
+                )
+                if data and _detect_image_mime(data):
+                    atts.append(Attachment(
+                        type="image", data=data,
+                        mime_type=_detect_image_mime(data),
+                    ))
+                else:
+                    text_content = ""
+                    if data:
+                        try:
+                            text_content = data.decode("utf-8")
+                        except (UnicodeDecodeError, ValueError):
+                            pass
+                    atts.append(Attachment(
+                        type="file", data=data, filename=fname,
+                        text=text_content,
+                    ))
+
+            if quote.get("voice", {}).get("content"):
                 atts.append(Attachment(
                     type="voice", text=quote["voice"]["content"],
                 ))
-            elif qt == "text" and quote.get("text", {}).get("content"):
-                pass  # text quotes are handled naturally by the SDK
+
+            if not atts and quote.get("text", {}).get("content"):
+                quoted_text = quote["text"]["content"]
+                sender = quote.get("from", {})
+                who = sender.get("userid") or sender.get("name") or ""
+                label = f"quoted message from {who}" if who else "quoted message"
+                atts.append(Attachment(
+                    type="file", filename=label, text=quoted_text,
+                ))
             return atts
 
         def _enqueue(frame: dict, text: str, attachments: list[Attachment]) -> None:
@@ -751,6 +779,8 @@ class WecomChannel(Channel):
             text_parts: list[str] = []
             atts: list[Attachment] = []
 
+            log.debug("wecom msg: msgtype=%s keys=%s", msgtype, sorted(body.keys()))
+
             # -- mixed: iterate msg_item explicitly --
             if msgtype == "mixed" and body.get("mixed", {}).get("msg_item"):
                 for item in body["mixed"]["msg_item"]:
@@ -787,10 +817,10 @@ class WecomChannel(Channel):
                         text="" if data else "[Image]",
                     ))
 
-                if msgtype == "file" and body.get("file", {}).get("url"):
+                if body.get("file", {}).get("url"):
                     fi = body["file"]
                     data = await _download_media(fi["url"], fi.get("aeskey"))
-                    fname = fi.get("filename", "file")
+                    fname = fi.get("filename") or fi.get("file_name") or fi.get("name") or "file"
                     text_content_f = ""
                     if data:
                         try:
@@ -801,18 +831,75 @@ class WecomChannel(Channel):
                         type="file", data=data, filename=fname, text=text_content_f,
                     ))
 
-                if msgtype == "voice":
-                    asr = body.get("voice", {}).get("content", "")
+                if body.get("voice", {}).get("content"):
+                    asr = body["voice"]["content"]
+                    atts.append(Attachment(type="voice", text=asr))
+                elif msgtype == "voice":
                     atts.append(Attachment(
-                        type="voice",
-                        text=asr if asr else "[Voice message]",
+                        type="voice", text="[Voice message]",
                     ))
+
+                # -- link messages (forwarded articles / shared links) --
+                link = body.get("link") or {}
+                if link:
+                    parts = []
+                    if link.get("title"):
+                        parts.append(link["title"])
+                    if link.get("desc"):
+                        parts.append(link["desc"])
+                    if link.get("url"):
+                        parts.append(link["url"])
+                    if parts:
+                        text_parts.append("\n".join(parts))
+
+                # -- chat_record / merged-forward messages --
+                chat_record = body.get("chat_record") or {}
+                if chat_record:
+                    items = chat_record.get("item") or chat_record.get("items") or []
+                    for rec in items:
+                        title = rec.get("title", "")
+                        content_r = rec.get("content", "")
+                        if title or content_r:
+                            text_parts.append(
+                                f"{title}: {content_r}" if title else content_r
+                            )
+                    if not items:
+                        desc = chat_record.get("title") or chat_record.get("desc") or ""
+                        if desc:
+                            text_parts.append(f"[Chat Record] {desc}")
+
+                # -- news / miniprogram / markdown --
+                news = body.get("news") or {}
+                if news.get("articles"):
+                    for art in news["articles"]:
+                        parts = []
+                        if art.get("title"):
+                            parts.append(art["title"])
+                        if art.get("description"):
+                            parts.append(art["description"])
+                        if art.get("url"):
+                            parts.append(art["url"])
+                        if parts:
+                            text_parts.append("\n".join(parts))
+
+                md = body.get("markdown") or {}
+                if md.get("content"):
+                    text_parts.append(md["content"])
 
             # -- quote (reply-to) attachments --
             atts.extend(await _collect_quote_attachments(body))
 
             text = "\n".join(text_parts)
             if not text and not atts:
+                _body_keys = {
+                    k: (list(v.keys()) if isinstance(v, dict) else type(v).__name__)
+                    for k, v in body.items()
+                }
+                log.debug(
+                    "wecom DROPPED msgtype=%s structure=%s",
+                    msgtype,
+                    json.dumps(_body_keys, ensure_ascii=False, default=str)[:2000],
+                )
                 return
             _enqueue(frame, text, atts)
 

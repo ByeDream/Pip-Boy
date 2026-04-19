@@ -133,6 +133,8 @@ _TOOL_KEY_PARAM: dict[str, str] = {
     "remember_user": "name",
     "memory_write": "content",
     "memory_search": "query",
+    "send_file": "path",
+    "download": "url",
 }
 
 
@@ -591,10 +593,30 @@ def _process_inbound(
                     "type": "text",
                     "text": f'<attached-file name="{att.filename}">\n{att.text}\n</attached-file>',
                 })
+            elif att.type == "file" and att.data:
+                inbox_dir = WORKDIR / ".pip" / "inbox"
+                inbox_dir.mkdir(parents=True, exist_ok=True)
+                fname = att.filename or "file"
+                dest = inbox_dir / fname
+                suffix = 1
+                while dest.exists():
+                    stem = Path(fname).stem
+                    ext = Path(fname).suffix
+                    dest = inbox_dir / f"{stem}_{suffix}{ext}"
+                    suffix += 1
+                dest.write_bytes(att.data)
+                content_blocks.append({
+                    "type": "text",
+                    "text": (
+                        f"[File received: {dest.name}] "
+                        f"Saved to {dest} ({len(att.data)} bytes). "
+                        f"Use bash/read tools to inspect it."
+                    ),
+                })
             elif att.type == "file":
                 content_blocks.append({
                     "type": "text",
-                    "text": f"[File: {att.filename}] (binary, cannot display)",
+                    "text": f"[File: {att.filename}] (binary, download failed)",
                 })
             elif att.type == "voice":
                 content_blocks.append({

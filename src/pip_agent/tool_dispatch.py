@@ -13,6 +13,7 @@ log = logging.getLogger(__name__)
 
 from pip_agent.tools import (  # noqa: E402
     run_bash,
+    run_download,
     run_edit,
     run_glob,
     run_grep,
@@ -37,7 +38,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class DispatchResult:
-    content: str
+    content: str | list[dict]
     used_task_tool: bool = False
     compact_requested: bool = False
     request_idle: bool = False
@@ -240,6 +241,82 @@ def _handle_team_delete(ctx: ToolContext, inp: dict) -> DispatchResult:
     if not name:
         return DispatchResult(content="[error] 'name' is required for team_delete")
     return DispatchResult(content=ctx.team_manager.delete_teammate(name))
+
+
+_IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"})
+
+
+def _handle_download(ctx: ToolContext, inp: dict) -> DispatchResult:
+    import base64
+
+    text = _wrap_simple(run_download, inp, workdir=ctx.workdir)
+    if not text.startswith("Saved ") or " -> " not in text:
+        return DispatchResult(content=text)
+
+    path_str = text.split(" -> ", 1)[1]
+    path = Path(path_str)
+    if path.suffix.lower() not in _IMAGE_EXTENSIONS or not path.is_file():
+        return DispatchResult(content=text)
+
+    data = path.read_bytes()
+    ext = path.suffix.lower()
+    mime_map = {
+        ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".png": "image/png", ".gif": "image/gif",
+        ".webp": "image/webp", ".bmp": "image/bmp",
+    }
+    mime = mime_map.get(ext, "image/jpeg")
+    return DispatchResult(content=[
+        {"type": "text", "text": text},
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": mime,
+                "data": base64.b64encode(data).decode(),
+            },
+        },
+    ])
+
+
+def _handle_send_file(ctx: ToolContext, inp: dict) -> DispatchResult:
+    """Send a local file to the current conversation via the active channel."""
+    ch = ctx.channel
+    if not ch or ch.name == "cli":
+        return DispatchResult(
+            content="send_file is only available on messaging channels (not CLI).",
+        )
+
+    raw_path = inp.get("path", "")
+    if not raw_path:
+        return DispatchResult(content="[error] 'path' is required.")
+
+    path = Path(raw_path)
+    if not path.is_absolute() and ctx.workdir:
+        path = ctx.workdir / path
+
+    if not path.is_file():
+        return DispatchResult(content=f"[error] File not found: {path}")
+
+    _MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
+    size = path.stat().st_size
+    if size > _MAX_FILE_SIZE:
+        return DispatchResult(
+            content=f"[error] File too large ({size} bytes, max {_MAX_FILE_SIZE}).",
+        )
+
+    file_data = path.read_bytes()
+    caption = inp.get("caption", "")
+    peer = ctx.peer_id
+    if not peer:
+        return DispatchResult(content="[error] No peer_id — cannot determine recipient.")
+
+    with ch.send_lock:
+        ok = ch.send_file(peer, file_data, filename=path.name, caption=caption)
+
+    if ok:
+        return DispatchResult(content=f"File sent: {path.name} ({size} bytes)")
+    return DispatchResult(content=f"[error] Channel failed to send {path.name}.")
 
 
 def _handle_send(ctx: ToolContext, inp: dict) -> DispatchResult:
@@ -542,6 +619,7 @@ _TOOL_REGISTRY: dict[str, Callable[[ToolContext, dict], DispatchResult]] = {
     "team_create": _handle_team_create,
     "team_edit": _handle_team_edit,
     "team_delete": _handle_team_delete,
+    "send_file": _handle_send_file,
     "send": _handle_send,
     "read_inbox": _handle_read_inbox,
     "idle": _handle_idle,
@@ -577,6 +655,7 @@ _TOOL_REGISTRY: dict[str, Callable[[ToolContext, dict], DispatchResult]] = {
     "web_fetch": lambda ctx, inp: DispatchResult(
         content=_wrap_simple(run_web_fetch, inp),
     ),
+    "download": lambda ctx, inp: _handle_download(ctx, inp),
 }
 
 

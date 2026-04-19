@@ -212,6 +212,32 @@ WEB_FETCH_SCHEMA = {
     },
 }
 
+DOWNLOAD_SCHEMA = {
+    "name": "download",
+    "description": (
+        "Download a file from a URL and save it locally. "
+        "Use for binary content like images, PDFs, archives, etc. "
+        "Returns the local file path on success."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "url": {
+                "type": "string",
+                "description": "The URL to download from.",
+            },
+            "filename": {
+                "type": "string",
+                "description": (
+                    "Target filename (e.g. 'report.pdf'). "
+                    "Saved under .pip/inbox/. If omitted, derived from URL."
+                ),
+            },
+        },
+        "required": ["url"],
+    },
+}
+
 
 TASK_CREATE_SCHEMA = {
     "name": "task_create",
@@ -926,6 +952,29 @@ TASK_BOARD_DETAIL_SCHEMA = {
     },
 }
 
+SEND_FILE_SCHEMA = {
+    "name": "send_file",
+    "description": (
+        "Send a local file to the current conversation. "
+        "Reads the file from disk and delivers it through the active "
+        "messaging channel (e.g. WeCom). Not available on CLI."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Absolute or workspace-relative path to the file.",
+            },
+            "caption": {
+                "type": "string",
+                "description": "Optional message sent alongside the file.",
+            },
+        },
+        "required": ["path"],
+    },
+}
+
 # ---------------------------------------------------------------------------
 # Role-based tool filtering
 # ---------------------------------------------------------------------------
@@ -937,6 +986,7 @@ _LEAD_ONLY = frozenset({
     "check_background", "compact",
     "cron_add", "cron_remove", "cron_update", "cron_list",
     "remember_user", "reflect", "memory_search", "memory_write",
+    "send_file",
 })
 
 _TEAMMATE_ONLY = frozenset({
@@ -1289,6 +1339,48 @@ def run_web_fetch(tool_input: dict) -> str:
     return text or "(empty response)"
 
 
+def run_download(tool_input: dict, *, workdir: Path | None = None) -> str:
+    """Download a URL to .pip/inbox/ as a binary file."""
+    import httpx
+    from urllib.parse import urlparse, unquote
+
+    url = tool_input["url"]
+    blocked = _validate_fetch_url(url)
+    if blocked:
+        return blocked
+
+    _MAX_SIZE = 50 * 1024 * 1024
+
+    try:
+        with httpx.Client(timeout=60, follow_redirects=True) as client:
+            resp = client.get(url)
+            resp.raise_for_status()
+    except httpx.HTTPError as e:
+        return f"[download error: {e}]"
+
+    data = resp.content
+    if len(data) > _MAX_SIZE:
+        return f"[download error: file too large ({len(data)} bytes, max {_MAX_SIZE})]"
+
+    filename = tool_input.get("filename", "")
+    if not filename:
+        path_part = urlparse(url).path
+        filename = unquote(path_part.rsplit("/", 1)[-1]) or "download"
+
+    base = workdir or WORKDIR
+    inbox_dir = base / ".pip" / "inbox"
+    inbox_dir.mkdir(parents=True, exist_ok=True)
+    dest = inbox_dir / Path(filename).name
+    suffix = 1
+    while dest.exists():
+        stem = Path(filename).stem
+        ext = Path(filename).suffix or ""
+        dest = inbox_dir / f"{stem}_{suffix}{ext}"
+        suffix += 1
+    dest.write_bytes(data)
+    return f"Saved {len(data)} bytes -> {dest}"
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -1302,6 +1394,7 @@ ALL_TOOLS = [
     GREP_SCHEMA,
     WEB_SEARCH_SCHEMA,
     WEB_FETCH_SCHEMA,
+    DOWNLOAD_SCHEMA,
     REMEMBER_USER_SCHEMA,
     REFLECT_SCHEMA,
     MEMORY_SEARCH_SCHEMA,
@@ -1330,6 +1423,7 @@ ALL_TOOLS = [
     CLAIM_TASK_SCHEMA,
     TASK_BOARD_OVERVIEW_SCHEMA,
     TASK_BOARD_DETAIL_SCHEMA,
+    SEND_FILE_SCHEMA,
 ]
 
 
