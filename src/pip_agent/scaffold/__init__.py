@@ -118,10 +118,10 @@ def ensure_workspace(workdir: Path, *, default_agent_id: str = "pip-boy") -> Non
     _check_git(workdir)
 
 
+
 def _ensure_dirs(workdir: Path, *, default_agent_id: str = "pip-boy") -> None:
     dirs = [
         ".pip",
-        ".pip/skills",
         ".pip/agents",
         f".pip/agents/{default_agent_id}",
         f".pip/agents/{default_agent_id}/observations",

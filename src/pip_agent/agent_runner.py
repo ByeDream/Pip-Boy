@@ -22,6 +22,7 @@ from claude_agent_sdk import (
     query,
 )
 
+from pip_agent.hooks import build_hooks
 from pip_agent.mcp_tools import McpContext, build_mcp_server
 
 log = logging.getLogger(__name__)
@@ -43,7 +44,8 @@ _BUILTIN_TOOLS = [
     "Bash", "Read", "Write", "Edit", "MultiEdit",
     "Glob", "Grep",
     "WebSearch", "WebFetch",
-    "Task", "TodoWrite",
+    "Task", "TodoWrite", "Skill",
+    "NotebookEdit",
     "mcp__pip__*",
 ]
 
@@ -104,6 +106,12 @@ async def run_query(
     mcp_server = build_mcp_server(mcp_ctx)
     effective_cwd = str(cwd) if cwd else str(mcp_ctx.workdir)
 
+    hooks = build_hooks(
+        transcripts_dir=mcp_ctx.transcripts_dir,
+        memory_store=mcp_ctx.memory_store,
+        profiler=mcp_ctx.profiler,
+    )
+
     options = ClaudeAgentOptions(
         model=model or None,
         cwd=effective_cwd,
@@ -122,6 +130,7 @@ async def run_query(
         setting_sources=["project", "user"],
         env=_build_env(),
         mcp_servers={"pip": mcp_server},
+        hooks=hooks,
     )
 
     result = QueryResult()

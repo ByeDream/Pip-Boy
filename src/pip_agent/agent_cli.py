@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-from pathlib import Path
 
 from pip_agent.agent_runner import QueryResult, run_query
 from pip_agent.config import settings
@@ -39,9 +38,6 @@ except ImportError:
 
 AGENTS_DIR = WORKDIR / ".pip" / "agents"
 BINDINGS_PATH = AGENTS_DIR / "bindings.json"
-BUILTIN_SKILLS_DIR = Path(__file__).resolve().parent / "skills"
-USER_SKILLS_DIR = WORKDIR / ".pip" / "skills"
-BUILTIN_TEAM_DIR = Path(__file__).resolve().parent / "team"
 
 
 def run_sdk_cli() -> None:
@@ -52,9 +48,6 @@ def run_sdk_cli() -> None:
     from pip_agent.memory import MemoryStore
     from pip_agent.profiler import Profiler
     from pip_agent.scaffold import ensure_workspace
-    from pip_agent.skills import SkillRegistry
-    from pip_agent.task_graph import PlanManager
-    from pip_agent.team import TeamManager
     from pip_agent.worktree import WorktreeManager
 
     ensure_workspace(WORKDIR)
@@ -66,33 +59,15 @@ def run_sdk_cli() -> None:
     default_agent = registry.default_agent()
 
     profiler = Profiler()
-    skill_registry = SkillRegistry(BUILTIN_SKILLS_DIR, USER_SKILLS_DIR)
 
     memory_store = MemoryStore(base_dir=AGENTS_DIR, agent_id=default_agent.id)
-    plan_manager = PlanManager(AGENTS_DIR / default_agent.id / "tasks")
     worktree_manager = WorktreeManager(WORKDIR, agent_id=default_agent.id)
-
-    team_dir = AGENTS_DIR / default_agent.id / "team"
-    team_dir.mkdir(parents=True, exist_ok=True)
-    team_manager = TeamManager(
-        BUILTIN_TEAM_DIR, team_dir,
-        None, profiler,  # type: ignore[arg-type]  # client not needed for MCP mode
-        max_tokens=default_agent.effective_max_tokens,
-        skill_registry=skill_registry,
-        plan_manager=plan_manager,
-        worktree_manager=worktree_manager,
-        pip_dir=WORKDIR / ".pip",
-        workdir=WORKDIR,
-    )
 
     transcripts_dir = AGENTS_DIR / default_agent.id / "transcripts"
     transcripts_dir.mkdir(parents=True, exist_ok=True)
 
     mcp_ctx = McpContext(
         memory_store=memory_store,
-        plan_manager=plan_manager,
-        skill_registry=skill_registry,
-        team_manager=team_manager,
         worktree_manager=worktree_manager,
         profiler=profiler,
         workdir=WORKDIR,
@@ -141,15 +116,12 @@ def run_sdk_cli() -> None:
         # Update MCP context for this agent
         if eff.id != mcp_ctx.memory_store.agent_id:  # type: ignore[union-attr]
             mcp_ctx.memory_store = MemoryStore(AGENTS_DIR, eff.id)
-            mcp_ctx.plan_manager = PlanManager(AGENTS_DIR / eff.id / "tasks")
             mcp_ctx.transcripts_dir = AGENTS_DIR / eff.id / "transcripts"
             mcp_ctx.transcripts_dir.mkdir(parents=True, exist_ok=True)
         mcp_ctx.model = eff.effective_model
 
         # Build system prompt with memory enrichment
         base_prompt = eff.system_prompt(workdir=str(WORKDIR))
-        if skill_registry.available:
-            base_prompt += "\n\n" + skill_registry.catalog_prompt()
         system_prompt = mcp_ctx.memory_store.enrich_prompt(  # type: ignore[union-attr]
             base_prompt, user_input,
             channel="cli", agent_id=eff.id,
