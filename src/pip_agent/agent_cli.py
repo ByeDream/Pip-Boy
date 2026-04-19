@@ -1,11 +1,7 @@
-"""SDK-native CLI REPL for Pip-Boy.
+"""CLI REPL for Pip-Boy.
 
-Launched via ``pip-boy --sdk``.  Uses :mod:`pip_agent.agent_runner` to drive
-Claude through the Agent SDK, with all unique capabilities exposed as an
-in-process MCP server.
-
-The host layer (workspace scaffold, agent registry, memory, skills, routing)
-is shared with the classic mode.
+Uses :mod:`pip_agent.agent_runner` to drive Claude through the Agent SDK,
+with all unique capabilities exposed as an in-process MCP server.
 """
 
 from __future__ import annotations
