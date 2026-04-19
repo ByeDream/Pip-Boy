@@ -314,11 +314,16 @@ def _handle_send_file(ctx: ToolContext, inp: dict) -> DispatchResult:
     if not peer:
         return DispatchResult(content="[error] No peer_id — cannot determine recipient.")
 
+    is_image = path.suffix.lower() in _IMAGE_EXTENSIONS
     with ch.send_lock:
-        ok = ch.send_file(peer, file_data, filename=path.name, caption=caption)
+        if is_image:
+            ok = ch.send_image(peer, file_data, caption=caption)
+        else:
+            ok = ch.send_file(peer, file_data, filename=path.name, caption=caption)
 
     if ok:
-        return DispatchResult(content=f"File sent: {path.name} ({size} bytes)")
+        kind = "Image" if is_image else "File"
+        return DispatchResult(content=f"{kind} sent: {path.name} ({size} bytes)")
     return DispatchResult(content=f"[error] Channel failed to send {path.name}.")
 
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pip-boy"
-version = "0.3.6"
+version = "0.3.7"
 description = "Personal assistant agent with persistent memory and configurable persona"
 readme = "README.md"
 license = "MIT"
