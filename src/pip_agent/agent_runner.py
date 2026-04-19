@@ -9,7 +9,6 @@ an in-process MCP server.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -50,12 +49,25 @@ _BUILTIN_TOOLS = [
 
 
 def _build_env() -> dict[str, str]:
-    """Collect environment variables to pass to the CLI subprocess."""
+    """Collect environment variables to pass to the CLI subprocess.
+
+    Proxy-aware: when ``base_url`` is set, uses ``ANTHROPIC_AUTH_TOKEN``
+    (Bearer scheme) and disables experimental beta features that proxies
+    typically reject (``context_management``, ``defer_loading``, etc.).
+    """
+    from pip_agent.config import settings
+
     env: dict[str, str] = {}
-    for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "SEARCH_API_KEY"):
-        val = os.environ.get(key)
-        if val:
-            env[key] = val
+    if settings.anthropic_api_key:
+        if settings.anthropic_base_url:
+            env["ANTHROPIC_AUTH_TOKEN"] = settings.anthropic_api_key
+        else:
+            env["ANTHROPIC_API_KEY"] = settings.anthropic_api_key
+    if settings.anthropic_base_url:
+        env["ANTHROPIC_BASE_URL"] = settings.anthropic_base_url
+        env["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] = "1"
+    if settings.search_api_key:
+        env["SEARCH_API_KEY"] = settings.search_api_key
     return env
 
 
