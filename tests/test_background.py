@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import time
-import threading
 
-from pip_agent.background import BackgroundTaskManager, NOTIFICATION_TRUNCATE
+from pip_agent.background import BackgroundTaskManager
 
 
 def _echo(tool_input: dict) -> str:

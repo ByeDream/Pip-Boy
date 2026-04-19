@@ -5,8 +5,7 @@ import threading
 
 import pytest
 
-from pip_agent.task_graph import PlanManager, _NodeGraph, StoryMeta
-
+from pip_agent.task_graph import PlanManager, _NodeGraph
 
 # ======================================================================
 # _NodeGraph (low-level DAG engine)

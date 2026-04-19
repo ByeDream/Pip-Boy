@@ -241,7 +241,7 @@ class TestCatalogPrompt:
         _write_skill(builtin_dir, "alpha", "Alpha skill")
         reg = SkillRegistry(builtin_dir, user_dir)
         lines = reg.catalog_prompt().splitlines()
-        skill_lines = [l for l in lines if l.startswith("  - ")]
+        skill_lines = [line for line in lines if line.startswith("  - ")]
         assert skill_lines[0].startswith("  - alpha:")
         assert skill_lines[1].startswith("  - zebra:")
 

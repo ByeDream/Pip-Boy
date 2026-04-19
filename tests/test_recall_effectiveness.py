@@ -8,9 +8,7 @@ from __future__ import annotations
 
 import time
 
-import pytest
-
-from pip_agent.memory.recall import search_memories, tokenize, temporal_decay
+from pip_agent.memory.recall import search_memories
 
 
 def _mem(text: str, *, age_days: float = 0, count: int = 1) -> dict:

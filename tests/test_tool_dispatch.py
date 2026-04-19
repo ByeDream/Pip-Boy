@@ -3,7 +3,6 @@ from __future__ import annotations
 from pip_agent.profiler import Profiler
 from pip_agent.task_graph import PlanManager
 from pip_agent.tool_dispatch import (
-    DispatchResult,
     TeammateToolSurface,
     ToolContext,
     dispatch_tool,

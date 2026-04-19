@@ -18,7 +18,6 @@ from pip_agent.tools import (
     run_write,
 )
 
-
 # ---------------------------------------------------------------------------
 # File operation tools
 # ---------------------------------------------------------------------------
@@ -52,7 +51,7 @@ class TestRunWrite:
         assert "wrote" in out.lower() or "new.txt" in out.lower()
 
     def test_write_nested_dir(self, tmp_path):
-        out = run_write(
+        run_write(
             {"file_path": "sub/dir/f.txt", "content": "deep"},
             workdir=tmp_path,
         )
@@ -63,7 +62,7 @@ class TestRunEdit:
     def test_replace_in_file(self, tmp_path):
         f = tmp_path / "edit.txt"
         f.write_text("old value here", encoding="utf-8")
-        out = run_edit(
+        run_edit(
             {"file_path": "edit.txt", "old_string": "old value", "new_string": "new value"},
             workdir=tmp_path,
         )

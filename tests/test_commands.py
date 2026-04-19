@@ -7,12 +7,10 @@ from pathlib import Path
 import pytest
 
 from pip_agent.channels import InboundMessage
-from pip_agent.commands import CommandContext, CommandResult, dispatch_command
+from pip_agent.commands import CommandContext, dispatch_command
 from pip_agent.memory import MemoryStore
 from pip_agent.routing import (
-    AgentConfig,
     AgentRegistry,
-    Binding,
     BindingTable,
 )
 

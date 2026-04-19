@@ -5,8 +5,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from pip_agent.compact import (
     _session_transcripts,
     auto_compact,
@@ -141,7 +139,9 @@ class TestMicroCompact:
         })
         msgs.append({
             "role": "user",
-            "content": [{"type": "tool_result", "tool_use_id": "tu_r", "content": "file content " * 100}],
+            "content": [
+                {"type": "tool_result", "tool_use_id": "tu_r", "content": "file content " * 100},
+            ],
         })
         msgs.append({
             "role": "assistant",
@@ -149,7 +149,9 @@ class TestMicroCompact:
         })
         msgs.append({
             "role": "user",
-            "content": [{"type": "tool_result", "tool_use_id": "tu_b", "content": "dir listing " * 100}],
+            "content": [
+                {"type": "tool_result", "tool_use_id": "tu_b", "content": "dir listing " * 100},
+            ],
         })
         msgs.append({
             "role": "assistant",

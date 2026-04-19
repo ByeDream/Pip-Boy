@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import json
-import threading
-import time
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -16,7 +13,6 @@ from pip_agent.channels import (
     InboundMessage,
     WeChatChannel,
 )
-
 
 # ---------------------------------------------------------------------------
 # InboundMessage

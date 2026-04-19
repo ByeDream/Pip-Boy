@@ -182,7 +182,10 @@ class TestConsolidate:
         assert len(result) == 2  # preserved originals
 
     def test_preserves_on_drastic_reduction(self):
-        existing = [{"id": str(i), "text": f"mem{i}", "count": 5, "source": "auto"} for i in range(10)]
+        existing = [
+            {"id": str(i), "text": f"mem{i}", "count": 5, "source": "auto"}
+            for i in range(10)
+        ]
         mock_client = MagicMock()
         mock_client.messages.create.return_value = _make_llm_response(
             json.dumps([{"id": "0", "text": "mem0", "count": 6}])
@@ -341,7 +344,9 @@ class TestSchedulerDream:
     def test_dream_does_not_trigger_outside_hour(self, tmp_path):
         store = MemoryStore(tmp_path / "agents", "test-agent")
         for i in range(settings.dream_min_observations):
-            store.write_observations([{"ts": time.time(), "text": f"obs {i}", "category": "test", "source": "auto"}])
+            store.write_observations([
+                {"ts": time.time(), "text": f"obs {i}", "category": "test", "source": "auto"},
+            ])
 
         mock_client = MagicMock()
         stores = {"test-agent": store}
@@ -356,7 +361,9 @@ class TestSchedulerDream:
     def test_dream_triggers_at_correct_hour(self, tmp_path):
         store = MemoryStore(tmp_path / "agents", "test-agent")
         for i in range(settings.dream_min_observations):
-            store.write_observations([{"ts": time.time(), "text": f"obs {i}", "category": "test", "source": "auto"}])
+            store.write_observations([
+                {"ts": time.time(), "text": f"obs {i}", "category": "test", "source": "auto"},
+            ])
 
         state = {"last_activity_at": time.time() - 3600}
         store.save_state(state)
@@ -374,7 +381,9 @@ class TestSchedulerDream:
     def test_dream_blocked_when_recently_active(self, tmp_path):
         store = MemoryStore(tmp_path / "agents", "test-agent")
         for i in range(settings.dream_min_observations):
-            store.write_observations([{"ts": time.time(), "text": f"obs {i}", "category": "test", "source": "auto"}])
+            store.write_observations([
+                {"ts": time.time(), "text": f"obs {i}", "category": "test", "source": "auto"},
+            ])
 
         state = {"last_activity_at": time.time()}
         store.save_state(state)
@@ -391,7 +400,9 @@ class TestSchedulerDream:
     def test_dream_clears_observations(self, tmp_path):
         store = MemoryStore(tmp_path / "agents", "test-agent")
         for i in range(settings.dream_min_observations):
-            store.write_observations([{"ts": time.time(), "text": f"obs {i}", "category": "test", "source": "auto"}])
+            store.write_observations([
+                {"ts": time.time(), "text": f"obs {i}", "category": "test", "source": "auto"},
+            ])
         assert len(store.load_all_observations()) >= settings.dream_min_observations
 
         mock_client = MagicMock()
@@ -413,8 +424,12 @@ class TestSchedulerDream:
 class TestMemoryStoreClearObservations:
     def test_clear_observations(self, tmp_path):
         store = MemoryStore(tmp_path / "agents", "test-agent")
-        store.write_observations([{"ts": 1.0, "text": "obs1", "category": "test", "source": "auto"}])
-        store.write_observations([{"ts": 2.0, "text": "obs2", "category": "test", "source": "auto"}])
+        store.write_observations([
+            {"ts": 1.0, "text": "obs1", "category": "test", "source": "auto"},
+        ])
+        store.write_observations([
+            {"ts": 2.0, "text": "obs2", "category": "test", "source": "auto"},
+        ])
         assert len(store.load_all_observations()) == 2
 
         count = store.clear_observations()
@@ -435,7 +450,9 @@ class TestMemoryStoreThreadSafety:
         def write_obs():
             try:
                 for i in range(10):
-                    store.write_observations([{"ts": time.time(), "text": f"obs {i}", "category": "test", "source": "auto"}])
+                    obs = {"ts": time.time(), "text": f"obs {i}",
+                           "category": "test", "source": "auto"}
+                    store.write_observations([obs])
             except Exception as e:
                 errors.append(e)
 

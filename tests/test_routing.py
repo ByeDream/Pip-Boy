@@ -2,28 +2,22 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
-import pytest
-
 from pip_agent.routing import (
+    DEFAULT_AGENT_ID,
+    DEFAULT_COMPACT_MICRO_AGE,
+    DEFAULT_COMPACT_THRESHOLD,
+    DEFAULT_DM_SCOPE,
+    DEFAULT_MAX_TOKENS,
+    DEFAULT_MODEL,
     AgentConfig,
     AgentRegistry,
     Binding,
     BindingTable,
+    agent_config_from_file,
     build_session_key,
     normalize_agent_id,
-    agent_config_from_file,
     resolve_effective_config,
-    DEFAULT_AGENT_ID,
-    DEFAULT_MODEL,
-    DEFAULT_MAX_TOKENS,
-    DEFAULT_DM_SCOPE,
-    DEFAULT_COMPACT_THRESHOLD,
-    DEFAULT_COMPACT_MICRO_AGE,
 )
-
 
 # ---------------------------------------------------------------------------
 # normalize_agent_id
@@ -255,7 +249,10 @@ class TestBuildSessionKey:
         assert sk == "agent:bot:wecom:peer:u1"
 
     def test_per_guild_peer_group(self):
-        sk = build_session_key("bot", "wecom", "u1", guild_id="g1", is_group=True, dm_scope="per-guild-peer")
+        sk = build_session_key(
+            "bot", "wecom", "u1",
+            guild_id="g1", is_group=True, dm_scope="per-guild-peer",
+        )
         assert sk == "agent:bot:wecom:guild:g1:peer:u1"
 
     def test_main_scope(self):

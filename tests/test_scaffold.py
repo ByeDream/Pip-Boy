@@ -8,7 +8,6 @@ import pytest
 
 from pip_agent.scaffold import (
     _MANIFEST_NAME,
-    _SCAFFOLD_DIR,
     ensure_workspace,
 )
 
@@ -120,7 +119,7 @@ def test_scaffold_migration_updates_unmodified(tmp_path: Path) -> None:
 
     manifest_path = tmp_path / ".pip" / _MANIFEST_NAME
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    old_hash = manifest["files"][".pip/models.json"]["scaffold_hash"]
+    manifest["files"][".pip/models.json"]["scaffold_hash"]
 
     models_path = tmp_path / ".pip" / "models.json"
     original_content = models_path.read_text(encoding="utf-8")
@@ -129,7 +128,9 @@ def test_scaffold_migration_updates_unmodified(tmp_path: Path) -> None:
     assert models_path.read_text(encoding="utf-8") == original_content
 
 
-def test_scaffold_migration_skips_modified(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+def test_scaffold_migration_skips_modified(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
     """If user modified a scaffold file, don't overwrite on migration."""
     (tmp_path / ".git").mkdir()
     ensure_workspace(tmp_path)

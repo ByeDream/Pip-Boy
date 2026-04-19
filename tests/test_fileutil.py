@@ -8,8 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from pip_agent.fileutil import atomic_write, chunk_message, CHANNEL_LIMITS
-
+from pip_agent.fileutil import CHANNEL_LIMITS, atomic_write, chunk_message
 
 # ---------------------------------------------------------------------------
 # atomic_write

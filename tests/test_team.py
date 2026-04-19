@@ -1,25 +1,22 @@
 from __future__ import annotations
 
-import time
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from pip_agent.profiler import Profiler
 from pip_agent.team import (
+    VALID_MSG_TYPES,
     Bus,
     ProtocolTracker,
     TeamManager,
     Teammate,
     TeammateSpec,
-    VALID_MSG_TYPES,
     _parse_frontmatter,
 )
 from pip_agent.tool_dispatch import DispatchResult
-
 
 # ---------------------------------------------------------------------------
 # Helpers
