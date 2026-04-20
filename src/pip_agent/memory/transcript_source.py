@@ -142,7 +142,23 @@ def normalize_line(line: dict) -> tuple[str, str] | None:
 
     Any line that doesn't match these, or whose role isn't user/assistant,
     returns ``None`` and is excluded from the formatted transcript.
+
+    Meta-turn filtering: lines flagged by CC as its own internal artifacts
+    (``isMeta``, ``isCompactSummary``, ``isVisibleInTranscriptOnly``) are
+    dropped. These records include the ``/compact`` summary turns, the
+    ``<local-command-caveat>`` turns, and other UI-only scaffolding — none
+    of them are real user speech or assistant output. Letting them into
+    reflect causes the summary of prior turns to be re-extracted as a new
+    set of observations, double-counting everything the previous reflect
+    run already captured.
     """
+    if (
+        line.get("isMeta") is True
+        or line.get("isCompactSummary") is True
+        or line.get("isVisibleInTranscriptOnly") is True
+    ):
+        return None
+
     msg = line.get("message") if isinstance(line.get("message"), dict) else None
 
     # Shape 1: CC wrapper.

@@ -112,6 +112,55 @@ class TestNormalizeLine:
     def test_unrecognised_shape_returns_none(self):
         assert normalize_line({"foo": "bar"}) is None
 
+    def test_compact_summary_turn_is_dropped(self):
+        """CC writes its own ``/compact`` summaries into the JSONL as user
+        turns with ``isCompactSummary: true``. Feeding them to reflect causes
+        the previous conversation's content to be re-extracted as new
+        observations — double-counting. Must return None.
+        """
+        rec = {
+            "type": "user",
+            "isCompactSummary": True,
+            "message": {
+                "role": "user",
+                "content": "This session is being continued ... Summary: user is the developer ...",
+            },
+        }
+        assert normalize_line(rec) is None
+
+    def test_meta_turn_is_dropped(self):
+        """``isMeta: true`` covers ``<local-command-caveat>`` / system-echoed
+        slash-command turns. They're CC UI scaffolding, not real dialogue.
+        """
+        rec = {
+            "type": "user",
+            "isMeta": True,
+            "message": {
+                "role": "user",
+                "content": "<local-command-caveat>...</local-command-caveat>",
+            },
+        }
+        assert normalize_line(rec) is None
+
+    def test_visible_in_transcript_only_is_dropped(self):
+        """Another CC-internal flag for turns shown in the UI transcript but
+        not part of the real message stream.
+        """
+        rec = {
+            "type": "user",
+            "isVisibleInTranscriptOnly": True,
+            "message": {"role": "user", "content": "internal scaffolding"},
+        }
+        assert normalize_line(rec) is None
+
+    def test_real_user_turn_without_flags_still_passes(self):
+        """Sanity: the filter must NOT over-match on ordinary turns."""
+        rec = {
+            "type": "user",
+            "message": {"role": "user", "content": "hello"},
+        }
+        assert normalize_line(rec) == ("user", "hello")
+
 
 class TestIterTranscript:
     def test_yields_lines_with_offsets(self, tmp_path: Path):
