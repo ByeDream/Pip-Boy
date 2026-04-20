@@ -91,6 +91,29 @@ class TestHeartbeatSentinelSilencing:
         out = capsys.readouterr().out
         assert "3 uncommitted files" in out
 
+    def test_substantive_heartbeat_reply_prints_in_verbose_mode(
+        self, capsys, monkeypatch,
+    ):
+        # Regression: when the host runs with VERBOSE=true, user-input text is
+        # streamed by agent_runner so dispatch only appends a newline. Heartbeat
+        # replies are DIFFERENT — ``process_inbound`` disables streaming for
+        # them (so the sentinel can be silenced) which means dispatch is the
+        # sole source of output. Previously this branch called ``print()`` and
+        # swallowed the text; the bug was "HEARTBEAT_OK" leaking four times per
+        # minute to the CLI when the user tried the short-interval test.
+        from pip_agent import agent_host
+        monkeypatch.setattr(agent_host.settings, "verbose", True)
+
+        AgentHost._dispatch_reply(
+            inbound=_heartbeat(),
+            result=QueryResult(text="Reminder: standup in 10 min."),
+            ch=None,
+            reply_peer="cli-user",
+            session_key="k",
+        )
+        out = capsys.readouterr().out
+        assert "standup in 10 min" in out
+
     def test_heartbeat_reply_with_ok_as_substring_is_not_swallowed(
         self, capsys, monkeypatch,
     ):

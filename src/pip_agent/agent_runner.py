@@ -18,6 +18,7 @@ from claude_agent_sdk import (
     ResultMessage,
     SystemMessage,
     TextBlock,
+    ToolUseBlock,
     query,
 )
 
@@ -85,6 +86,7 @@ async def run_query(
     system_prompt_append: str = "",
     cwd: str | Path | None = None,
     verbose: bool = False,
+    stream_text: bool | None = None,
 ) -> QueryResult:
     """Run a single agent turn via the Claude Agent SDK.
 
@@ -105,8 +107,17 @@ async def run_query(
     cwd:
         Working directory for the agent.
     verbose:
-        If True, stream text blocks to stdout.
+        If True, show tool-use traces on stdout. Also gates the default
+        value of ``stream_text`` when the caller does not pass it.
+    stream_text:
+        If True, stream ``TextBlock`` content to stdout as it arrives. Defaults
+        to ``verbose``. Callers that need to post-process the final text
+        (e.g. ``AgentHost`` silencing the ``HEARTBEAT_OK`` sentinel) must pass
+        ``False`` — once characters are on the wire there is nothing the host
+        can do to unprint them.
     """
+    if stream_text is None:
+        stream_text = verbose
     mcp_server = build_mcp_server(mcp_ctx)
     effective_cwd = str(cwd) if cwd else str(mcp_ctx.workdir)
 
@@ -139,8 +150,17 @@ async def run_query(
         async for message in query(prompt=prompt, options=options):
             if isinstance(message, AssistantMessage):
                 for block in message.content:
-                    if isinstance(block, TextBlock) and verbose:
+                    if isinstance(block, TextBlock) and stream_text:
                         print(block.text, end="", flush=True)
+                    elif isinstance(block, ToolUseBlock) and verbose:
+                        # Surface tool calls so CLI users can see whether the
+                        # agent actually reached for ``memory_search`` /
+                        # ``Bash`` / etc. — text-only streaming hid this.
+                        args_preview = str(block.input)[:80]
+                        print(
+                            f"\n  [tool: {block.name} {args_preview}]",
+                            flush=True,
+                        )
 
             elif isinstance(message, SystemMessage):
                 if message.subtype == "init":

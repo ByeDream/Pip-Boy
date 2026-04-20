@@ -257,6 +257,8 @@ class AgentHost:
             session_id=current_session or "",
         )
 
+        is_heartbeat = inbound.sender_id == _HEARTBEAT_SENDER
+
         async with self._semaphore:
             try:
                 result: QueryResult = await run_query(
@@ -267,6 +269,11 @@ class AgentHost:
                     system_prompt_append=system_prompt,
                     cwd=WORKDIR,
                     verbose=settings.verbose,
+                    # Heartbeats must NOT stream: we need to inspect the full
+                    # reply before deciding whether to print (so we can silence
+                    # the HEARTBEAT_OK sentinel). Tool-use traces still show
+                    # under ``verbose`` via ``run_query``.
+                    stream_text=settings.verbose and not is_heartbeat,
                 )
             except Exception as exc:
                 log.error("SDK query failed for %s: %s", sk, exc)
@@ -303,11 +310,19 @@ class AgentHost:
         ``HEARTBEAT_OK`` sentinel defined in ``scaffold/heartbeat.md`` which
         means "nothing to report"; we swallow that to avoid CLI noise.
 
+        Silencing only works because :func:`AgentHost.process_inbound` disables
+        text streaming for heartbeat inbounds — once characters have been
+        streamed to stdout there is nothing dispatch can do to unprint them.
+        Heartbeat text therefore always prints from *here*, never from
+        ``agent_runner``.
+
         Cron replies always flow through the normal dispatch — the cron job's
         configured ``channel``/``peer_id`` is the intended delivery target.
         """
+        is_heartbeat = inbound.sender_id == _HEARTBEAT_SENDER
+
         if (
-            inbound.sender_id == _HEARTBEAT_SENDER
+            is_heartbeat
             and result.text
             and _HEARTBEAT_OK_RE.match(result.text)
         ):
@@ -326,10 +341,14 @@ class AgentHost:
             return
 
         if result.text:
-            if inbound.channel == "cli" and not settings.verbose:
-                print(f"\n{result.text}")
-            elif inbound.channel == "cli":
-                print()
+            if inbound.channel == "cli":
+                # Heartbeats never stream (see docstring), so print full text.
+                # User/cron inbounds in verbose mode were already streamed by
+                # agent_runner — just terminate the line.
+                if is_heartbeat or not settings.verbose:
+                    print(f"\n{result.text}")
+                else:
+                    print()
             elif ch:
                 send_with_retry(ch, reply_peer, result.text)
 
