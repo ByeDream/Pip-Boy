@@ -329,3 +329,146 @@ Implementation status (Apr 2026):
   them. This is correct — reflect should only pull from user
   transcripts; cron / heartbeat output is deliberately throwaway.
   Changing this would require revisiting F's tradeoffs first.
+
+## 12. Phase 6 / 7 / 8 — host-surface polish for v0.4.0
+
+The three phases collectively restore the "rich host surface" that the
+lean rewrite cut to the bone, without dragging any of the legacy
+subsystems (lanes, resilience runner, worktrees, teammates) back in.
+
+### 12.1 Phase 6 — slash dispatch (`host_commands.py`)
+
+Replaces the 900-line legacy `commands.py` with a 12-command flat
+surface that matches what the rewritten architecture actually has
+machinery for:
+
+```
+/help /status /memory /axioms /recall /cron
+/bind /unbind /name /reset /admin /exit
+```
+
+Dropped outright: `/scheduler`, `/lanes`, `/heartbeat`, `/trigger`,
+`/cron-trigger`, `/profiles`, `/cooldowns`, `/stats`,
+`/simulate-failure`, `/fallback`, `/update`, `/clean`, `/model`.
+Each either surfaced a removed subsystem (`/lanes` → lanes gone) or
+duplicated a path the CC layer now owns (`/model` → CC config).
+
+Integration point is `AgentHost.process_inbound`: dispatch runs
+*after* agent resolution (so `/status` can report the right binding)
+but *before* prompt enrichment and the CC subprocess spawn. Unknown
+slashes fall through to the model so the "LLM interprets `/foo` as
+free text" escape valve stays open. ACL lives in the dispatcher,
+not in individual handlers — CLI is always owner, `/admin` is
+owner-only, everything else is owner-or-admin; missing memory store
+is fail-open (pre-boot has nothing to protect).
+
+Contract highlights that regression tests must hold:
+
+- Handler exceptions become `[error] …` responses, not stack traces
+  in the transcript (`tests/test_host_commands.py::TestErrorIsolation`).
+- Leading `@mention` is stripped before slash detection so WeCom
+  `@bot /help` routes correctly (`TestDispatchRecognition`).
+- `/reset` builds its own `MemoryStore` instance for the routed
+  agent — reusing `ctx.memory_store` would wrong-target when the
+  caller did `/bind` + `/reset` in the same turn.
+
+### 12.2 Phase 7 — multimodal inbound (`_format_prompt` → str | list[dict])
+
+`_format_prompt` now returns either a plain string (hot path, pure
+text) or an Anthropic content-block list when the inbound carries
+attachments. Callers — specifically `run_query` — accept both.
+
+Why keep two shapes instead of always producing blocks:
+
+1. The SDK's string path is a single stdin line; the block path is
+   a streaming-mode `AsyncIterable` envelope. String mode is the
+   simpler code path on both sides — if there's nothing to gain
+   from blocks, we don't pay the complexity.
+2. Heartbeat / cron inbounds never carry attachments but *do* carry
+   sentinel tags (`<heartbeat>`, `<cron_task>`) that the LLM uses
+   to route. A block-list with one text block would work but
+   churns existing transcripts and tests for no benefit.
+
+`run_query` grew a `_stream_single_user_message` helper that wraps a
+block list in exactly the SDK's `user` envelope shape:
+
+```python
+{
+    "type": "user",
+    "session_id": "",          # resumption is via options.resume, not this
+    "message": {"role": "user", "content": blocks},
+    "parent_tool_use_id": None,
+}
+```
+
+Matching the envelope exactly (including the empty `session_id`) is
+important: the shape is copy-pasted from
+`claude_agent_sdk._internal.client` — drifting from it silently
+breaks hook inputs that key off those fields.
+
+Per-attachment rendering rules (from legacy `agent.py` and preserved
+exactly):
+
+- `image` with bytes → base64 image block, `media_type` defaults to
+  `image/jpeg` when the channel couldn't sniff one.
+- `image` without bytes → text placeholder (`[Image]` or the
+  channel-supplied caption). Keep the signal, lose the pixels.
+- `file` with extracted text → `<attached-file name="…">…</attached-file>`
+  inline. This is the only place Pip-Boy injects XML-flavoured
+  markers into user content; it's stable because CC's transcript
+  format passes it through untouched.
+- `file` without text → `[File: name] (binary, not inlined)`
+  text block.
+- `voice` with transcription → `[Voice transcription]: …`; without
+  transcription → `[Voice message]`.
+
+Defensive: if every attachment fell through unrenderably, return the
+raw text string rather than an empty block list (the SDK rejects
+empty content arrays).
+
+### 12.3 Phase 8 — `send_file` MCP tool
+
+Lets the model deliver a local file through the active messaging
+channel — the conversational flip side of the channel-to-model
+image/file ingestion from Phase 7. MCP (not slash) because it's
+LLM-driven: the agent composes `send_file` naturally with Read,
+Glob, and the memory tools based on a conversational request.
+
+Contract:
+
+- CLI → friendly refusal (`not available on CLI`), never a silent
+  no-op. Silent failure would make the LLM retry forever.
+- Relative paths resolve against `ctx.workdir` for consistency with
+  Read/Write. Flexibility for absolute paths is preserved.
+- 50 MB hard host-side cap before hitting channel-specific limits.
+  Patchable in tests via `monkeypatch.setattr(m, "_SEND_FILE_MAX_BYTES", …)`.
+- `ch.send_file` runs under `ch.send_lock` (the same mutex that
+  serialises `send_with_retry`) so concurrent senders never
+  interleave on the same channel.
+- The blocking `ch.send_file` call is offloaded via
+  `asyncio.to_thread` so the MCP handler does not stall the SDK
+  event loop while WeCom chunks a multi-MB upload.
+- Handler exceptions become `is_error` responses; the LLM must see
+  the error in its tool result, not crash the host.
+
+### 12.4 Unresolved / explicit non-goals
+
+Things Phase 6/7/8 deliberately do **not** cover:
+
+- `send_image` as a separate MCP tool. The legacy `download` helper
+  that produced vision-ready image blocks still has no Phase-7
+  counterpart. Callers today must save the bytes to disk and call
+  `send_file`. Revisit if the LLM starts asking for "send this image
+  back" workflows where round-tripping through disk feels stupid.
+- Per-channel chunking of `send_file` payloads that exceed the
+  channel's own size limit. Currently we bubble up the channel's
+  error and leave the LLM to decide whether to split. Doing the
+  split in the tool would need a channel-aware API; not worth the
+  coupling until a concrete complaint shows up.
+- Full parity with the legacy slash-command inventory. Resurrecting
+  `/update`, `/scheduler`, etc. is a separate workstream that waits
+  on the relevant subsystems shipping in the lean architecture.
+  When `/update` returns it should probably run via the host
+  (before spawning the CC subprocess) rather than as a slash at
+  all — an in-session self-upgrade is a host-restart, not a chat
+  message.

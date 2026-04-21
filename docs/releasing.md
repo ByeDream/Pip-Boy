@@ -95,12 +95,6 @@ In any project that consumes `pip-boy` (e.g., `pip-playground`):
 pip install --upgrade pip-boy
 ```
 
-Or from within a running Pip-Boy session:
-
-```
-/update
-```
-
 ## Scaffold Migration
 
 When releasing a version that changes scaffold template files (`src/pip_agent/scaffold/`), the migration is handled automatically:
