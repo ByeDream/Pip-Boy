@@ -8,13 +8,12 @@ Tools currently exposed:
 
 * Memory: ``memory_search``, ``memory_write``, ``remember_user``, ``reflect``
 * Cron: ``cron_add``, ``cron_remove``, ``cron_update``, ``cron_list``
-  (Phase 5 wires them to the host scheduler; until then they return an error.)
-
-``send_file`` lands in Phase 8.
+* Channel: ``send_file``
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -60,7 +59,7 @@ class McpContext:
 
 def build_mcp_server(ctx: McpContext) -> McpSdkServerConfig:
     """Create the in-process MCP server with all Pip-Boy-unique tools."""
-    tools = _memory_tools(ctx) + _cron_tools(ctx)
+    tools = _memory_tools(ctx) + _cron_tools(ctx) + _channel_tools(ctx)
     return create_sdk_mcp_server("pip", tools=tools)
 
 
@@ -346,5 +345,140 @@ def _cron_tools(ctx: McpContext) -> list[SdkMcpTool]:
             description="List all scheduled tasks.",
             input_schema={"type": "object", "properties": {}},
             handler=cron_list,
+        ),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Channel tools — send_file
+#
+# Why this is an MCP tool and not a slash command
+# -----------------------------------------------
+# Slash commands are operator affordances (bind, status, memory, …);
+# they live outside the LLM's control loop. ``send_file`` is the
+# opposite: the LLM drives it based on a conversational request
+# ("can you send me the report?"), using file paths it discovered
+# via Read/Glob. Putting it on the tool surface lets the LLM compose
+# it naturally with its other file operations.
+#
+# Why not plumb it through native Claude Code Bash
+# ------------------------------------------------
+# The channel (WeCom, WeChat) lives inside the Pip-Boy host process
+# and its websocket connection. A sub-shell has no way to reach it.
+# ---------------------------------------------------------------------------
+
+
+# 50 MB — the WeCom file-message upper bound is 20 MB per API docs, but
+# the host still wants a hard stop well before a naive payload could
+# blow out the process heap. 50 MB leaves WeCom to reject oversized
+# inputs with its own error code (which we surface) rather than us
+# guessing and getting stale when the upstream limit moves.
+_SEND_FILE_MAX_BYTES = 50 * 1024 * 1024
+
+
+def _channel_tools(ctx: McpContext) -> list[SdkMcpTool]:
+
+    async def send_file(args: dict[str, Any]) -> dict[str, Any]:
+        ch = ctx.channel
+        # CLI has no file-send surface by design; returning early with a
+        # helpful message is strictly better than letting the LLM retry
+        # the tool because the response was empty.
+        if ch is None or ch.name == "cli":
+            return _error(
+                "send_file is only available on messaging channels "
+                "(e.g. WeCom). Not available on CLI.",
+            )
+
+        raw_path = args.get("path", "")
+        if not raw_path or not isinstance(raw_path, str):
+            return _error("'path' is required and must be a string.")
+
+        path = Path(raw_path)
+        # Relative paths resolve against the agent's workdir rather
+        # than Python's CWD so the LLM gets the same scope it sees
+        # from Read/Write — consistency is worth more than a tiny
+        # bit of flexibility here.
+        if not path.is_absolute():
+            path = ctx.workdir / path
+
+        if not path.is_file():
+            return _error(f"File not found: {path}")
+
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            return _error(f"Cannot stat {path}: {exc}")
+
+        if size > _SEND_FILE_MAX_BYTES:
+            mb = _SEND_FILE_MAX_BYTES // (1024 * 1024)
+            return _error(
+                f"File too large ({size} bytes). "
+                f"Hard host limit is {mb} MB.",
+            )
+
+        peer = ctx.peer_id
+        if not peer:
+            return _error(
+                "No peer_id in context — cannot determine recipient.",
+            )
+
+        try:
+            file_data = path.read_bytes()
+        except OSError as exc:
+            return _error(f"Cannot read {path}: {exc}")
+
+        caption = args.get("caption", "") or ""
+
+        # ``ch.send_file`` is synchronous but internally dispatches into
+        # the channel's own event loop — it's a blocking wait. Offload
+        # to a thread so the MCP handler does not stall the SDK event
+        # loop (which is also processing streaming assistant output for
+        # the same turn).
+        def _blocking_send() -> bool:
+            with ch.send_lock:
+                return ch.send_file(
+                    peer, file_data,
+                    filename=path.name, caption=caption,
+                )
+
+        try:
+            ok = await asyncio.to_thread(_blocking_send)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("send_file crashed for %s", path)
+            return _error(f"send_file crashed: {exc}")
+
+        if ok:
+            return _text(f"File sent: {path.name} ({size} bytes)")
+        return _error(f"Channel refused to send {path.name}.")
+
+    return [
+        SdkMcpTool(
+            name="send_file",
+            description=(
+                "Send a local file to the current conversation through "
+                "the active messaging channel. Reads the file from disk "
+                "and delivers it via the channel (e.g. WeCom). Not "
+                "available on CLI. Relative paths resolve against the "
+                "agent's workdir."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Absolute or workdir-relative path to the file."
+                        ),
+                    },
+                    "caption": {
+                        "type": "string",
+                        "description": (
+                            "Optional text sent alongside the file."
+                        ),
+                    },
+                },
+                "required": ["path"],
+            },
+            handler=send_file,
         ),
     ]
