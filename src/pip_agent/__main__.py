@@ -68,6 +68,13 @@ def main(argv: list[str] | None = None) -> None:
         print(f"pip-boy {__version__}")
         return
 
+    # Order matters: UTF-8 console BEFORE logging. ``basicConfig`` captures
+    # ``sys.stdout`` into a ``StreamHandler``; if we detach stdout afterward
+    # the handler keeps writing into a dead wrapper and every ``log.*`` call
+    # raises ``ValueError: underlying buffer has been detached``.
+    from pip_agent.console_io import force_utf8_console
+
+    force_utf8_console()
     _configure_logging()
 
     try:
