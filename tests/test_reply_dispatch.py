@@ -11,7 +11,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from pip_agent.agent_host import AgentHost
+from pip_agent.agent_host import (
+    _CRON_SENDER,
+    _HEARTBEAT_SENDER,
+    AgentHost,
+    _is_ephemeral_sender,
+)
 from pip_agent.agent_runner import QueryResult
 from pip_agent.channels import InboundMessage
 
@@ -279,3 +284,28 @@ class TestEmptyResult:
             session_key="k",
         )
         assert capsys.readouterr().out == ""
+
+
+class TestIsEphemeralSender:
+    """Regression lock on SDK-session opt-out for scheduler senders.
+
+    Flipping either of these to ``False`` reintroduces the bug where
+    every 30 s cron tick re-ships the full user transcript to the API
+    and then appends its own ``打印 hello`` back into it, turning a
+    10 s cold start into a 3 min one over a day of use. If a future
+    refactor needs to make cron / heartbeat stateful it MUST solve
+    the transcript-bloat problem first — this test is the tripwire.
+    """
+
+    def test_cron_sender_is_ephemeral(self):
+        assert _is_ephemeral_sender(_CRON_SENDER) is True
+
+    def test_heartbeat_sender_is_ephemeral(self):
+        assert _is_ephemeral_sender(_HEARTBEAT_SENDER) is True
+
+    @pytest.mark.parametrize(
+        "sender",
+        ["cli-user", "wechat:alice", "wecom:bob", "", "random-string"],
+    )
+    def test_everything_else_keeps_session(self, sender):
+        assert _is_ephemeral_sender(sender) is False

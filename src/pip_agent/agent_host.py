@@ -83,6 +83,24 @@ _CRON_SENDER = "__cron__"
 _HEARTBEAT_SENDER = "__heartbeat__"
 
 
+def _is_ephemeral_sender(sender_id: str) -> bool:
+    """True if inbound must NOT participate in SDK session persistence.
+
+    Scheduler-injected senders (``__cron__`` / ``__heartbeat__``) are
+    stateless by design — they're background keepalives / scheduled
+    probes, not conversation. Giving them a ``session_id`` causes the
+    SDK to (a) load the full user transcript on every tick and ship
+    it through the proxy on each cold start, and (b) *append* their
+    scaffolding back into that transcript, which then feeds (a) next
+    time. With 30 s cron + Opus via a slow proxy this is the single
+    biggest driver of "pip-boy got slow over the day".
+
+    If you're extending the scheduler with a new synthetic sender,
+    add it here. User / channel messages are never ephemeral.
+    """
+    return sender_id in (_CRON_SENDER, _HEARTBEAT_SENDER)
+
+
 @dataclass
 class _NullTracked:
     """Placeholder for the ``scheduler.track`` yielded value when no
@@ -286,13 +304,26 @@ class AgentHost:
             ch.send_typing(inbound.peer_id)
 
         current_session = self._sessions.get(sk)
+        is_heartbeat = inbound.sender_id == _HEARTBEAT_SENDER
+        # Scheduler-injected senders skip SDK session persistence —
+        # see :func:`_is_ephemeral_sender` for the full rationale and
+        # the measurements that motivated this. TL;DR: heartbeat / cron
+        # poisoning the user transcript turns a 10 s cold start into a
+        # 3 min one over the course of a day. ``stream_text=not is_heartbeat``
+        # remains a separate concern (HEARTBEAT_OK silencing).
+        is_ephemeral = _is_ephemeral_sender(inbound.sender_id)
+        session_for_turn: str | None = None if is_ephemeral else current_session
+        # mcp_ctx carries the session_id to the ``reflect`` MCP tool so
+        # it can locate the JSONL. For ephemeral turns reflect would skip
+        # anyway (no session → no transcript), but we pass an empty
+        # string to be explicit and keep the two layers in sync.
+        ctx_session_id = "" if is_ephemeral else (current_session or "")
+
         mcp_ctx = self._build_mcp_ctx(
             svc, eff.effective_model, inbound.sender_id,
             channel=ch, peer_id=reply_peer,
-            session_id=current_session or "",
+            session_id=ctx_session_id,
         )
-
-        is_heartbeat = inbound.sender_id == _HEARTBEAT_SENDER
 
         # ``track`` owns the scheduler-side bookkeeping: coalesce-key
         # release on exit (so the next tick can fire again) and cron
@@ -312,7 +343,7 @@ class AgentHost:
                         prompt=prompt,
                         mcp_ctx=mcp_ctx,
                         model=eff.effective_model,
-                        session_id=current_session,
+                        session_id=session_for_turn,
                         system_prompt_append=system_prompt,
                         cwd=WORKDIR,
                         # Heartbeats must NOT stream: we need to inspect the
@@ -335,7 +366,10 @@ class AgentHost:
                 # cron auto-disable streak just like a raised exception.
                 tracked.failure(result.error)
 
-            if result.session_id:
+            # Skip persistence for ephemeral senders — their ``result.session_id``
+            # is a throwaway the SDK minted for this one turn, and binding it to
+            # ``sk`` would overwrite the user's real session on the next save.
+            if not is_ephemeral and result.session_id:
                 self._sessions[sk] = result.session_id
                 _save_sessions(self._sessions)
 
