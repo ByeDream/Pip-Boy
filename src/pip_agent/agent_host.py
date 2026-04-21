@@ -28,6 +28,7 @@ from pip_agent.channels import (
     wechat_poll_loop,
     wecom_ws_loop,
 )
+from pip_agent import host_commands
 from pip_agent.config import WORKDIR, settings
 from pip_agent.host_scheduler import HostScheduler
 from pip_agent.mcp_tools import McpContext
@@ -510,6 +511,26 @@ class AgentHost:
 
         svc = self._get_agent_services(eff.id)
 
+        # Short-circuit host-layer slash commands BEFORE we do the more
+        # expensive prompt enrichment + SDK subprocess spawn. Dispatch
+        # runs cheaply off in-memory registry / bindings / memory-store
+        # state; its response (if any) is routed back through the same
+        # channel that delivered the inbound. Unknown slashes fall
+        # through to the agent so the LLM can still interpret them.
+        cmd_result = host_commands.dispatch_command(
+            host_commands.CommandContext(
+                inbound=inbound,
+                registry=self._registry,
+                bindings=self._binding_table,
+                bindings_path=BINDINGS_PATH,
+                memory_store=svc.memory_store,
+                scheduler=self._scheduler,
+            ),
+        )
+        if cmd_result.handled:
+            self._deliver_command_response(inbound, cmd_result.response)
+            return
+
         sk = build_session_key(
             agent_id=eff.id,
             channel=inbound.channel,
@@ -624,6 +645,33 @@ class AgentHost:
                 reply_peer=reply_peer,
                 session_key=sk,
             )
+
+    def _deliver_command_response(
+        self, inbound: InboundMessage, response: str | None,
+    ) -> None:
+        """Route a slash-command response back to the originating channel.
+
+        Separate from :meth:`_dispatch_reply` because command responses
+        are synthetic — they never went through the SDK, so they carry
+        no ``session_id``, no streaming state, and no HEARTBEAT_OK
+        sentinel to silence. Keeping the paths separate avoids the
+        temptation to grow a ``QueryResult``-shaped wrapper just for
+        them.
+        """
+        if not response:
+            return
+        ch = self._channel_mgr.get(inbound.channel)
+        reply_peer = inbound.peer_id
+        if inbound.is_group and inbound.guild_id:
+            reply_peer = inbound.guild_id
+
+        if inbound.channel == "cli":
+            # Mirror the indentation that streaming replies use so the
+            # CLI transcript reads uniformly, then force a newline so
+            # the next ``>>>`` prompt starts on its own line.
+            print(f"  {response}")
+        elif ch:
+            send_with_retry(ch, reply_peer, response)
 
     @staticmethod
     def _dispatch_reply(
