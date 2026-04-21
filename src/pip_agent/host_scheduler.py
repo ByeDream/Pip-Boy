@@ -59,6 +59,14 @@ _HEARTBEAT_FILE = "HEARTBEAT.md"
 # flip it back on manually.
 _CRON_AUTO_DISABLE_THRESHOLD = 5
 
+# Dream state keys kept in ``state.json`` per agent.
+_DREAM_LAST_AT_KEY = "last_dream_at"
+_DREAM_CYCLE_KEY = "dream_cycle_count"
+# ``_stop_hook`` stamps this on every completed agent turn. Dream's idle
+# gate compares against it. Defined here to keep the contract visible
+# from the scheduler side.
+_LAST_ACTIVITY_KEY = "last_activity_at"
+
 
 class _Sender:
     CRON = "__cron__"
@@ -243,6 +251,24 @@ def _in_active_window(now: float) -> bool:
     return hour >= start or hour < end
 
 
+def _in_dream_window(now: float) -> bool:
+    """Return True if ``now`` (local epoch) falls inside the Dream idle window.
+
+    Semantics match ``_in_active_window``: same hour → disabled (not "always on"
+    like heartbeat — Dream is opt-in; if you want it disabled, set
+    ``DREAM_HOUR_START == DREAM_HOUR_END`` and we honour that). Respects
+    wrap-around for the late-night-early-morning 22→5 style window.
+    """
+    start = int(settings.dream_hour_start) % 24
+    end = int(settings.dream_hour_end) % 24
+    if start == end:
+        return False
+    hour = datetime.fromtimestamp(now).hour
+    if start < end:
+        return start <= hour < end
+    return hour >= start or hour < end
+
+
 # ---------------------------------------------------------------------------
 # HostScheduler
 # ---------------------------------------------------------------------------
@@ -284,6 +310,18 @@ class HostScheduler:
         # ``TestCronCoalescing``.
         self._pending: set[str] = set()
         self._pending_lock = threading.Lock()
+
+        # Dream (L2 consolidate + L3 axiom distillation) guard. A Dream
+        # pass runs two back-to-back LLM calls; end-to-end it can take
+        # 30–90 s. We run it on a one-shot worker thread to avoid blocking
+        # the 5 s tick loop, and track which agents have an in-flight
+        # Dream so ticks during that window don't double-fire. The state
+        # is intentionally in-memory: on process restart we start fresh,
+        # and the ``dream_hour_start ≤ hour < dream_hour_end`` window
+        # combined with the state-file ``last_dream_at`` gate prevents
+        # duplicate runs even across restarts.
+        self._dream_running: set[str] = set()
+        self._dream_lock = threading.Lock()
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -525,6 +563,167 @@ class HostScheduler:
         for agent_dir in self._iter_agent_dirs():
             self._tick_cron(agent_dir, now)
             self._tick_heartbeat(agent_dir, now)
+            self._tick_dream(agent_dir, now)
+
+    def _tick_dream(self, agent_dir: Path, now: float) -> None:
+        """Fire a Dream pass for this agent iff all trigger gates are met.
+
+        Gates (documented in ``docs/sdk-contract-notes.md`` §11 and mirrored
+        in ``config.Settings``):
+
+        1. Local clock within the ``[dream_hour_start, dream_hour_end)``
+           window. ``start == end`` disables Dream entirely.
+        2. No other Dream worker is currently running for this agent (the
+           in-memory ``_dream_running`` guard).
+        3. ``state.json`` has NOT been stamped with a ``last_dream_at`` in
+           the current window — prevents a process restart inside the
+           idle window from running Dream twice on the same night.
+        4. Observation count ≥ ``dream_min_observations`` — don't
+           consolidate over near-empty input.
+        5. Last agent activity ≥ ``dream_inactive_minutes`` ago — don't
+           collide with an active conversation.
+
+        When all five pass, we spawn a one-shot worker thread (see
+        :meth:`_run_dream`) so the 5 s scheduler tick keeps flowing. Any
+        cron / heartbeat ticks during the Dream run are unaffected.
+        """
+        agent_id = agent_dir.name
+
+        if not _in_dream_window(now):
+            return
+
+        with self._dream_lock:
+            if agent_id in self._dream_running:
+                return
+
+        # Lazy import: keeps ``memory`` out of the import path for callers
+        # who only want the scheduler (tests for cron coalescing, etc.).
+        try:
+            from pip_agent.memory import MemoryStore
+        except Exception:  # pragma: no cover — memory package is bundled
+            log.exception("Dream: memory package import failed")
+            return
+
+        try:
+            store = MemoryStore(base_dir=self._agents_dir, agent_id=agent_id)
+            state = store.load_state()
+        except Exception:
+            log.exception("Dream: cannot load state for agent=%s", agent_id)
+            return
+
+        last_dream_at = float(state.get(_DREAM_LAST_AT_KEY) or 0.0)
+        # Same-window re-entry guard: if we already ran Dream since the
+        # current window began, skip. We approximate "current window began"
+        # as "now minus (dream_hour_end - dream_hour_start) hours" — a
+        # coarse but conservative bound that correctly handles both
+        # simple and wrap-around windows.
+        start_h = int(settings.dream_hour_start) % 24
+        end_h = int(settings.dream_hour_end) % 24
+        span_h = (end_h - start_h) % 24 or 24
+        window_floor = now - span_h * 3600
+        if last_dream_at >= window_floor:
+            return
+
+        min_obs = int(settings.dream_min_observations)
+        if min_obs > 0:
+            try:
+                observations = store.load_all_observations()
+            except Exception:
+                log.exception(
+                    "Dream: cannot load observations for agent=%s", agent_id,
+                )
+                return
+            if len(observations) < min_obs:
+                return
+        else:
+            observations = None  # worker will reload
+
+        idle_min = int(settings.dream_inactive_minutes)
+        if idle_min > 0:
+            last_activity = float(state.get(_LAST_ACTIVITY_KEY) or 0.0)
+            if last_activity > 0 and (now - last_activity) < idle_min * 60:
+                return
+
+        with self._dream_lock:
+            if agent_id in self._dream_running:
+                # Re-check under the lock — another tick could have
+                # spawned in the narrow gap between our first check and
+                # here. Cheap to repeat; catastrophic to skip.
+                return
+            self._dream_running.add(agent_id)
+
+        log.info(
+            "Dream: triggering for agent=%s (obs>=%d, idle>=%dmin, window=%d-%d)",
+            agent_id, min_obs, idle_min, start_h, end_h,
+        )
+        threading.Thread(
+            target=self._run_dream,
+            args=(agent_id, now, observations),
+            name=f"dream-{agent_id}",
+            daemon=True,
+        ).start()
+
+    def _run_dream(
+        self,
+        agent_id: str,
+        started_at: float,
+        observations: list | None,
+    ) -> None:
+        """Worker thread body for a single Dream pass.
+
+        Blocks on two LLM calls. Always clears the ``_dream_running``
+        guard on exit, even on exception — a crashed Dream must not
+        deadlock the next night's window.
+        """
+        try:
+            from pip_agent.anthropic_client import build_anthropic_client
+            from pip_agent.memory import MemoryStore
+            from pip_agent.memory.consolidate import consolidate, distill_axioms
+
+            client = build_anthropic_client()
+            if client is None:
+                log.info(
+                    "Dream: skipped for agent=%s — no Anthropic credentials",
+                    agent_id,
+                )
+                return
+
+            store = MemoryStore(base_dir=self._agents_dir, agent_id=agent_id)
+            if observations is None:
+                observations = store.load_all_observations()
+            memories = store.load_memories()
+
+            state = store.load_state()
+            cycle = int(state.get(_DREAM_CYCLE_KEY) or 0) + 1
+
+            new_memories = consolidate(
+                client, observations, memories, cycle_count=cycle,
+            )
+            store.save_memories(new_memories)
+
+            axioms_text = distill_axioms(client, new_memories)
+            if axioms_text:
+                store.save_axioms(axioms_text)
+
+            # Stamp AFTER persistence so a crash between consolidate and
+            # the state write doesn't block the next tick — better to
+            # double-run than to silently drop observations on the floor.
+            state[_DREAM_LAST_AT_KEY] = time.time()
+            state[_DREAM_CYCLE_KEY] = cycle
+            store.save_state(state)
+
+            log.info(
+                "Dream: done for agent=%s cycle=%d obs=%d mem=%d axioms=%s "
+                "duration=%.1fs",
+                agent_id, cycle, len(observations), len(new_memories),
+                "yes" if axioms_text else "no",
+                time.time() - started_at,
+            )
+        except Exception:
+            log.exception("Dream: crashed for agent=%s", agent_id)
+        finally:
+            with self._dream_lock:
+                self._dream_running.discard(agent_id)
 
     def _tick_cron(self, agent_dir: Path, now: float) -> None:
         agent_id = agent_dir.name

@@ -16,9 +16,12 @@ from unittest.mock import patch
 from pip_agent.channels import InboundMessage
 from pip_agent.host_scheduler import (
     _CRON_AUTO_DISABLE_THRESHOLD,
+    _DREAM_CYCLE_KEY,
+    _DREAM_LAST_AT_KEY,
     HostScheduler,
     _HeartbeatState,
     _in_active_window,
+    _in_dream_window,
     _next_cron_fire,
     _next_fire_at,
     _Sender,
@@ -642,3 +645,292 @@ class TestCronAutoDisable:
 
         after = sched._load_jobs("pip-boy")
         assert before == after, "heartbeat failures must not touch cron state"
+
+
+# ---------------------------------------------------------------------------
+# Dream (L2 consolidate + L3 axiom distillation) gating
+# ---------------------------------------------------------------------------
+
+
+def _epoch_at_hour(hour: int) -> float:
+    """Return a local epoch whose ``datetime.fromtimestamp`` hour == ``hour``."""
+    today = datetime.now().replace(
+        hour=hour, minute=0, second=0, microsecond=0,
+    )
+    return today.timestamp()
+
+
+class TestInDreamWindow:
+    def test_simple_window(self, monkeypatch):
+        from pip_agent import config
+
+        monkeypatch.setattr(config.settings, "dream_hour_start", 2)
+        monkeypatch.setattr(config.settings, "dream_hour_end", 5)
+
+        assert _in_dream_window(_epoch_at_hour(2)) is True
+        assert _in_dream_window(_epoch_at_hour(4)) is True
+        assert _in_dream_window(_epoch_at_hour(5)) is False  # half-open
+        assert _in_dream_window(_epoch_at_hour(1)) is False
+
+    def test_wrap_around_window(self, monkeypatch):
+        from pip_agent import config
+
+        monkeypatch.setattr(config.settings, "dream_hour_start", 22)
+        monkeypatch.setattr(config.settings, "dream_hour_end", 5)
+
+        assert _in_dream_window(_epoch_at_hour(22)) is True
+        assert _in_dream_window(_epoch_at_hour(23)) is True
+        assert _in_dream_window(_epoch_at_hour(3)) is True
+        assert _in_dream_window(_epoch_at_hour(6)) is False
+        assert _in_dream_window(_epoch_at_hour(12)) is False
+
+    def test_start_equals_end_disables(self, monkeypatch):
+        """Explicit ``start == end`` means "Dream off", not "always on"."""
+        from pip_agent import config
+
+        monkeypatch.setattr(config.settings, "dream_hour_start", 3)
+        monkeypatch.setattr(config.settings, "dream_hour_end", 3)
+
+        # Any hour at all — must be off.
+        for h in range(24):
+            assert _in_dream_window(_epoch_at_hour(h)) is False
+
+
+class TestTickDreamGating:
+    """All five gates from ``_tick_dream`` docstring, tested independently."""
+
+    def _sched(self, tmp_path: Path) -> tuple[HostScheduler, Path]:
+        agents_dir = tmp_path / ".pip" / "agents"
+        (agents_dir / "pip-boy").mkdir(parents=True)
+        queue: list[InboundMessage] = []
+        sched = HostScheduler(
+            agents_dir=agents_dir,
+            msg_queue=queue,
+            q_lock=threading.Lock(),
+            stop_event=threading.Event(),
+        )
+        return sched, agents_dir / "pip-boy"
+
+    def _spy_spawn(self, sched: HostScheduler, monkeypatch) -> list[tuple]:
+        """Replace the worker-thread spawn with a recorder so we can
+        assert gate behaviour without actually running consolidate."""
+        calls: list[tuple] = []
+
+        class _FakeThread:
+            def __init__(self, *a, target=None, args=(), **kw):
+                calls.append(args)
+                # Mimic the real worker discarding the running guard so
+                # successive test ticks don't wedge the test harness.
+                aid = args[0]
+                with sched._dream_lock:
+                    sched._dream_running.discard(aid)
+
+            def start(self):
+                pass
+
+        monkeypatch.setattr(
+            "pip_agent.host_scheduler.threading.Thread", _FakeThread,
+        )
+        return calls
+
+    def test_skip_outside_window(self, tmp_path: Path, monkeypatch):
+        from pip_agent import config
+
+        monkeypatch.setattr(config.settings, "dream_hour_start", 2)
+        monkeypatch.setattr(config.settings, "dream_hour_end", 5)
+        monkeypatch.setattr(config.settings, "dream_min_observations", 0)
+        monkeypatch.setattr(config.settings, "dream_inactive_minutes", 0)
+
+        sched, agent_dir = self._sched(tmp_path)
+        calls = self._spy_spawn(sched, monkeypatch)
+
+        sched._tick_dream(agent_dir, _epoch_at_hour(12))
+
+        assert calls == []
+
+    def test_skip_when_already_running(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        from pip_agent import config
+
+        monkeypatch.setattr(config.settings, "dream_hour_start", 2)
+        monkeypatch.setattr(config.settings, "dream_hour_end", 5)
+        monkeypatch.setattr(config.settings, "dream_min_observations", 0)
+        monkeypatch.setattr(config.settings, "dream_inactive_minutes", 0)
+
+        sched, agent_dir = self._sched(tmp_path)
+        calls = self._spy_spawn(sched, monkeypatch)
+
+        # Simulate an in-flight worker for this agent.
+        sched._dream_running.add("pip-boy")
+        sched._tick_dream(agent_dir, _epoch_at_hour(3))
+
+        assert calls == []
+
+    def test_skip_when_last_dream_within_window(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        from pip_agent import config
+        from pip_agent.memory import MemoryStore
+
+        monkeypatch.setattr(config.settings, "dream_hour_start", 2)
+        monkeypatch.setattr(config.settings, "dream_hour_end", 5)
+        monkeypatch.setattr(config.settings, "dream_min_observations", 0)
+        monkeypatch.setattr(config.settings, "dream_inactive_minutes", 0)
+
+        sched, agent_dir = self._sched(tmp_path)
+        calls = self._spy_spawn(sched, monkeypatch)
+
+        # Stamp a Dream that happened inside the current 3-hour window.
+        now = _epoch_at_hour(4)
+        store = MemoryStore(base_dir=agent_dir.parent, agent_id="pip-boy")
+        store.save_state({_DREAM_LAST_AT_KEY: now - 600})  # 10 min ago
+
+        sched._tick_dream(agent_dir, now)
+
+        assert calls == []
+
+    def test_skip_when_below_min_observations(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        from pip_agent import config
+
+        monkeypatch.setattr(config.settings, "dream_hour_start", 2)
+        monkeypatch.setattr(config.settings, "dream_hour_end", 5)
+        monkeypatch.setattr(config.settings, "dream_min_observations", 10)
+        monkeypatch.setattr(config.settings, "dream_inactive_minutes", 0)
+
+        sched, agent_dir = self._sched(tmp_path)
+        calls = self._spy_spawn(sched, monkeypatch)
+
+        # Zero observations on disk — below the threshold.
+        sched._tick_dream(agent_dir, _epoch_at_hour(3))
+
+        assert calls == []
+
+    def test_skip_when_recent_activity(self, tmp_path: Path, monkeypatch):
+        from pip_agent import config
+        from pip_agent.memory import MemoryStore
+
+        monkeypatch.setattr(config.settings, "dream_hour_start", 2)
+        monkeypatch.setattr(config.settings, "dream_hour_end", 5)
+        monkeypatch.setattr(config.settings, "dream_min_observations", 0)
+        monkeypatch.setattr(config.settings, "dream_inactive_minutes", 30)
+
+        sched, agent_dir = self._sched(tmp_path)
+        calls = self._spy_spawn(sched, monkeypatch)
+
+        now = _epoch_at_hour(3)
+        store = MemoryStore(base_dir=agent_dir.parent, agent_id="pip-boy")
+        store.save_state({"last_activity_at": now - 60})  # 1 min ago
+
+        sched._tick_dream(agent_dir, now)
+
+        assert calls == []
+
+    def test_spawns_worker_when_all_gates_pass(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        from pip_agent import config
+        from pip_agent.memory import MemoryStore
+
+        monkeypatch.setattr(config.settings, "dream_hour_start", 2)
+        monkeypatch.setattr(config.settings, "dream_hour_end", 5)
+        monkeypatch.setattr(config.settings, "dream_min_observations", 0)
+        monkeypatch.setattr(config.settings, "dream_inactive_minutes", 0)
+
+        sched, agent_dir = self._sched(tmp_path)
+        calls = self._spy_spawn(sched, monkeypatch)
+
+        # Past activity + no recent dream → all gates pass.
+        now = _epoch_at_hour(3)
+        store = MemoryStore(base_dir=agent_dir.parent, agent_id="pip-boy")
+        store.save_state({"last_activity_at": now - 86400})  # 1 day ago
+
+        sched._tick_dream(agent_dir, now)
+
+        assert len(calls) == 1
+        # args = (agent_id, started_at, observations)
+        assert calls[0][0] == "pip-boy"
+
+
+class TestRunDream:
+    """Direct worker-body tests. These actually invoke the Dream pipeline
+    (with mocked LLM + consolidate) to verify the state-write contract."""
+
+    def _sched_and_store(self, tmp_path: Path):
+        from pip_agent.memory import MemoryStore
+
+        agents_dir = tmp_path / ".pip" / "agents"
+        (agents_dir / "pip-boy").mkdir(parents=True)
+        sched = HostScheduler(
+            agents_dir=agents_dir,
+            msg_queue=[],
+            q_lock=threading.Lock(),
+            stop_event=threading.Event(),
+        )
+        sched._dream_running.add("pip-boy")  # as the ticker would have set
+        store = MemoryStore(base_dir=agents_dir, agent_id="pip-boy")
+        return sched, store
+
+    def test_no_client_exits_cleanly(self, tmp_path: Path):
+        sched, store = self._sched_and_store(tmp_path)
+
+        with patch(
+            "pip_agent.anthropic_client.build_anthropic_client",
+            return_value=None,
+        ):
+            sched._run_dream("pip-boy", time.time(), [])
+
+        # Guard must be released even on early exit.
+        assert "pip-boy" not in sched._dream_running
+        # State must NOT be stamped (we didn't actually do work).
+        assert _DREAM_LAST_AT_KEY not in store.load_state()
+
+    def test_happy_path_stamps_state_and_bumps_cycle(self, tmp_path: Path):
+        sched, store = self._sched_and_store(tmp_path)
+
+        fake_memories = [
+            {"id": "m1", "text": "likes concise output", "count": 3,
+             "stability": 0.8},
+        ]
+
+        with (
+            patch(
+                "pip_agent.anthropic_client.build_anthropic_client",
+                return_value=object(),
+            ),
+            patch(
+                "pip_agent.memory.consolidate.consolidate",
+                return_value=fake_memories,
+            ),
+            patch(
+                "pip_agent.memory.consolidate.distill_axioms",
+                return_value="- Be concise.",
+            ),
+        ):
+            sched._run_dream("pip-boy", time.time(), [{"text": "foo"}])
+
+        assert "pip-boy" not in sched._dream_running
+        state = store.load_state()
+        assert state[_DREAM_CYCLE_KEY] == 1
+        assert state[_DREAM_LAST_AT_KEY] > 0
+        assert store.load_memories() == fake_memories
+
+    def test_exception_still_clears_guard(self, tmp_path: Path):
+        sched, _ = self._sched_and_store(tmp_path)
+
+        with (
+            patch(
+                "pip_agent.anthropic_client.build_anthropic_client",
+                return_value=object(),
+            ),
+            patch(
+                "pip_agent.memory.consolidate.consolidate",
+                side_effect=RuntimeError("boom"),
+            ),
+        ):
+            # Must not propagate; must release guard.
+            sched._run_dream("pip-boy", time.time(), [])
+
+        assert "pip-boy" not in sched._dream_running

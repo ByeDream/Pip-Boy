@@ -52,11 +52,35 @@ class Settings(BaseSettings):
     # Heartbeat injection timing. ``HEARTBEAT.md`` at
     # ``.pip/agents/<agent_id>/`` is fired as a ``<heartbeat>`` inbound every
     # ``heartbeat_interval`` seconds during the active window. Set the interval
-    # to 0 to disable. Dream/consolidate cadence is driven by ``cron.json`` via
-    # the ``cron_*`` MCP tools, not by env vars.
+    # to 0 to disable. Heartbeat is NOT part of the memory pipeline — reflect
+    # triggers are PreCompact + /exit only; see §11 of sdk-contract-notes.
     heartbeat_interval: int = Field(default=1800)
     heartbeat_active_start: int = Field(default=9)
     heartbeat_active_end: int = Field(default=22)
+
+    # Dream trigger — L2 consolidate + L3 axiom distillation.
+    #
+    # Dream runs periodically against already-persisted observations (reflect
+    # is upstream and writes them from PreCompact / /exit). The trigger
+    # conditions, ALL required:
+    #
+    # 1. Clock is within ``[dream_hour_start, dream_hour_end)`` — local time,
+    #    not UTC. Default 2 am – 5 am: idle for most users, lowest
+    #    contention on shared-machine setups, and Anthropic pricing tiers
+    #    occasionally soften overnight.
+    # 2. ``len(observations.jsonl) >= dream_min_observations`` — don't
+    #    consolidate over a near-empty pile; let signal accumulate first.
+    # 3. Last user / channel activity was at least ``dream_inactive_minutes``
+    #    ago — don't collide with an active conversation; the consolidate
+    #    pass holds the memory store for a non-trivial window.
+    #
+    # Set ``dream_min_observations`` to 0 to fire on every idle window.
+    # Set ``dream_inactive_minutes`` to 0 to skip the idle gate.
+    # Set ``dream_hour_start == dream_hour_end`` to disable Dream entirely.
+    dream_hour_start: int = Field(default=2)
+    dream_hour_end: int = Field(default=5)
+    dream_min_observations: int = Field(default=20)
+    dream_inactive_minutes: int = Field(default=30)
 
     def check_required(self) -> None:
         """Host-level credential check.
