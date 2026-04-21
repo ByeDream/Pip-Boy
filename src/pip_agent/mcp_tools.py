@@ -285,7 +285,12 @@ def _cron_tools(ctx: McpContext) -> list[SdkMcpTool]:
         if not job_id:
             return _error("'job_id' is required.")
         assert ctx.scheduler is not None
-        return _text(ctx.scheduler.update_job(job_id, **args))
+        # Strip ``job_id`` before splatting — it's already passed
+        # positionally, and leaving it in would raise
+        # "multiple values for argument 'job_id'" the moment anyone
+        # called this tool in anger.
+        updates = {k: v for k, v in args.items() if k != "job_id"}
+        return _text(ctx.scheduler.update_job(job_id, **updates))
 
     async def cron_list(args: dict[str, Any]) -> dict[str, Any]:
         if ctx.scheduler is None:
