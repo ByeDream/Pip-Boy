@@ -273,10 +273,32 @@ class TestBuildClient:
 
 
 class TestBuildEnv:
-    def test_empty_when_nothing_configured(self, _clean_env):
+    def test_cron_kill_switch_is_always_set(self, _clean_env):
+        """``CLAUDE_CODE_DISABLE_CRON`` must leak into every subprocess.
+
+        CC's native ``CronCreate`` / ``CronList`` / ``CronDelete`` silently
+        never fire in our architecture (the CC subprocess dies at
+        ``end_turn``, so there is no thread left to tick the scheduler).
+        Keeping them visible to the model would be an API that lies —
+        ``host_scheduler`` is the only cron provider we promise.
+
+        Tripwire: if a future refactor ever decides "let's make this env
+        conditional", this test breaks first.
+        """
         from pip_agent.agent_runner import _build_env
 
-        assert _build_env() == {}
+        assert _build_env().get("CLAUDE_CODE_DISABLE_CRON") == "1"
+
+        _clean_env.settings.anthropic_api_key = "sk-ant-direct"
+        assert _build_env().get("CLAUDE_CODE_DISABLE_CRON") == "1"
+
+        _clean_env.settings.anthropic_base_url = "https://proxy.example.com"
+        assert _build_env().get("CLAUDE_CODE_DISABLE_CRON") == "1"
+
+    def test_no_credentials_means_only_the_cron_kill_switch(self, _clean_env):
+        from pip_agent.agent_runner import _build_env
+
+        assert _build_env() == {"CLAUDE_CODE_DISABLE_CRON": "1"}
 
     def test_api_key_only_emits_x_api_key_env(self, _clean_env):
         from pip_agent.agent_runner import _build_env

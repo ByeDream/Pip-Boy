@@ -178,3 +178,45 @@ Implications for Pip-Boy as a public package:
 - Debug checklist when "agent seems to do nothing": check logging config
   first (see `__main__._configure_logging` + `tests/test_main_logging.py`)
   **before** suspecting the CLI.
+
+## 10. CC native cron is dead in our architecture — we kill it
+
+Claude Code ships three built-in tools — `CronCreate`, `CronList`,
+`CronDelete` — plus a `/loop` bundled skill that fronts them. They look
+useful until you realise how they actually tick:
+
+> "The scheduler checks every second for due tasks … A scheduled prompt
+> fires between messages while you're using the CLI."
+> ([scheduled-tasks docs](https://code.claude.com/docs/en/scheduled-tasks))
+
+That second clause is load-bearing. The scheduler is a thread inside the
+`claude.exe` process. Our transport (`SubprocessCLITransport`) spawns a
+fresh `claude.exe` for every `run_query` and lets it exit on `end_turn`.
+So in Pip-Boy's subprocess-per-turn world:
+
+- `CronCreate` returns success → the model is happy.
+- The `claude.exe` subprocess exits seconds later → the scheduler thread
+  dies with it.
+- The persisted session JSONL may carry the task on `--resume`, but the
+  next subprocess also exits in seconds, so it still never fires.
+- The user sees nothing happen. Ever.
+
+Worse, the model has no way to know this: `CronList` cheerfully reports
+"task scheduled". **A shipping API that silently lies to the agent is
+worse than no API at all.**
+
+Therefore: **we disable CC native cron across the board** by injecting
+`CLAUDE_CODE_DISABLE_CRON=1` into the subprocess env — see
+`agent_runner._build_env`. The regression test lives at
+`tests/test_anthropic_client.py::TestBuildEnv::test_cron_kill_switch_is_always_set`.
+
+Pip-Boy's own scheduler (`host_scheduler.HostScheduler`) is a separate
+story: it lives in the long-running host process, persists jobs to
+`.pip/agents/<id>/cron.json`, survives restarts, fires into CLI / WeChat
+/ WeCom channels, and carries no 50-task / 3-day-expiry caps. So the
+model sees exactly one cron provider: `mcp__pip__cron_*`.
+
+If a future Pip-Boy mode ever keeps a long-lived `claude.exe` subprocess
+alive across turns (e.g. a "supervised agent" mode with bidirectional
+streaming), this env flag becomes **revisitable** — not wrong, just
+worth reconsidering. Until then, leave it on.

@@ -60,10 +60,23 @@ def _build_env() -> dict[str, str]:
 
     Pip-Boy does not forward any search or tool-specific keys — those are
     handled by Claude Code's own config.
+
+    ``CLAUDE_CODE_DISABLE_CRON=1`` kills CC's native ``CronCreate`` /
+    ``CronList`` / ``CronDelete`` tools (and the ``/loop`` skill that fronts
+    them). They are fundamentally incompatible with our architecture: CC's
+    cron scheduler lives in the ``claude.exe`` subprocess, which we spawn
+    fresh for each ``run_query`` and kill on ``end_turn``. A task scheduled
+    via ``CronCreate`` has no process to tick it between turns, so it
+    silently never fires — an "API that lies to the model". Pip-Boy's own
+    scheduler (``host_scheduler.py``) is durable, multi-channel, and lives
+    in the long-running host process, so we are intentionally the only cron
+    provider the agent sees.
     """
     from pip_agent.anthropic_client import resolve_anthropic_credential
 
-    env: dict[str, str] = {}
+    env: dict[str, str] = {
+        "CLAUDE_CODE_DISABLE_CRON": "1",
+    }
     cred = resolve_anthropic_credential()
     if cred is not None:
         if cred.bearer:
@@ -150,6 +163,12 @@ async def run_query(
     )
 
     result = QueryResult()
+    # Track whether we have an unterminated streaming line so we can close
+    # it before the end-of-turn ``log.info`` fires. Without this the log
+    # record glues onto the last chunk's trailing character, producing
+    # ``hello2026-04-21 ... Done: turns=1 ...`` in the console. Same
+    # thread, same stdout — it's a missing newline, not a race.
+    streaming_line_open = False
 
     try:
         async for message in query(prompt=prompt, options=options):
@@ -157,6 +176,7 @@ async def run_query(
                 for block in message.content:
                     if isinstance(block, TextBlock) and stream_text:
                         print(block.text, end="", flush=True)
+                        streaming_line_open = True
                     elif isinstance(block, ToolUseBlock):
                         # Tool-use traces are always surfaced: a user staring
                         # at a silent 30-second tool-chain cannot distinguish
@@ -168,6 +188,9 @@ async def run_query(
                             f"\n  [tool: {block.name} {args_preview}]",
                             flush=True,
                         )
+                        # Tool traces start with ``\n`` and end without one,
+                        # so the line remains "open" from the console's POV.
+                        streaming_line_open = True
 
             elif isinstance(message, SystemMessage):
                 if message.subtype == "init":
@@ -181,6 +204,12 @@ async def run_query(
                 result.num_turns = message.num_turns
                 if message.is_error:
                     result.error = message.result
+                # Close the streamed line *before* the log record fires,
+                # otherwise the "Done: turns=..." log glues onto whatever
+                # the last ``TextBlock`` printed.
+                if streaming_line_open:
+                    print(flush=True)
+                    streaming_line_open = False
                 log.info(
                     "Done: turns=%d cost=$%.4f stop=%s",
                     message.num_turns,
@@ -189,6 +218,8 @@ async def run_query(
                 )
 
     except ClaudeSDKError as exc:
+        if streaming_line_open:
+            print(flush=True)
         result.error = str(exc)
         log.error("SDK error: %s", exc)
 
