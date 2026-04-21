@@ -257,20 +257,30 @@ its legitimate purpose: crash-recovery of an in-flight conversation.
 
 ```
 user turn N ──┐
-user turn N+1 ┼── JSONL (SDK session, grows until reflect)
+user turn N+1 ┼── JSONL (SDK session, grows until CC auto-compacts)
 user turn N+2 ┘
               │
-              │ (a) /exit  →  reflect()
-              │ (b) heartbeat fires a prompt  →  "reflect if N≥threshold"
+              ├─ (a) PreCompact hook → reflect()    ← CC's own "context full" signal
+              ├─ (b) /exit           → reflect()    ← catch residual on exit
+              │
               ▼
-        observations.jsonl  ──┐
-                              │ Dream (idle-night cron, sufficient obs)
-                              ▼
-                         memories.json  ──┐
-                                          │ distill
-                                          ▼
-                                      axioms.md
+        observations.jsonl ──┐
+                             │ Dream (idle-night cron, sufficient obs)
+                             │   — independent of reflect, runs on
+                             │   already-persisted observations
+                             ▼
+                        memories.json ──┐
+                                        │ distill
+                                        ▼
+                                   axioms.md
+                                        │
+                                        ▼
+                           system_prompt_append every turn
 ```
+
+Heartbeat is **not** part of the memory pipeline. It is pure
+keepalive / proactive behaviour; see the HEARTBEAT_OK sentinel
+contract in `agent_host.py`.
 
 ### 11.3 Decisions (locked in this session)
 
@@ -280,18 +290,20 @@ user turn N+2 ┘
 | Q2 | Dream = existing L2/L3 code (`consolidate` + `distill_axioms`); auto-trigger = idle-hour + enough observations | Algorithm is done and tested (old Pip). Only the **trigger** needs to come back — it was deleted during the lean rewrite in favour of "agent schedules itself via `cron_create`", which turned out to waste cold-starts. |
 | Q3/Q4 | **Keep axioms in our own `axioms.md`**, inject via `system_prompt_append`. Do NOT write to CC's native `~/.claude/projects/<cwd>/memory/` | We want the option to run multiple Pip-Boy agents against the same cwd (e.g. `pip-boy` + `dev-assistant`). CC's memory folder is keyed by cwd, not agent, so using it would force memory-sharing across agents. Until multi-agent is a real product need, stay with the current per-agent `.pip/agents/<id>/axioms.md`. |
 | Q5 | Reflect is atomic via **session rotation**: mint a new `session_id`, archive the old JSONL, observations extracted from the archive | Avoids "truncate the live JSONL" races. On crash mid-reflect, the archive is still intact and the next start just picks up the new (empty) session. |
-| Q6 | Heartbeat nudge = **direct instruction**, not "decide for yourself" | "Reflect now" collapses into one turn; "should you reflect?" costs a turn just to reach the same decision. Cold-start budget matters. |
+| Q6 | **Reflect triggers are exactly two: PreCompact hook + /exit.** Heartbeat does NOT trigger reflect. | PreCompact is CC's free "content threshold reached" signal — firing it right before CC compacts gives us exactly the boundary we want, using CC's own accumulation heuristic instead of a synthetic turn-count / byte threshold we'd have to invent. `/exit` covers short sessions that never hit the compact threshold. Heartbeat-driven reflect would either duplicate PreCompact (same signal, worse timing) or require its own threshold logic that we'd have to tune forever. Keep heartbeat off the memory path entirely. |
+| Q7 | `reflect_from_jsonl` pre-LLM short-circuit: if `start_offset` has no new bytes, return `[]` without any LLM call | Today the short-circuit lives inside `load_formatted` returning empty (reflect.py:134). Lift it to the function entrance as an explicit `if new_offset == start_offset: return` so a future refactor of `load_formatted` can't silently re-introduce a "zero-new-bytes still burns a cold-start" regression. Cheap belt-and-suspenders — the existing PreCompact + /exit triggers should never hit this in steady state, but the guarantee belongs in code, not in timing assumptions. |
+| Q8 | Preserve `reflect_from_jsonl`'s **failure-does-not-advance-cursor** contract | On LLM exception, `return start_offset, []` keeps the byte cursor pinned so the next trigger re-reads the same delta. This is an implicit at-least-once for reflect and has to stay — mark with a unit test that a raised LLM error keeps `state[_OFFSET_KEY]` unchanged. |
 
 ### 11.4 What has to change
 
 | Area | Change |
 |---|---|
-| `memory/reflect.py` | Re-read prompt — cap at 5 observations, require `{timestamp, type, content, weight}` shape (old Pip schema). |
-| `agent_host.py` | On `/exit`: call `reflect()` synchronously before teardown. |
-| `agent_host.py` | After reflect: rotate SDK session (new `session_id`, archive old JSONL path), update `_sessions[sk]`. |
-| `host_scheduler.py` | Re-introduce **idle-hour Dream trigger**: if `now.hour ∈ [DREAM_HOUR_START, DREAM_HOUR_END]` and `len(observations) ≥ DREAM_MIN_OBS` and `idle ≥ DREAM_INACTIVE_MINUTES`, enqueue a `__cron__` inbound that calls `consolidate()` then `distill_axioms()`. |
-| `config.py` | Resurrect `dream_hour_start` / `dream_min_observations` / `dream_inactive_minutes` settings (currently dead text in `env.example`). |
-| Heartbeat prompt | If `len(observations) ≥ REFLECT_THRESHOLD`: append a direct-instruction line "Call `reflect` now." to the heartbeat body. Otherwise the current "HEARTBEAT_OK if nothing to do" prompt. |
+| `memory/reflect.py` | Prompt rewrite — cap at 5 observations, lock the `{ts, text, category, source}` shape (this is already what the function returns — just make the prompt side match so the LLM can't surprise us). Add the Q7 explicit entry short-circuit + a unit test "reflect called twice back-to-back doesn't call the LLM the second time". Add the Q8 unit test "LLM exception leaves `start_offset` untouched in the returned tuple". |
+| `agent_host.py` | On `/exit`: call reflect synchronously before teardown (re-using the same `reflect_from_jsonl` path PreCompact uses, not a divergent copy). |
+| `agent_host.py` | After reflect: rotate SDK session (new `session_id`, archive old JSONL path), update `_sessions[sk]`. (Q5) |
+| `host_scheduler.py` | Re-introduce **idle-hour Dream trigger** (observations → memories → axioms — this is what the old `DREAM_HOUR` logic ran). Enqueue a `__cron__` inbound when `now.hour ∈ [DREAM_HOUR_START, DREAM_HOUR_END]` AND `len(observations) ≥ DREAM_MIN_OBS` AND `idle ≥ DREAM_INACTIVE_MINUTES`. Dream does NOT call reflect — reflect is upstream and already populated observations.jsonl by the time Dream runs. |
+| `config.py` | Resurrect `dream_hour_start` / `dream_min_observations` / `dream_inactive_minutes` (currently dead text in `env.example`). No new reflect-related settings — PreCompact + /exit don't need tunables. |
+| `hooks.py` | No change. PreCompact is already wired correctly (`_pre_compact_hook`). |
 
 ### 11.5 Explicitly out of scope (for now)
 
@@ -300,6 +312,18 @@ user turn N+2 ┘
   `CLAUDE_CONFIG_DIR` lands).
 - Any form of mid-turn "compact" — reflect rotates, it doesn't summarize
   in place.
-- Auto-reflecting at a token threshold mid-conversation — user turn
-  latency must stay predictable; reflect only happens on exit or on an
-  explicit heartbeat instruction.
+- Auto-reflecting at a token threshold mid-conversation — PreCompact
+  already handles the accumulation boundary; a second threshold would
+  just race PreCompact.
+- **Heartbeat-triggered reflect.** Earlier design iterations put reflect
+  behind a heartbeat nudge. Dropped once it became obvious PreCompact
+  covers the same "enough accumulated, time to extract" signal using
+  CC's own heuristic, and does so exactly at the moment CC is about to
+  discard the raw content. Do not bring heartbeat back into the memory
+  pipeline without a concrete failure of the PreCompact + /exit pair.
+- Making PreCompact fire on cron / heartbeat turns. Post-F
+  (`_is_ephemeral_sender`), those turns run with `session_id=None` and
+  a fresh near-empty context, so CC will never decide to auto-compact
+  them. This is correct — reflect should only pull from user
+  transcripts; cron / heartbeat output is deliberately throwaway.
+  Changing this would require revisiting F's tradeoffs first.
