@@ -60,10 +60,20 @@ _REFLECT_SYSTEM_BASE = (
     'must be cached server-side", "category": "knowledge"}\n'
     '  BAD:  {"text": "Fixed bug on line 42", '
     '"category": "lesson"} -- too specific\n\n'
-    "Output 3-10 observations. If there is nothing meaningful, output [].\n"
+    "Output AT MOST 5 observations. Fewer high-signal ones are strictly "
+    "better than many low-signal ones — if you are borderline on the fifth, "
+    "leave it out. If there is nothing meaningful in the transcript at all, "
+    "output [].\n"
     "Output all observations in English, regardless of the transcript language.\n"
     "Return ONLY the JSON array, no markdown fences or extra text."
 )
+
+# Hard cap on observations returned from a single reflect pass. The prompt
+# asks the model for ≤5 (see Q1 in ``docs/sdk-contract-notes.md`` §11) but
+# prompts are not contracts — a misbehaving model, a prompt-injection in
+# the transcript, or a future model update can all blow past that. Slice
+# in Python so downstream memory / Dream workload is always bounded.
+_MAX_OBSERVATIONS_PER_PASS = 5
 
 _REFLECT_SYSTEM_CACHE: str | None = None
 
@@ -131,6 +141,16 @@ def reflect_from_jsonl(
         start_offset=start_offset,
         max_chars=_MAX_PROMPT_CHARS,
     )
+    # Q7 cursor guard (docs/sdk-contract-notes.md §11.3): if the byte
+    # cursor has not moved, there is nothing new in the transcript and
+    # the LLM call would burn a cold start to produce ``[]``. The
+    # ``not formatted.strip()`` check below catches a superset of this
+    # (e.g. cursor advanced but the delta was pure system-init chrome),
+    # but pinning the ``new_offset == start_offset`` case to its own
+    # explicit branch means a future refactor of ``load_formatted``
+    # cannot silently regress the zero-delta-zero-LLM guarantee.
+    if new_offset == start_offset:
+        return start_offset, []
     if not formatted.strip():
         return new_offset, []
 
@@ -181,4 +201,10 @@ def reflect_from_jsonl(
                 "category": str(obs.get("category", "observation")),
                 "source": "auto",
             })
+        if len(valid) >= _MAX_OBSERVATIONS_PER_PASS:
+            # Defense-in-depth cap matching the Q1 prompt contract.
+            # If the LLM ignored "≤5" and dumped 12, we take the first 5
+            # (preserving the LLM's own ordering, which the prompt framed
+            # as highest-signal first).
+            break
     return new_offset, valid
