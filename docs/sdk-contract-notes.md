@@ -143,3 +143,38 @@ Until then, phases that depend on this (4.5) MUST use the defensive fallback str
 ## 8. Pip-side code-call audit
 
 Cross-checked `agent_runner.py` and `hooks.py` against the above — all calls conform. No changes needed. `SEARCH_API_KEY` passthrough in `_build_env` is unused by CC-managed tools and will be removed in Phase 1.
+
+## 9. SDK spawns its bundled CLI, not a system `claude`
+
+Easy mistake to make (and I made it once during heartbeat debugging): the
+transport that the SDK's `query()` uses is `SubprocessCLITransport`, which
+spawns a real `claude` **executable** — but that executable is shipped
+**inside the Python wheel**, not resolved from `PATH`.
+
+Evidence (Python 3.14, Windows, `claude-agent-sdk==0.1.63`):
+
+```
+>>> from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+>>> SubprocessCLITransport(prompt="x", options=ClaudeAgentOptions())._find_cli()
+'…\\site-packages\\claude_agent_sdk\\_bundled\\claude.exe'
+```
+
+And at runtime the SDK logs:
+
+```
+INFO claude_agent_sdk._internal.transport.subprocess_cli Using bundled Claude Code CLI
+```
+
+Implications for Pip-Boy as a public package:
+
+- We do **not** require users to `npm i -g @anthropic-ai/claude-code` (or
+  Tencent's `@tencent/claude-code-internal`). `pip install pip-boy` is
+  sufficient — the SDK wheel carries everything it needs.
+- `where.exe claude` / `which claude` failing on a user's machine is
+  **not** an installation problem for us. Do not chase it.
+- `ClaudeAgentOptions.cli_path` is an escape hatch, not a requirement. We
+  should never set it in normal code paths; reserve it for power users
+  pointing at a forked CLI.
+- Debug checklist when "agent seems to do nothing": check logging config
+  first (see `__main__._configure_logging` + `tests/test_main_logging.py`)
+  **before** suspecting the CLI.
