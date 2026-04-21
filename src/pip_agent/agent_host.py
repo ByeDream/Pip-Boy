@@ -193,13 +193,13 @@ def _agent_id_from_session_key(sk: str) -> str:
     return parts[1]
 
 
-def _format_prompt(
+def _format_text_prompt(
     inbound: InboundMessage,
     memory_store: MemoryStore | None,
 ) -> str:
-    """Build the user-visible prompt from an InboundMessage.
+    """Text-only prompt rendering. See :func:`_format_prompt`.
 
-    Dispatch order matters:
+    Dispatch order:
 
     1. **Scheduler-injected sentinels** — ``__cron__`` / ``__heartbeat__`` are
        wrapped in ``<cron_task>`` / ``<heartbeat>`` regardless of channel, so
@@ -241,6 +241,93 @@ def _format_prompt(
             f"\n{clean_text}\n</user_query>"
         )
     return f"<user_query>\n{clean_text}\n</user_query>"
+
+
+def _format_prompt(
+    inbound: InboundMessage,
+    memory_store: MemoryStore | None,
+) -> str | list[dict[str, Any]]:
+    """Build the user-visible prompt from an InboundMessage.
+
+    Returns a plain string for pure-text messages (the common case) and
+    an Anthropic-style content-block list when the inbound carries
+    attachments. Callers (specifically :func:`run_query`) must accept
+    either shape.
+
+    Why we keep both shapes instead of always returning blocks
+    ----------------------------------------------------------
+    1. The SDK's string path is a single stdin line; the block path is
+       a streaming-mode ``AsyncIterable`` envelope. String mode is the
+       simpler code path on both sides — when there's nothing to gain
+       from blocks, we don't pay the complexity.
+    2. Heartbeat / cron inbounds never carry attachments but *do* carry
+       sentinel tags (``<heartbeat>``, ``<cron_task>``) that the LLM
+       uses to route. A block-list with one text block would work, but
+       a bare string is what existing transcripts and tests assume,
+       and there's no benefit to churning them.
+
+    Non-image attachments
+    ---------------------
+    Image bytes become base64 image blocks. ``file`` attachments with
+    extracted text become ``<attached-file>`` wrappers so the LLM sees
+    the content inline. Binary ``file`` attachments and ``voice``
+    attachments become descriptive text markers (the channel has
+    already done ASR for voice).
+    """
+    import base64
+
+    text = _format_text_prompt(inbound, memory_store)
+
+    if not inbound.attachments:
+        return text
+
+    blocks: list[dict[str, Any]] = []
+    if text:
+        blocks.append({"type": "text", "text": text})
+
+    for att in inbound.attachments:
+        if att.type == "image" and att.data:
+            blocks.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": att.mime_type or "image/jpeg",
+                    "data": base64.b64encode(att.data).decode("ascii"),
+                },
+            })
+        elif att.type == "image":
+            # Image arrived but the channel couldn't fetch bytes —
+            # preserve the placeholder rather than drop it silently.
+            blocks.append({"type": "text", "text": att.text or "[Image]"})
+        elif att.type == "file" and att.text:
+            blocks.append({
+                "type": "text",
+                "text": (
+                    f'<attached-file name="{att.filename or "unknown"}">'
+                    f"\n{att.text}\n</attached-file>"
+                ),
+            })
+        elif att.type == "file":
+            blocks.append({
+                "type": "text",
+                "text": (
+                    f"[File: {att.filename or 'unknown'}] "
+                    "(binary, not inlined)"
+                ),
+            })
+        elif att.type == "voice":
+            blocks.append({
+                "type": "text",
+                "text": (
+                    f"[Voice transcription]: {att.text}"
+                    if att.text else "[Voice message]"
+                ),
+            })
+
+    # Defensive: if every attachment was unrenderable (empty image, no
+    # bytes, no text), fall back to plain text so the LLM still sees
+    # the original message.
+    return blocks if blocks else text
 
 
 # ---------------------------------------------------------------------------

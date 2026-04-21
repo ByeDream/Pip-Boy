@@ -8,8 +8,10 @@ in-process MCP server (see ``mcp_tools.py``).
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -90,8 +92,29 @@ def _build_env() -> dict[str, str]:
     return env
 
 
+async def _stream_single_user_message(
+    content: list[dict[str, Any]],
+) -> AsyncIterator[dict[str, Any]]:
+    """Yield exactly one SDK-shaped ``user`` envelope for multimodal input.
+
+    The SDK's string path writes a single ``{"type": "user", ...}``
+    line to stdin and then closes input. For content-block prompts
+    (images, inline file text) we take the ``AsyncIterable`` path so
+    ``content`` can be a list instead of a bare string. The envelope
+    shape mirrors ``claude_agent_sdk._internal.client`` exactly —
+    including ``session_id: ""`` because actual session resumption is
+    driven by ``options.resume``, not by anything in this envelope.
+    """
+    yield {
+        "type": "user",
+        "session_id": "",
+        "message": {"role": "user", "content": content},
+        "parent_tool_use_id": None,
+    }
+
+
 async def run_query(
-    prompt: str,
+    prompt: str | list[dict[str, Any]],
     *,
     mcp_ctx: McpContext,
     model: str = "",
@@ -105,8 +128,12 @@ async def run_query(
     Parameters
     ----------
     prompt:
-        The user message to send. Plain string; Phase 7 will extend this to
-        also accept ``list[dict]`` for image attachments.
+        The user message to send. ``str`` for pure-text turns (the
+        hot path), or a list of Anthropic-style content blocks
+        (``[{"type": "text", ...}, {"type": "image", ...}]``) when
+        the inbound carries images / inline files / voice
+        transcriptions. See :func:`pip_agent.agent_host._format_prompt`
+        for the block shape.
     mcp_ctx:
         Pre-configured MCP context with all host-side services.
     model:
@@ -170,8 +197,17 @@ async def run_query(
     # thread, same stdout — it's a missing newline, not a race.
     streaming_line_open = False
 
+    # String prompts go straight through; block-list prompts need the
+    # streaming ``AsyncIterable`` wrapper. Keep the string branch as
+    # the hot path — no iterator spin-up, no extra heap allocation.
+    sdk_prompt: Any
+    if isinstance(prompt, str):
+        sdk_prompt = prompt
+    else:
+        sdk_prompt = _stream_single_user_message(prompt)
+
     try:
-        async for message in query(prompt=prompt, options=options):
+        async for message in query(prompt=sdk_prompt, options=options):
             if isinstance(message, AssistantMessage):
                 for block in message.content:
                     if isinstance(block, TextBlock) and stream_text:
