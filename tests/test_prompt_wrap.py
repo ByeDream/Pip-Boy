@@ -158,6 +158,29 @@ class TestAttachmentBlocks:
             "[File: binary.zip]" in b.get("text", "") for b in out
         )
 
+    def test_file_with_saved_path_hands_model_a_path(self):
+        # Once the host has materialized the bytes to disk, the model
+        # should get the relative path + a prod to use its native
+        # tools. That's what turns "opaque zip" into "agent unzips it".
+        inbound = InboundMessage(
+            text="look at this", sender_id="u1", channel="wecom", peer_id="p1",
+            attachments=[Attachment(
+                type="file", filename="逆转裁判.zip",
+                data=b"PK\x03\x04" + b"\x00" * 100,
+                saved_path="incoming/20260422-012509-逆转裁判.zip",
+            )],
+        )
+        out = _format_prompt(inbound, None)
+        assert isinstance(out, list)
+        file_block = next(
+            b for b in out
+            if b.get("type") == "text" and "saved to" in b.get("text", "")
+        )
+        text = file_block["text"]
+        assert "逆转裁判.zip" in text
+        assert "incoming/20260422-012509-逆转裁判.zip" in text
+        assert "unzip" in text.lower()
+
     def test_voice_transcription_becomes_text(self):
         inbound = InboundMessage(
             text="", sender_id="u1", channel="wechat", peer_id="p1",
@@ -243,3 +266,108 @@ class TestAttachmentBlocks:
         )
         out = _format_prompt(inbound, None)
         assert isinstance(out, str)
+
+
+class TestMaterializeAttachments:
+    """``_materialize_attachments`` drops binary bytes to disk so the
+    LLM can follow them with its native Read/Bash tools. This is what
+    makes zip/doc/pdf uploads actionable instead of opaque.
+    """
+
+    def test_binary_file_written_and_saved_path_set(self, tmp_path):
+        from pip_agent.agent_host import _materialize_attachments
+
+        payload = b"PK\x03\x04" + b"\x00" * 256
+        inbound = InboundMessage(
+            text="", sender_id="u1", channel="wecom", peer_id="p1",
+            attachments=[Attachment(
+                type="file", filename="archive.zip", data=payload,
+            )],
+        )
+        _materialize_attachments(inbound, tmp_path)
+        att = inbound.attachments[0]
+        assert att.saved_path.startswith("incoming/")
+        assert att.saved_path.endswith("-archive.zip")
+        written = tmp_path / att.saved_path
+        assert written.exists()
+        assert written.read_bytes() == payload
+
+    def test_text_file_not_written_twice(self, tmp_path):
+        # If ``.text`` is already populated the file inlines cheaply in
+        # the prompt; no need to occupy disk with a second copy.
+        from pip_agent.agent_host import _materialize_attachments
+
+        inbound = InboundMessage(
+            text="", sender_id="u1", channel="wecom", peer_id="p1",
+            attachments=[Attachment(
+                type="file", filename="readme.md",
+                data=b"hello", text="hello",
+            )],
+        )
+        _materialize_attachments(inbound, tmp_path)
+        assert inbound.attachments[0].saved_path == ""
+        assert not (tmp_path / "incoming").exists()
+
+    def test_image_gets_extension_from_mime(self, tmp_path):
+        # Images arrive without a filename on WeChat; we synthesize one
+        # so the model can tell a jpg from a png when it reads the dir.
+        from pip_agent.agent_host import _materialize_attachments
+
+        inbound = InboundMessage(
+            text="", sender_id="u1", channel="wecom", peer_id="p1",
+            attachments=[Attachment(
+                type="image", data=b"\x89PNG\r\n\x1a\n",
+                mime_type="image/png",
+            )],
+        )
+        _materialize_attachments(inbound, tmp_path)
+        att = inbound.attachments[0]
+        assert att.saved_path.endswith(".png")
+        assert (tmp_path / att.saved_path).exists()
+
+    def test_path_traversal_filename_is_sanitized(self, tmp_path):
+        # A malicious / bugged channel could hand us a filename with
+        # path separators. We must land strictly under ``incoming/``.
+        from pip_agent.agent_host import _materialize_attachments
+
+        inbound = InboundMessage(
+            text="", sender_id="u1", channel="wecom", peer_id="p1",
+            attachments=[Attachment(
+                type="file", filename="../../etc/passwd",
+                data=b"nope",
+            )],
+        )
+        _materialize_attachments(inbound, tmp_path)
+        att = inbound.attachments[0]
+        assert att.saved_path.startswith("incoming/")
+        # basename() strips the leading ``../../etc/`` — only "passwd"
+        # remains, embedded in the timestamped file under incoming/.
+        assert ".." not in att.saved_path
+        assert "passwd" in att.saved_path
+
+    def test_oversized_attachment_skipped(self, tmp_path):
+        from pip_agent.agent_host import (
+            _MAX_INCOMING_BYTES,
+            _materialize_attachments,
+        )
+
+        inbound = InboundMessage(
+            text="", sender_id="u1", channel="wecom", peer_id="p1",
+            attachments=[Attachment(
+                type="file", filename="huge.bin",
+                data=b"x" * (_MAX_INCOMING_BYTES + 1),
+            )],
+        )
+        _materialize_attachments(inbound, tmp_path)
+        assert inbound.attachments[0].saved_path == ""
+        assert not (tmp_path / "incoming").exists()
+
+    def test_no_attachments_is_noop(self, tmp_path):
+        from pip_agent.agent_host import _materialize_attachments
+
+        inbound = InboundMessage(
+            text="just text", sender_id="u1",
+            channel="cli", peer_id="cli-user",
+        )
+        _materialize_attachments(inbound, tmp_path)
+        assert not (tmp_path / "incoming").exists()

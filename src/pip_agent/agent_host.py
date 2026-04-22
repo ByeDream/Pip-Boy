@@ -15,6 +15,7 @@ import sys
 import threading
 from contextlib import nullcontext
 from dataclasses import dataclass
+from pathlib import Path
 
 from pip_agent.agent_runner import QueryResult, run_query
 from pip_agent.channels import (
@@ -47,6 +48,12 @@ log = logging.getLogger(__name__)
 
 AGENTS_DIR = WORKDIR / ".pip" / "agents"
 BINDINGS_PATH = AGENTS_DIR / "bindings.json"
+
+# Inbound file/image bytes get dropped here so the LLM can reach them
+# with its native ``Read`` / ``Bash`` tools (``unzip -l``, ``file``, etc).
+# Workdir-relative so the path the LLM sees is portable across restarts.
+INCOMING_DIR_NAME = "incoming"
+_MAX_INCOMING_BYTES = 50 * 1024 * 1024  # 50 MB — matches send_file cap
 
 SESSION_STORE_PATH = WORKDIR / ".pip" / "sdk_sessions.json"
 
@@ -243,6 +250,100 @@ def _format_text_prompt(
     return f"<user_query>\n{clean_text}\n</user_query>"
 
 
+_SAFE_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _sanitize_filename(name: str) -> str:
+    """Strip path separators and other filename-hostile chars.
+
+    Only the basename survives — any caller-supplied path component is
+    dropped. Result is clamped to 120 chars so pathologically long
+    names don't blow past Windows MAX_PATH when combined with the
+    workdir + timestamp prefix.
+    """
+    import os
+    base = os.path.basename(name or "").strip()
+    base = _SAFE_FILENAME_RE.sub("_", base)
+    if not base:
+        base = "file"
+    return base[:120]
+
+
+def _materialize_attachments(
+    inbound: InboundMessage,
+    workdir: Path,
+) -> None:
+    """Persist binary attachment bytes under ``workdir/incoming/`` in-place.
+
+    Sets ``Attachment.saved_path`` to the workdir-relative location so
+    the prompt renderer can hand the LLM a path its native ``Read`` /
+    ``Bash`` tools can follow (``unzip -l``, ``file``, ``grep``, etc).
+
+    Mutates the attachments on ``inbound``; returns nothing. Called
+    from :meth:`Host.process_inbound` before prompt formatting, so
+    :func:`_format_prompt` stays pure.
+
+    Why disk, not inline
+    --------------------
+    Vision blocks cover images. Everything else — zips, docs, PDFs,
+    audio the ASR layer didn't transcribe — is opaque to the model
+    as bytes. The pre-SDK Pip-Boy and pipi both solved this by
+    dropping bytes on disk in the agent's cwd and letting the LLM
+    decide how to unpack them. This restores that: no custom
+    per-format tools, just a path. Skips attachments with no bytes
+    (``data is None``) and files that decoded cleanly to UTF-8
+    (``text`` is already populated — inline rendering is cheaper).
+    """
+    import time
+
+    if not inbound.attachments:
+        return
+
+    incoming = workdir / INCOMING_DIR_NAME
+    ts_prefix = time.strftime("%Y%m%d-%H%M%S")
+
+    for i, att in enumerate(inbound.attachments):
+        if att.saved_path or not att.data:
+            continue
+        # Text-file attachments already inline cheaply via ``att.text``;
+        # no need to occupy disk with a second copy the model won't read.
+        if att.type == "file" and att.text:
+            continue
+        if len(att.data) > _MAX_INCOMING_BYTES:
+            log.warning(
+                "attachment skipped (%d bytes exceeds cap): %s",
+                len(att.data), att.filename or att.type,
+            )
+            continue
+
+        if att.type == "image":
+            ext = ""
+            if att.mime_type == "image/jpeg":
+                ext = ".jpg"
+            elif att.mime_type == "image/png":
+                ext = ".png"
+            elif att.mime_type == "image/gif":
+                ext = ".gif"
+            elif att.mime_type == "image/webp":
+                ext = ".webp"
+            safe = _sanitize_filename(att.filename) if att.filename else f"image-{i}{ext}"
+            if ext and not safe.lower().endswith(ext):
+                safe = f"{safe}{ext}"
+        else:
+            safe = _sanitize_filename(att.filename or f"{att.type}-{i}")
+
+        try:
+            incoming.mkdir(parents=True, exist_ok=True)
+            dest = incoming / f"{ts_prefix}-{safe}"
+            dest.write_bytes(att.data)
+            att.saved_path = f"{INCOMING_DIR_NAME}/{dest.name}"
+        except OSError as exc:
+            log.warning(
+                "could not materialize attachment %s: %s",
+                att.filename or att.type, exc,
+            )
+
+
 def _format_prompt(
     inbound: InboundMessage,
     memory_store: MemoryStore | None,
@@ -305,6 +406,22 @@ def _format_prompt(
                 "text": (
                     f'<attached-file name="{att.filename or "unknown"}">'
                     f"\n{att.text}\n</attached-file>"
+                ),
+            })
+        elif att.type == "file" and att.saved_path:
+            # Binary file materialized to disk — hand the model a
+            # workdir-relative path so its native tools (Read, Bash
+            # ``unzip``/``file``, Glob) can take it from here. Size
+            # is advisory; the extension in the filename is what
+            # usually triggers the right unpacking strategy.
+            size_hint = f"{len(att.data)} bytes" if att.data else "unknown size"
+            blocks.append({
+                "type": "text",
+                "text": (
+                    f"[File: {att.filename or 'unknown'}] "
+                    f"saved to {att.saved_path} ({size_hint}). "
+                    "Use your Read/Bash tools to inspect it "
+                    "(e.g. `unzip -l` for archives)."
                 ),
             })
         elif att.type == "file":
@@ -636,6 +753,13 @@ class AgentHost:
             workdir=str(WORKDIR),
             sender_id=inbound.sender_id,
         )
+
+        # Drop binary attachment bytes into ``WORKDIR/incoming/`` *before*
+        # prompt rendering so :func:`_format_prompt` can hand the model a
+        # real path. Has to happen after slash-command dispatch (no point
+        # persisting a zip the user intended for a host command) but
+        # before we format the prompt.
+        _materialize_attachments(inbound, WORKDIR)
 
         prompt = _format_prompt(inbound, svc.memory_store)
 

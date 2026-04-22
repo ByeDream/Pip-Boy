@@ -87,6 +87,7 @@ class Attachment:
     filename: str = ""
     mime_type: str = ""
     text: str = ""                  # ASR transcription for voice, or text file content
+    saved_path: str = ""            # workdir-relative path once materialized to disk
 
 
 @dataclass
@@ -658,16 +659,24 @@ class WecomChannel(Channel):
             peer_id = chat_id if chat_id else sender_id
             return sender_id, peer_id, is_group, guild_id, chat_type
 
-        async def _download_media(url: str, aeskey: str | None = None) -> bytes | None:
+        async def _download_media(
+            url: str, aeskey: str | None = None,
+        ) -> tuple[bytes | None, str | None]:
+            # ``aibot.WSClient.download_file`` returns ``(bytes, filename)``
+            # where ``filename`` is parsed from the gateway's
+            # Content-Disposition. WeCom's own ``file`` body dict rarely
+            # carries ``filename``/``file_name``/``name`` for user
+            # uploads, so if we drop this the agent sees ``[File: file]``
+            # with no extension to work from. Plumb it through.
             try:
-                data, _ = await asyncio.wait_for(
+                data, fname = await asyncio.wait_for(
                     ws.download_file(url, aeskey),
                     timeout=self._DOWNLOAD_TIMEOUT,
                 )
-                return data
+                return data, fname
             except Exception as exc:
                 log.warning("wecom media download failed: %s", exc)
-                return None
+                return None, None
 
         async def _collect_quote_attachments(body: dict) -> list[Attachment]:
             """Download media from a quoted (reply-to) message.
@@ -687,7 +696,9 @@ class WecomChannel(Channel):
 
             if quote.get("image", {}).get("url"):
                 img = quote["image"]
-                data = await _download_media(img["url"], img.get("aeskey"))
+                data, _fname = await _download_media(
+                    img["url"], img.get("aeskey"),
+                )
                 atts.append(Attachment(
                     type="image", data=data,
                     mime_type=_detect_image_mime(data) if data else "",
@@ -696,9 +707,15 @@ class WecomChannel(Channel):
 
             if quote.get("file", {}).get("url"):
                 fi = quote["file"]
-                data = await _download_media(fi["url"], fi.get("aeskey"))
+                data, dl_fname = await _download_media(
+                    fi["url"], fi.get("aeskey"),
+                )
+                # Prefer the gateway-supplied filename (from the
+                # download response) over the body dict — WeCom's
+                # file body usually lacks ``filename``/``file_name``.
                 fname = (
-                    fi.get("filename") or fi.get("file_name")
+                    dl_fname
+                    or fi.get("filename") or fi.get("file_name")
                     or fi.get("name") or "file"
                 )
                 if data and _detect_image_mime(data):
@@ -800,7 +817,9 @@ class WecomChannel(Channel):
                         img = item.get("image", {})
                         url = img.get("url", "")
                         if url:
-                            data = await _download_media(url, img.get("aeskey"))
+                            data, _fname = await _download_media(
+                                url, img.get("aeskey"),
+                            )
                             atts.append(Attachment(
                                 type="image", data=data,
                                 mime_type=_detect_image_mime(data) if data else "",
@@ -817,7 +836,9 @@ class WecomChannel(Channel):
 
                 if body.get("image", {}).get("url"):
                     img = body["image"]
-                    data = await _download_media(img["url"], img.get("aeskey"))
+                    data, _fname = await _download_media(
+                        img["url"], img.get("aeskey"),
+                    )
                     atts.append(Attachment(
                         type="image", data=data,
                         mime_type=_detect_image_mime(data) if data else "",
@@ -826,8 +847,18 @@ class WecomChannel(Channel):
 
                 if body.get("file", {}).get("url"):
                     fi = body["file"]
-                    data = await _download_media(fi["url"], fi.get("aeskey"))
-                    fname = fi.get("filename") or fi.get("file_name") or fi.get("name") or "file"
+                    data, dl_fname = await _download_media(
+                        fi["url"], fi.get("aeskey"),
+                    )
+                    # Prefer the gateway-supplied filename over the body
+                    # dict: WeCom usually omits ``filename`` on file
+                    # uploads so without this the agent would see
+                    # ``[File: file]`` with no extension.
+                    fname = (
+                        dl_fname
+                        or fi.get("filename") or fi.get("file_name")
+                        or fi.get("name") or "file"
+                    )
                     text_content_f = ""
                     if data:
                         try:
