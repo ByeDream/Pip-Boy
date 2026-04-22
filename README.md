@@ -140,7 +140,6 @@ All commands are flat (single-level). ACL: `/help` and `/status` are open, `/adm
 | `/cron` | List scheduled cron jobs. |
 | `/bind <agent-id> [--scope s] [--model m]` | Bind current chat to an agent (auto-creates the agent if needed). |
 | `/unbind` | Remove current chat's binding. |
-| `/name <display_name>` | Rename the current agent. |
 | `/reset` | Factory-reset memory for the current agent (keeps binding + persona). |
 | `/admin grant\|revoke\|list [name]` | Manage admin privileges (owner only). |
 | `/exit` | Quit Pip-Boy (CLI only). |

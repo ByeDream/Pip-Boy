@@ -338,13 +338,13 @@ subsystems (lanes, resilience runner, worktrees, teammates) back in.
 
 ### 12.1 Phase 6 — slash dispatch (`host_commands.py`)
 
-Replaces the 900-line legacy `commands.py` with a 12-command flat
+Replaces the 900-line legacy `commands.py` with an 11-command flat
 surface that matches what the rewritten architecture actually has
 machinery for:
 
 ```
 /help /status /memory /axioms /recall /cron
-/bind /unbind /name /reset /admin /exit
+/bind /unbind /reset /admin /exit
 ```
 
 Dropped outright: `/scheduler`, `/lanes`, `/heartbeat`, `/trigger`,
@@ -352,6 +352,17 @@ Dropped outright: `/scheduler`, `/lanes`, `/heartbeat`, `/trigger`,
 `/simulate-failure`, `/fallback`, `/update`, `/clean`, `/model`.
 Each either surfaced a removed subsystem (`/lanes` → lanes gone) or
 duplicated a path the CC layer now owns (`/model` → CC config).
+
+`/name` was initially kept and then dropped during 0.4.0 regression
+testing. The reason: it rewrote `persona.md`'s `name:` frontmatter,
+but that field is only rendered in `/status` / `/bind` response text
+and is never injected into the system prompt, so the model continued
+calling itself by whatever the persona body hard-coded. A "rename"
+that doesn't actually rename the agent from the LLM's perspective
+is worse than no command at all — users get a false sense that they
+reconfigured the agent. If we ever want first-class agent renaming,
+the fix is to interpolate `{agent_name}` into the persona body (and
+version-migrate existing personas), not to resurrect this slash.
 
 Integration point is `AgentHost.process_inbound`: dispatch runs
 *after* agent resolution (so `/status` can report the right binding)

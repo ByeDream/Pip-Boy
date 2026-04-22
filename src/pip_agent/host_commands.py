@@ -182,7 +182,6 @@ Available commands:
   /cron                          List scheduled cron jobs
   /bind <agent-id> [options]     Bind current chat to an agent
   /unbind                        Remove current chat's binding
-  /name <display_name>           Rename the current agent
   /reset                         Factory-reset memory (keep binding + persona)
   /admin grant|revoke|list       Manage admin privileges (owner only)
   /exit                          Quit Pip-Boy (CLI only)
@@ -335,7 +334,7 @@ def _cmd_cron(ctx: CommandContext, _args: str) -> CommandResult:
 
 
 # ---------------------------------------------------------------------------
-# /bind, /unbind, /name
+# /bind, /unbind
 # ---------------------------------------------------------------------------
 
 
@@ -497,36 +496,6 @@ def _cmd_unbind(ctx: CommandContext, _args: str) -> CommandResult:
     return CommandResult(handled=True, response="No binding found for this context.")
 
 
-def _cmd_name(ctx: CommandContext, args: str) -> CommandResult:
-    new_name = args.strip()
-    if not new_name:
-        return CommandResult(handled=True, response="Usage: /name <display_name>")
-
-    from dataclasses import replace
-
-    inbound = ctx.inbound
-    agent_id, _ = ctx.bindings.resolve(
-        channel=inbound.channel,
-        account_id=inbound.account_id,
-        guild_id=inbound.guild_id,
-        peer_id=inbound.peer_id,
-    )
-    if not agent_id:
-        agent_id = ctx.registry.default_agent().id
-
-    agent = ctx.registry.get_agent(agent_id)
-    if not agent:
-        return CommandResult(handled=True, response="No agent found for this context.")
-
-    agent = replace(agent, name=new_name)
-    ctx.registry.register_agent(agent)
-    _persist_agent_md(agent, ctx.registry.agents_dir)
-    return CommandResult(
-        handled=True,
-        response=f"Agent '{agent_id}' renamed to {new_name}.",
-    )
-
-
 # ---------------------------------------------------------------------------
 # /reset
 # ---------------------------------------------------------------------------
@@ -646,7 +615,6 @@ _HANDLERS: dict[
     "/cron": _cmd_cron,
     "/bind": _cmd_bind,
     "/unbind": _cmd_unbind,
-    "/name": _cmd_name,
     "/reset": _cmd_reset,
     "/admin": _cmd_admin,
     "/exit": _cmd_exit,

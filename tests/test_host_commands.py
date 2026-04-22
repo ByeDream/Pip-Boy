@@ -462,21 +462,6 @@ class TestBindingMutators:
         assert result.handled
         assert "No binding" in (result.response or "")
 
-    def test_name_updates_agent_display(self, tmp_path: Path):
-        ctx = _build_ctx(_cli_inbound("/name Buddy"), tmp_path)
-        result = dispatch_command(ctx)
-        assert result.handled
-        default = ctx.registry.default_agent()
-        agent = ctx.registry.get_agent(default.id)
-        assert agent is not None
-        assert agent.name == "Buddy"
-
-    def test_name_requires_argument(self, tmp_path: Path):
-        ctx = _build_ctx(_cli_inbound("/name"), tmp_path)
-        result = dispatch_command(ctx)
-        assert result.handled
-        assert "Usage:" in (result.response or "")
-
 
 # ---------------------------------------------------------------------------
 # /admin subcommand matrix — owner-only gate already covered; here we
