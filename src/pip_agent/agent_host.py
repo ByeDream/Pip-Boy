@@ -987,10 +987,15 @@ def run_host(mode: str = "auto", bind_agent: str | None = None) -> None:
             for inbound in batch:
                 # Only real interactive CLI input can terminate the host; a
                 # cron payload that happens to say "/exit" must not kill us.
+                # Bare ``exit`` (no slash) is deliberately NOT a shutdown
+                # trigger — it collides with the user legitimately asking
+                # the LLM about the ``exit`` shell builtin / Python call
+                # and makes the host-layer slash surface feel inconsistent
+                # with every other command (which all require the slash).
                 if (
                     inbound.channel == "cli"
                     and inbound.sender_id == "cli-user"
-                    and inbound.text.strip().lower() in ("/exit", "exit")
+                    and inbound.text.strip().lower() == "/exit"
                 ):
                     # Shutdown handoff: reflect every live session and
                     # rotate so next launch starts clean. See
