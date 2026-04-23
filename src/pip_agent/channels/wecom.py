@@ -617,6 +617,12 @@ class WecomChannel(Channel):
                 log.warning("wecom _run_async: timed out")
                 future.cancel()
                 return None
+            except RuntimeError as exc:
+                # aibot raises RuntimeError("WebSocket not connected, ...")
+                # when the socket is torn down mid-send (typical on Ctrl+C
+                # while a reply is still in flight). Log without traceback.
+                log.warning("wecom _run_async: %s", exc)
+                return None
             except Exception:
                 log.exception("wecom _run_async: coroutine failed")
                 return None
