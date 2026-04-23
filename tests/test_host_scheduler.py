@@ -11,6 +11,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from pip_agent.channels import InboundMessage
@@ -27,6 +28,24 @@ from pip_agent.host_scheduler import (
     _Sender,
     _validate_schedule,
 )
+
+
+def _fake_registry(pip_dir: Path, *, agent_id: str = "pip-boy"):
+    """Minimal :class:`AgentRegistry`-shaped stub for scheduler tests.
+
+    Exposes a single agent whose ``pip_dir`` is ``pip_dir`` (anything
+    matching the :class:`AgentPaths` surface the scheduler reads).
+    """
+    paths = SimpleNamespace(
+        pip_dir=pip_dir,
+        workspace_pip_dir=pip_dir.parent,
+        cwd=pip_dir.parent,
+    )
+    cfg = SimpleNamespace(id=agent_id)
+    return SimpleNamespace(
+        list_agents=lambda: [cfg],
+        paths_for=lambda aid: paths if aid == agent_id else None,
+    )
 
 # ---------------------------------------------------------------------------
 # Schedule maths
@@ -136,13 +155,14 @@ def _make_sched(tmp_path: Path) -> tuple[HostScheduler, list, threading.Lock]:
     queue: list = []
     lock = threading.Lock()
     stop = threading.Event()
+    pip_dir = tmp_path / "agents" / "pip-boy"
+    pip_dir.mkdir(parents=True)
     sched = HostScheduler(
-        agents_dir=tmp_path / "agents",
+        registry=_fake_registry(pip_dir),
         msg_queue=queue,
         q_lock=lock,
         stop_event=stop,
     )
-    (tmp_path / "agents" / "pip-boy").mkdir(parents=True)
     return sched, queue, lock
 
 
@@ -700,16 +720,16 @@ class TestTickDreamGating:
     """All five gates from ``_tick_dream`` docstring, tested independently."""
 
     def _sched(self, tmp_path: Path) -> tuple[HostScheduler, Path]:
-        agents_dir = tmp_path / ".pip" / "agents"
-        (agents_dir / "pip-boy").mkdir(parents=True)
+        pip_dir = tmp_path / ".pip" / "agents" / "pip-boy"
+        pip_dir.mkdir(parents=True)
         queue: list[InboundMessage] = []
         sched = HostScheduler(
-            agents_dir=agents_dir,
+            registry=_fake_registry(pip_dir),
             msg_queue=queue,
             q_lock=threading.Lock(),
             stop_event=threading.Event(),
         )
-        return sched, agents_dir / "pip-boy"
+        return sched, pip_dir
 
     def _spy_spawn(self, sched: HostScheduler, monkeypatch) -> list[tuple]:
         """Replace the worker-thread spawn with a recorder so we can
@@ -744,7 +764,7 @@ class TestTickDreamGating:
         sched, agent_dir = self._sched(tmp_path)
         calls = self._spy_spawn(sched, monkeypatch)
 
-        sched._tick_dream(agent_dir, _epoch_at_hour(12))
+        sched._tick_dream("pip-boy", _epoch_at_hour(12))
 
         assert calls == []
 
@@ -763,7 +783,7 @@ class TestTickDreamGating:
 
         # Simulate an in-flight worker for this agent.
         sched._dream_running.add("pip-boy")
-        sched._tick_dream(agent_dir, _epoch_at_hour(3))
+        sched._tick_dream("pip-boy", _epoch_at_hour(3))
 
         assert calls == []
 
@@ -783,10 +803,14 @@ class TestTickDreamGating:
 
         # Stamp a Dream that happened inside the current 3-hour window.
         now = _epoch_at_hour(4)
-        store = MemoryStore(base_dir=agent_dir.parent, agent_id="pip-boy")
+        store = MemoryStore(
+            agent_dir=agent_dir,
+            workspace_pip_dir=agent_dir.parent,
+            agent_id="pip-boy",
+        )
         store.save_state({_DREAM_LAST_AT_KEY: now - 600})  # 10 min ago
 
-        sched._tick_dream(agent_dir, now)
+        sched._tick_dream("pip-boy", now)
 
         assert calls == []
 
@@ -804,7 +828,7 @@ class TestTickDreamGating:
         calls = self._spy_spawn(sched, monkeypatch)
 
         # Zero observations on disk — below the threshold.
-        sched._tick_dream(agent_dir, _epoch_at_hour(3))
+        sched._tick_dream("pip-boy", _epoch_at_hour(3))
 
         assert calls == []
 
@@ -821,10 +845,14 @@ class TestTickDreamGating:
         calls = self._spy_spawn(sched, monkeypatch)
 
         now = _epoch_at_hour(3)
-        store = MemoryStore(base_dir=agent_dir.parent, agent_id="pip-boy")
+        store = MemoryStore(
+            agent_dir=agent_dir,
+            workspace_pip_dir=agent_dir.parent,
+            agent_id="pip-boy",
+        )
         store.save_state({"last_activity_at": now - 60})  # 1 min ago
 
-        sched._tick_dream(agent_dir, now)
+        sched._tick_dream("pip-boy", now)
 
         assert calls == []
 
@@ -844,10 +872,14 @@ class TestTickDreamGating:
 
         # Past activity + no recent dream → all gates pass.
         now = _epoch_at_hour(3)
-        store = MemoryStore(base_dir=agent_dir.parent, agent_id="pip-boy")
+        store = MemoryStore(
+            agent_dir=agent_dir,
+            workspace_pip_dir=agent_dir.parent,
+            agent_id="pip-boy",
+        )
         store.save_state({"last_activity_at": now - 86400})  # 1 day ago
 
-        sched._tick_dream(agent_dir, now)
+        sched._tick_dream("pip-boy", now)
 
         assert len(calls) == 1
         # args = (agent_id, started_at, observations)
@@ -861,16 +893,20 @@ class TestRunDream:
     def _sched_and_store(self, tmp_path: Path):
         from pip_agent.memory import MemoryStore
 
-        agents_dir = tmp_path / ".pip" / "agents"
-        (agents_dir / "pip-boy").mkdir(parents=True)
+        pip_dir = tmp_path / ".pip" / "agents" / "pip-boy"
+        pip_dir.mkdir(parents=True)
         sched = HostScheduler(
-            agents_dir=agents_dir,
+            registry=_fake_registry(pip_dir),
             msg_queue=[],
             q_lock=threading.Lock(),
             stop_event=threading.Event(),
         )
         sched._dream_running.add("pip-boy")  # as the ticker would have set
-        store = MemoryStore(base_dir=agents_dir, agent_id="pip-boy")
+        store = MemoryStore(
+            agent_dir=pip_dir,
+            workspace_pip_dir=pip_dir.parent,
+            agent_id="pip-boy",
+        )
         return sched, store
 
     def test_no_client_exits_cleanly(self, tmp_path: Path):

@@ -489,9 +489,13 @@ class TestFlushAndRotate:
         from pip_agent import agent_host as mod
         from pip_agent.memory import MemoryStore
 
-        agents_dir = tmp_path / ".pip" / "agents"
-        (agents_dir / "pip-boy").mkdir(parents=True)
-        mem = MemoryStore(base_dir=agents_dir, agent_id="pip-boy")
+        pip_dir = tmp_path / ".pip"
+        pip_dir.mkdir(parents=True)
+        mem = MemoryStore(
+            agent_dir=pip_dir,
+            workspace_pip_dir=pip_dir,
+            agent_id="pip-boy",
+        )
 
         # ``paths`` mirrors the v2 :class:`AgentPaths` surface used by
         # ``flush_and_rotate`` — we only need ``cwd`` to satisfy the
@@ -499,8 +503,8 @@ class TestFlushAndRotate:
         fake_paths = SimpleNamespace(
             agent_id="pip-boy",
             cwd=tmp_path,
-            pip_dir=agents_dir / "pip-boy",
-            workspace_pip_dir=tmp_path / ".pip",
+            pip_dir=pip_dir,
+            workspace_pip_dir=pip_dir,
         )
         # ``flush_and_rotate`` now asks the registry whether the agent
         # still exists before materialising its services, to avoid
@@ -711,9 +715,13 @@ class TestReflectAndPersist:
     def _store(self, tmp_path: Path):
         from pip_agent.memory import MemoryStore
 
-        agents_dir = tmp_path / ".pip" / "agents"
-        (agents_dir / "pip-boy").mkdir(parents=True)
-        return MemoryStore(base_dir=agents_dir, agent_id="pip-boy")
+        pip_dir = tmp_path / ".pip"
+        pip_dir.mkdir(parents=True)
+        return MemoryStore(
+            agent_dir=pip_dir,
+            workspace_pip_dir=pip_dir,
+            agent_id="pip-boy",
+        )
 
     def test_zero_delta_no_state_write(self, tmp_path: Path, monkeypatch):
         from pip_agent.memory.reflect import (

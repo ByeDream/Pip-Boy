@@ -20,18 +20,11 @@ owner is a property of the human running Pip, not of any one agent.
 
 Construction
 ~~~~~~~~~~~~
-Preferred form::
+::
 
     MemoryStore(agent_dir=paths.pip_dir,
                 workspace_pip_dir=paths.workspace_pip_dir,
                 agent_id=paths.agent_id)
-
-Legacy form (retained so older call sites and tests keep working — the
-old ``base_dir`` argument was ``WORKDIR/.pip/agents/``; the agent dir
-was ``base_dir / agent_id`` and ``owner.md`` lived at
-``base_dir.parent / 'owner.md'``)::
-
-    MemoryStore(base_dir, agent_id)
 """
 
 from __future__ import annotations
@@ -58,20 +51,11 @@ class MemoryStore:
 
     def __init__(
         self,
-        base_dir: Path | None = None,
-        agent_id: str = "",
         *,
-        agent_dir: Path | None = None,
+        agent_dir: Path,
         workspace_pip_dir: Path | None = None,
+        agent_id: str = "",
     ) -> None:
-        if agent_dir is None:
-            if base_dir is None:
-                raise TypeError(
-                    "MemoryStore needs either agent_dir or base_dir+agent_id",
-                )
-            agent_dir = base_dir / agent_id
-            if workspace_pip_dir is None:
-                workspace_pip_dir = base_dir.parent
         if workspace_pip_dir is None:
             workspace_pip_dir = agent_dir
 

@@ -1,15 +1,11 @@
-"""Smoke test for the v2 identity redesign.
+"""Smoke test for the v2 identity model.
 
-Covers three concerns after the ``.pip/agents/<id>/`` → ``.pip/ + <id>/.pip/``
-migration:
+Covers two concerns:
 
 1. **Cold-start cost** — import ``pip_agent.agent_host`` repeatedly and
    report the median, min, max so we can compare against the baseline
    in ``docs/performance-baseline.md``.
-2. **Legacy layout migration** — synthesise a v1 tree, run
-   ``ensure_workspace``, and assert every critical file/dir landed in
-   the new v2 location.
-3. **Multi-agent switching** — drive ``AgentRegistry`` through
+2. **Multi-agent switching** — drive ``AgentRegistry`` through
    ``register_agent`` / ``paths_for`` / ``archive_agent`` /
    ``remove_agent`` end-to-end and check the paths track correctly so
    a running host can route turns to different sub-agents.
@@ -19,8 +15,6 @@ No Anthropic traffic; no network. Safe to run in CI on Windows.
 
 from __future__ import annotations
 
-import json
-import shutil
 import sys
 import tempfile
 import time
@@ -60,63 +54,6 @@ def bench_cold_start(iterations: int = 6) -> None:
         f"min={samples_ms[0]:.1f} ms  "
         f"max={samples_ms[-1]:.1f} ms",
     )
-
-
-def smoke_v1_migration() -> None:
-    """Materialise a v1 layout, migrate, assert v2 invariants."""
-    _section("v1 -> v2 migration")
-    from pip_agent.scaffold import ensure_workspace
-
-    with tempfile.TemporaryDirectory() as td:
-        ws = Path(td)
-        (ws / ".git").mkdir()
-
-        pipboy = ws / ".pip" / "agents" / "pip-boy"
-        pipboy.mkdir(parents=True)
-        (pipboy / "persona.md").write_text(
-            "---\nname: Pip-Boy\nmodel: claude-opus-4-6\n---\nRoot persona.\n",
-            encoding="utf-8",
-        )
-        (pipboy / "state.json").write_text('{"last_reflect_at": 42}', encoding="utf-8")
-        (pipboy / "observations").mkdir()
-        (pipboy / "observations" / "2026-01-01.jsonl").write_text(
-            '{"text": "root obs"}\n', encoding="utf-8",
-        )
-
-        stella = ws / ".pip" / "agents" / "stella"
-        stella.mkdir()
-        (stella / "persona.md").write_text(
-            "---\nname: Stella\n---\nStella persona.\n", encoding="utf-8",
-        )
-        (stella / "state.json").write_text('{"last_reflect_at": 7}', encoding="utf-8")
-
-        (ws / ".pip" / "agents" / "bindings.json").write_text(
-            json.dumps({"bindings": []}), encoding="utf-8",
-        )
-
-        ensure_workspace(ws)
-
-        # Root persona content bubbled up.
-        assert "Root persona." in (ws / ".pip" / "persona.md").read_text(
-            encoding="utf-8",
-        ), "root persona not surfaced"
-        assert (ws / ".pip" / "observations" / "2026-01-01.jsonl").exists()
-        # Sub-agent promoted to sibling dir.
-        assert (ws / "stella" / ".pip" / "persona.md").exists()
-        assert "Stella persona." in (
-            ws / "stella" / ".pip" / "persona.md"
-        ).read_text(encoding="utf-8")
-        # bindings up-shifted.
-        assert (ws / ".pip" / "bindings.json").exists()
-        # Registry knows the sub-agent.
-        reg = json.loads(
-            (ws / ".pip" / "agents_registry.json").read_text(encoding="utf-8"),
-        )
-        assert reg["agents"]["pip-boy"]["kind"] == "root"
-        assert reg["agents"]["stella"]["kind"] == "sub"
-        # Legacy tree gone.
-        assert not (ws / ".pip" / "agents").exists()
-        print("  OK: pip-boy bubbled up, sub-agent relocated, bindings moved")
 
 
 def smoke_agent_switching() -> None:
@@ -209,7 +146,6 @@ def smoke_runtime_cwd_wiring() -> None:
 
 def main() -> None:
     bench_cold_start()
-    smoke_v1_migration()
     smoke_agent_switching()
     try:
         smoke_runtime_cwd_wiring()

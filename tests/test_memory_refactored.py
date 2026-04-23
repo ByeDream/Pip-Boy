@@ -28,11 +28,20 @@ class TestExtractJsonArray:
         assert extract_json_array("not json at all") is None
 
 
+def _pip_boy_store(tmp_path: Path) -> MemoryStore:
+    """Build a v2-layout root-agent store rooted at ``tmp_path / .pip``."""
+    return MemoryStore(
+        agent_dir=tmp_path / ".pip",
+        workspace_pip_dir=tmp_path / ".pip",
+        agent_id="pip-boy",
+    )
+
+
 class TestMemoryStoreBasics:
     def test_write_observation_appends_to_jsonl(self, tmp_path: Path):
-        store = MemoryStore(tmp_path / "agents", "pip-boy")
+        store = _pip_boy_store(tmp_path)
         store.write_single("first observation", category="observation", source="user")
-        observations = list((tmp_path / "agents" / "pip-boy" / "observations").glob("*.jsonl"))
+        observations = list((store.agent_dir / "observations").glob("*.jsonl"))
         assert len(observations) == 1
         lines = [
             json.loads(line)
@@ -43,11 +52,11 @@ class TestMemoryStoreBasics:
         assert lines[0]["text"] == "first observation"
 
     def test_load_state_missing_returns_empty_dict(self, tmp_path: Path):
-        store = MemoryStore(tmp_path / "agents", "pip-boy")
+        store = _pip_boy_store(tmp_path)
         assert store.load_state() == {}
 
     def test_save_and_load_state_roundtrip(self, tmp_path: Path):
-        store = MemoryStore(tmp_path / "agents", "pip-boy")
+        store = _pip_boy_store(tmp_path)
         store.save_state({"last_reflect_at": 12345})
         assert store.load_state() == {"last_reflect_at": 12345}
 
@@ -63,7 +72,7 @@ class TestMemoryStoreBasics:
         """
         import shutil
 
-        store = MemoryStore(tmp_path / "agents", "pip-boy")
+        store = _pip_boy_store(tmp_path)
         shutil.rmtree(store.agent_dir / "observations")
         assert not (store.agent_dir / "observations").exists()
 
@@ -91,7 +100,7 @@ class TestPurgeObservations:
             store.write_observations([obs])
 
     def test_deletes_lines_at_or_before_cutoff(self, tmp_path: Path):
-        store = MemoryStore(tmp_path / "agents", "pip-boy")
+        store = _pip_boy_store(tmp_path)
         self._seed(store, [
             {"ts": 1.0, "text": "old 1", "category": "decision", "source": "auto"},
             {"ts": 2.0, "text": "old 2", "category": "decision", "source": "auto"},
@@ -104,11 +113,11 @@ class TestPurgeObservations:
         assert [o["text"] for o in remaining] == ["new"]
 
     def test_empty_file_is_unlinked(self, tmp_path: Path):
-        store = MemoryStore(tmp_path / "agents", "pip-boy")
+        store = _pip_boy_store(tmp_path)
         self._seed(store, [
             {"ts": 1.0, "text": "dropped", "category": "decision", "source": "auto"},
         ])
-        obs_dir = tmp_path / "agents" / "pip-boy" / "observations"
+        obs_dir = store.agent_dir / "observations"
         files_before = list(obs_dir.glob("*.jsonl"))
         assert files_before
 
@@ -118,8 +127,8 @@ class TestPurgeObservations:
     def test_keeps_unparseable_lines(self, tmp_path: Path):
         """Malformed JSON lines are held back from purge — destroying
         bytes we can't even decode is worse than keeping noise."""
-        store = MemoryStore(tmp_path / "agents", "pip-boy")
-        obs_dir = tmp_path / "agents" / "pip-boy" / "observations"
+        store = _pip_boy_store(tmp_path)
+        obs_dir = store.agent_dir / "observations"
         obs_dir.mkdir(parents=True, exist_ok=True)
         fp = obs_dir / "2025-01-01.jsonl"
         fp.write_text(
@@ -140,7 +149,7 @@ class TestPurgeObservations:
         Dream started_at capture and the purge, their ts > cutoff and
         they survive intact.
         """
-        store = MemoryStore(tmp_path / "agents", "pip-boy")
+        store = _pip_boy_store(tmp_path)
         self._seed(store, [
             {"ts": 10.0, "text": "a", "category": "x", "source": "auto"},
             {"ts": 11.0, "text": "b", "category": "x", "source": "auto"},

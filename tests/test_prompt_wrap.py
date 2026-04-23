@@ -273,13 +273,14 @@ class TestMaterializeAttachments:
     LLM can follow them with its native Read/Bash tools. This is what
     makes zip/doc/pdf uploads actionable instead of opaque.
 
-    The incoming dir lives under the per-agent tree, so saved paths
-    look like ``.pip/agents/<id>/incoming/<ts>-<name>``.
+    The incoming dir lives under the agent's ``.pip/``, so saved paths
+    look like ``.pip/incoming/<ts>-<name>`` for the root agent and
+    ``<project>/.pip/incoming/<ts>-<name>`` for sub-agents.
     """
 
     def _incoming_dir(self, workdir):
-        # Mirrors the real caller: .pip/agents/<id>/incoming
-        return workdir / ".pip" / "agents" / "pip-boy" / "incoming"
+        # Mirrors the real caller: paths.incoming_dir -> <pip_dir>/incoming
+        return workdir / ".pip" / "incoming"
 
     def test_binary_file_written_and_saved_path_set(self, tmp_path):
         from pip_agent.agent_host import _materialize_attachments
@@ -296,7 +297,7 @@ class TestMaterializeAttachments:
             inbound, workdir=tmp_path, incoming_dir=incoming,
         )
         att = inbound.attachments[0]
-        assert att.saved_path.startswith(".pip/agents/pip-boy/incoming/")
+        assert att.saved_path.startswith(".pip/incoming/")
         assert att.saved_path.endswith("-archive.zip")
         # POSIX separators even on Windows — the model feeds this
         # straight into Bash ``unzip``, which doesn't grok backslashes.
@@ -362,13 +363,14 @@ class TestMaterializeAttachments:
             inbound, workdir=tmp_path, incoming_dir=incoming,
         )
         att = inbound.attachments[0]
-        assert att.saved_path.startswith(".pip/agents/pip-boy/incoming/")
+        assert att.saved_path.startswith(".pip/incoming/")
         assert ".." not in att.saved_path
         assert "passwd" in att.saved_path
 
     def test_per_agent_isolation(self, tmp_path):
-        # Two agents, same filename, same second — the per-agent
-        # partitioning is what stops them from clobbering each other.
+        # Two sub-agents, same filename, same second — the per-project
+        # partitioning (alpha/.pip/incoming/, beta/.pip/incoming/) is
+        # what stops them from clobbering each other.
         from pip_agent.agent_host import _materialize_attachments
 
         inb_a = InboundMessage(
@@ -383,8 +385,8 @@ class TestMaterializeAttachments:
                 type="file", filename="notes.bin", data=b"B" * 10,
             )],
         )
-        dir_a = tmp_path / ".pip" / "agents" / "alpha" / "incoming"
-        dir_b = tmp_path / ".pip" / "agents" / "beta" / "incoming"
+        dir_a = tmp_path / "alpha" / ".pip" / "incoming"
+        dir_b = tmp_path / "beta" / ".pip" / "incoming"
         _materialize_attachments(
             inb_a, workdir=tmp_path, incoming_dir=dir_a,
         )

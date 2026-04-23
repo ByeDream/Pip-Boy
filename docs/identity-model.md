@@ -176,17 +176,3 @@ naturally disjoint transcript stores.
 
 The warm session pool is keyed by `(agent_id, session_key)` so sub-agent
 streaming subprocesses never cross-contaminate.
-
-## Migration from v1
-
-`ensure_workspace` detects the legacy `.pip/agents/<id>/` layout and
-migrates in place on next launch:
-
-- `.pip/agents/pip-boy/*` → `.pip/*`
-- `.pip/agents/<other>/*` → `<workspace>/<other>/.pip/*` (registered as
-  a sub-agent)
-- `.pip/agents/bindings.json` → `.pip/bindings.json`
-- `.pip/agents/` is removed once empty.
-
-No action required from the operator — the migration is idempotent and
-leaves user-modified files untouched.

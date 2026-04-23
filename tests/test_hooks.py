@@ -19,7 +19,13 @@ from pip_agent.memory import MemoryStore
 
 @pytest.fixture
 def memory_store(tmp_path: Path) -> MemoryStore:
-    return MemoryStore(base_dir=tmp_path / "agents", agent_id="pip-boy")
+    pip_dir = tmp_path / "agents" / "pip-boy"
+    pip_dir.mkdir(parents=True, exist_ok=True)
+    return MemoryStore(
+        agent_dir=pip_dir,
+        workspace_pip_dir=pip_dir.parent,
+        agent_id="pip-boy",
+    )
 
 
 def _run(coro):

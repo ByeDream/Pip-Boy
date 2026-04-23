@@ -42,7 +42,13 @@ def _call(handler, args=None) -> str:
 
 @pytest.fixture
 def ctx(tmp_path: Path) -> McpContext:
-    ms = MemoryStore(base_dir=tmp_path / "agents", agent_id="pip-boy")
+    pip_dir = tmp_path / "agents" / "pip-boy"
+    pip_dir.mkdir(parents=True, exist_ok=True)
+    ms = MemoryStore(
+        agent_dir=pip_dir,
+        workspace_pip_dir=pip_dir.parent,
+        agent_id="pip-boy",
+    )
     return McpContext(memory_store=ms, session_id="sess-test")
 
 
@@ -54,7 +60,13 @@ class TestReflectPreconditions:
         assert result.get("is_error") is True
 
     def test_no_session_id_is_skipped_with_explanation(self, tmp_path):
-        ms = MemoryStore(base_dir=tmp_path / "agents", agent_id="pip-boy")
+        pip_dir = tmp_path / "agents" / "pip-boy"
+        pip_dir.mkdir(parents=True, exist_ok=True)
+        ms = MemoryStore(
+            agent_dir=pip_dir,
+            workspace_pip_dir=pip_dir.parent,
+            agent_id="pip-boy",
+        )
         c = McpContext(memory_store=ms, session_id="")
         text = _call(_get_reflect(c))
         assert "Reflection skipped" in text

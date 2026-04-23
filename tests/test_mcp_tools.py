@@ -37,6 +37,21 @@ from pip_agent.memory import MemoryStore
 # ---------------------------------------------------------------------------
 
 
+def _make_store(agents_root: Path, agent_id: str = "pip-boy") -> MemoryStore:
+    """Shortcut for ``MemoryStore`` in the pre-v2 ``<root>/<id>/`` layout
+    that these tests still use internally (the tests don't care about
+    the exact tree — only that a working store lives somewhere under
+    ``tmp_path``). ``workspace_pip_dir`` is set to ``agents_root`` so
+    ``owner.md`` lookups, when they happen, stay isolated.
+    """
+    agent_dir = agents_root / agent_id
+    return MemoryStore(
+        agent_dir=agent_dir,
+        workspace_pip_dir=agents_root,
+        agent_id=agent_id,
+    )
+
+
 def _run(coro):
     return asyncio.run(coro)
 
@@ -85,20 +100,29 @@ class TestMemorySearch:
         result = self._call(McpContext(memory_store=None), {"query": "x"})
         assert result.get("is_error") is True
 
+    def _make_store(self, tmp_path):
+        pip_dir = tmp_path / ".pip"
+        pip_dir.mkdir(parents=True, exist_ok=True)
+        return MemoryStore(
+            agent_dir=pip_dir,
+            workspace_pip_dir=pip_dir,
+            agent_id="pip-boy",
+        )
+
     def test_empty_query_is_error(self, tmp_path):
-        ms = MemoryStore(base_dir=tmp_path / "agents", agent_id="pip-boy")
+        ms = self._make_store(tmp_path)
         result = self._call(McpContext(memory_store=ms), {"query": "   "})
         assert result.get("is_error") is True
         assert "required" in _text_of(result)
 
     def test_empty_results_returns_friendly_text(self, tmp_path):
-        ms = MemoryStore(base_dir=tmp_path / "agents", agent_id="pip-boy")
+        ms = self._make_store(tmp_path)
         result = self._call(McpContext(memory_store=ms), {"query": "anything"})
         assert result.get("is_error") is not True
         assert "no matching memories" in _text_of(result)
 
     def test_results_are_rendered_with_scores(self, tmp_path, monkeypatch):
-        ms = MemoryStore(base_dir=tmp_path / "agents", agent_id="pip-boy")
+        ms = self._make_store(tmp_path)
         fake_hits = [
             {"text": "User prefers dark mode", "score": 0.91},
             {"text": "User speaks Chinese", "score": 0.72},
@@ -110,7 +134,7 @@ class TestMemorySearch:
         assert "Chinese" in text
 
     def test_top_k_is_forwarded(self, tmp_path):
-        ms = MemoryStore(base_dir=tmp_path / "agents", agent_id="pip-boy")
+        ms = _make_store(tmp_path / "agents")
         seen: dict[str, Any] = {}
 
         def fake_search(q, *, top_k=5):
@@ -145,13 +169,13 @@ class TestMemoryWrite:
             "is_error") is True
 
     def test_empty_content_is_error(self, tmp_path):
-        ms = MemoryStore(base_dir=tmp_path / "agents", agent_id="pip-boy")
+        ms = _make_store(tmp_path / "agents")
         result = self._call(McpContext(memory_store=ms), {"content": "   "})
         assert result.get("is_error") is True
 
     def test_happy_path_persists_observation(self, tmp_path):
         agents = tmp_path / "agents"
-        ms = MemoryStore(base_dir=agents, agent_id="pip-boy")
+        ms = _make_store(agents)
         result = self._call(
             McpContext(memory_store=ms),
             {"content": "User likes pizza", "category": "preference"},
@@ -174,7 +198,7 @@ class TestMemoryWrite:
 
     def test_default_category_is_observation(self, tmp_path):
         agents = tmp_path / "agents"
-        ms = MemoryStore(base_dir=agents, agent_id="pip-boy")
+        ms = _make_store(agents)
         self._call(McpContext(memory_store=ms), {"content": "something"})
         line = next(
             (agents / "pip-boy" / "observations").glob("*.jsonl")
@@ -205,7 +229,7 @@ class TestRememberUser:
     def test_sender_id_prefix_stripped_before_persistence(
         self, tmp_path, monkeypatch,
     ):
-        ms = MemoryStore(base_dir=tmp_path / "agents", agent_id="pip-boy")
+        ms = _make_store(tmp_path / "agents")
         seen: dict[str, Any] = {}
 
         def fake_update(
@@ -234,7 +258,7 @@ class TestRememberUser:
         assert seen["fields"]["timezone"] == "Asia/Shanghai"
 
     def test_default_channel_is_cli(self, tmp_path, monkeypatch):
-        ms = MemoryStore(base_dir=tmp_path / "agents", agent_id="pip-boy")
+        ms = _make_store(tmp_path / "agents")
         seen: dict[str, Any] = {}
         monkeypatch.setattr(
             ms, "update_user_profile",
@@ -262,11 +286,26 @@ def sched_ctx(tmp_path):
     scheduler's validation logic inline. Cheaper to just run the real
     thing — the background thread is never started here.
     """
-    agents = tmp_path / "agents"
-    (agents / "pip-boy").mkdir(parents=True)
-    ms = MemoryStore(base_dir=agents, agent_id="pip-boy")
+    from types import SimpleNamespace
+
+    pip_dir = tmp_path / "agents" / "pip-boy"
+    pip_dir.mkdir(parents=True)
+    ms = MemoryStore(
+        agent_dir=pip_dir,
+        workspace_pip_dir=pip_dir.parent,
+        agent_id="pip-boy",
+    )
+    paths = SimpleNamespace(
+        pip_dir=pip_dir,
+        workspace_pip_dir=pip_dir.parent,
+        cwd=pip_dir.parent,
+    )
+    registry = SimpleNamespace(
+        list_agents=lambda: [SimpleNamespace(id="pip-boy")],
+        paths_for=lambda aid: paths if aid == "pip-boy" else None,
+    )
     sched = HostScheduler(
-        agents_dir=agents,
+        registry=registry,
         msg_queue=[],
         q_lock=threading.Lock(),
         stop_event=threading.Event(),
@@ -449,7 +488,7 @@ class TestBuildMcpServer:
     """
 
     def test_returns_config_with_all_tool_groups(self, tmp_path):
-        ms = MemoryStore(base_dir=tmp_path / "agents", agent_id="pip-boy")
+        ms = _make_store(tmp_path / "agents")
         ctx = McpContext(memory_store=ms, workdir=tmp_path)
         cfg = build_mcp_server(ctx)
         assert cfg is not None

@@ -92,51 +92,6 @@ def _pending_key_heartbeat(agent_id: str) -> str:
     return f"hb:{agent_id}"
 
 
-@dataclass(frozen=True)
-class _LegacyPaths:
-    """Minimal :class:`AgentPaths`-shaped bundle used by the legacy shim."""
-
-    pip_dir: Path
-    workspace_pip_dir: Path
-    cwd: Path
-
-
-class _LegacyAgentsDirRegistry:
-    """Thin adapter that exposes a v1 ``<agents_dir>/<id>/`` layout through
-    the registry-shaped surface :class:`HostScheduler` expects.
-
-    Kept purely for test/backcompat convenience — production code now
-    hands :class:`HostScheduler` a real :class:`AgentRegistry` carrying
-    the v2 per-agent ``.pip/`` directories.
-    """
-
-    def __init__(self, agents_dir: Path) -> None:
-        self._agents_dir = agents_dir
-
-    class _Cfg:
-        __slots__ = ("id",)
-
-        def __init__(self, aid: str) -> None:
-            self.id = aid
-
-    def list_agents(self) -> list["_LegacyAgentsDirRegistry._Cfg"]:
-        if not self._agents_dir.is_dir():
-            return []
-        return [
-            self._Cfg(p.name)
-            for p in sorted(self._agents_dir.iterdir())
-            if p.is_dir()
-        ]
-
-    def paths_for(self, agent_id: str) -> _LegacyPaths | None:
-        cwd = self._agents_dir / agent_id
-        return _LegacyPaths(
-            pip_dir=cwd,
-            workspace_pip_dir=self._agents_dir.parent,
-            cwd=cwd,
-        )
-
-
 @dataclass
 class _TrackedInbound:
     """Handle yielded by :meth:`HostScheduler.track`.
@@ -330,22 +285,11 @@ class HostScheduler:
     def __init__(
         self,
         *,
-        registry: Any = None,
-        agents_dir: Path | None = None,
+        registry: Any,
         msg_queue: list[InboundMessage],
         q_lock: threading.Lock,
         stop_event: threading.Event,
     ) -> None:
-        if registry is None:
-            if agents_dir is None:
-                raise TypeError(
-                    "HostScheduler needs either registry or agents_dir",
-                )
-            # Legacy v1 layout: ``agents_dir`` points at
-            # ``<workspace>/.pip/agents`` and each agent dir is a flat
-            # child of it. We build a tiny registry-shaped shim so the
-            # rest of the scheduler code doesn't branch on layout.
-            registry = _LegacyAgentsDirRegistry(agents_dir)
         self._registry = registry
         self._msg_queue = msg_queue
         self._q_lock = q_lock
@@ -621,12 +565,7 @@ class HostScheduler:
             self._tick_heartbeat(aid, pip_dir, now)
             self._tick_dream(aid, now)
 
-    def _tick_dream(self, agent_id: "str | Path", now: float) -> None:
-        if isinstance(agent_id, Path):
-            # Legacy callers (tests) still pass the agent directory
-            # rather than an id. Accept both forms so we don't force a
-            # mechanical tree-wide edit for a private helper.
-            agent_id = agent_id.name
+    def _tick_dream(self, agent_id: str, now: float) -> None:
         """Fire a Dream pass for this agent iff all trigger gates are met.
 
         Gates (mirrored in ``config.Settings``):
@@ -922,12 +861,10 @@ class HostScheduler:
         )
 
     def _iter_agent_ids(self) -> list[str]:
-        """Return the list of registered agent ids.
+        """Return the list of registered agent ids via the registry.
 
-        Under the v2 layout agents no longer live in a flat
-        ``.pip/agents/<id>/`` directory; each has its own ``.pip/`` folder.
-        We iterate via the registry so both pip-boy (root) and sub-agents
-        are included, and so archived agents are excluded.
+        Both pip-boy (root) and sub-agents are included; archived agents
+        are excluded.
         """
         try:
             return [a.id for a in self._registry.list_agents()]

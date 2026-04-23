@@ -205,7 +205,7 @@ Unknown slash commands (and unknown `/agent` subcommands) fail fast with an `Unk
     └── .claude/                 # Optional: local CC overrides (see below)
 ```
 
-Legacy installs using `.pip/agents/<id>/` are migrated to this layout automatically on next launch. See [`docs/identity-model.md`](docs/identity-model.md).
+See [`docs/identity-model.md`](docs/identity-model.md) for the full three-tier identity model.
 
 ## Architecture, in one diagram
 
