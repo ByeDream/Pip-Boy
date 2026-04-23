@@ -42,7 +42,7 @@ One Pip-Boy host, many surfaces. All channels feed into the same inbound message
 
 Claude Code's native cron (`CronCreate` / `CronList` / `CronDelete`) lives **inside** the per-turn `claude.exe` subprocess, which exits on `end_turn` — jobs scheduled via it never fire in our subprocess-per-turn world. So we disable CC native cron (`CLAUDE_CODE_DISABLE_CRON=1`) and ship our own host-side scheduler instead.
 
-- **Cron jobs** — `cron_add` / `cron_remove` / `cron_update` / `cron_list` MCP tools. Jobs persist to `.pip/agents/<id>/cron.json`, survive restarts, coalesce duplicate pending ticks, and auto-disable after repeated failures.
+- **Cron jobs** — `cron_add` / `cron_remove` / `cron_update` / `cron_list` MCP tools. Jobs persist to each agent's own `.pip/cron.json` (root agent at `<workspace>/.pip/cron.json`, sub-agents at `<workspace>/<id>/.pip/cron.json`), survive restarts, coalesce duplicate pending ticks, and auto-disable after repeated failures.
 - **Heartbeat** — Periodic proactive turn during configured active hours. `HEARTBEAT.md` per agent drives what the model does; `HEARTBEAT_OK` is a sentinel for "nothing to report" (silenced to avoid CLI noise).
 - **Dream trigger** — Same scheduler fires the L2/L3 memory pipeline on the configured idle-hour window.
 
@@ -109,9 +109,23 @@ At least one of `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` must be set, or Cl
 | `DREAM_MIN_OBSERVATIONS` | `20` | Minimum unconsolidated observations before Dream fires. |
 | `DREAM_INACTIVE_MINUTES` | `30` | Minimum minutes of user silence before Dream fires. |
 
-### Per-agent configuration
+### Per-agent configuration (v2 layout)
 
-Each agent lives under `.pip/agents/<id>/persona.md` with YAML frontmatter:
+The workspace root is the home of the default `pip-boy` agent. Additional sub-agents live in their own sibling directories, each with its own `.pip/` and optional `.claude/`:
+
+```
+<pip_boy_workspace>/
+  .pip/                      # pip-boy's own persona + workspace-wide runtime
+    persona.md
+    bindings.json            # channel -> agent routing (workspace-wide)
+    agents_registry.json     # known sub-agents
+  ProjectA/                  # plain project; pip-boy operates on it directly
+  stella/                    # a sub-agent with its own identity
+    .pip/
+      persona.md             # independent persona, memory, observations
+```
+
+Each `persona.md` carries YAML frontmatter:
 
 ```yaml
 ---
@@ -124,11 +138,13 @@ dm_scope: main
 You are Pip-Boy, …
 ```
 
-Only `model` and `dm_scope` are effective overrides; other fields (token limits, compaction thresholds, fallback-model chains) are **owned by Claude Code**, not Pip-Boy. To change them, use Claude Code's own config.
+Only `model` and `dm_scope` are effective Pip-side overrides; other fields (token limits, compaction thresholds, fallback-model chains) are **owned by Claude Code**, not Pip-Boy. To change them, use Claude Code's own config.
+
+Claude Code's `.claude/` configuration is inherited automatically via the Agent SDK's native parent-directory walk-up — Pip itself does no merging. See [`docs/identity-model.md`](docs/identity-model.md) for the full three-tier model, sub-agent lifecycle, and `.claude/` override semantics.
 
 ### Slash commands
 
-All commands are flat (single-level). ACL: `/help` and `/status` are open, `/admin` is owner-only, the rest require owner or admin. CLI is always owner.
+All agent lifecycle + routing lives under a single `/agent` verb with git-style subcommands. ACL: `/help` and `/status` are open; `/admin` and the destructive `/agent` subcommands (`create`, `archive`, `delete`, `reset`) are owner-only; the rest require owner or admin. CLI is always owner.
 
 | Command | Description |
 |---|---|
@@ -138,33 +154,58 @@ All commands are flat (single-level). ACL: `/help` and `/status` are open, `/adm
 | `/axioms` | Current judgment principles (`axioms.md`). |
 | `/recall <query>` | Search stored memories. |
 | `/cron` | List scheduled cron jobs. |
-| `/bind <agent-id> [--scope s] [--model m]` | Bind current chat to an agent (auto-creates the agent if needed). |
-| `/unbind` | Remove current chat's binding. |
-| `/reset` | Factory-reset memory for the current agent (keeps binding + persona). |
+| `/home` | Leave the current sub-agent and return to pip-boy. Clears this chat's binding; routing falls back to the default agent. No-op when already on pip-boy. |
+| `/agent` | **pip-boy only.** Show pip-boy's detail + memory summary. |
+| `/agent list` | **pip-boy only.** List known agents. |
+| `/agent create <id>` | **pip-boy only, owner.** Scaffold `<workspace>/<id>/.pip/` and register the sub-agent. |
+| `/agent archive <id>` | **pip-boy only, owner.** Move the sub-agent's `.pip/` to `<workspace>/.pip/archived/` and drop its bindings. Project files in `<id>/` are untouched. |
+| `/agent delete <id> --yes` | **pip-boy only, owner.** Wipe the sub-agent's `.pip/` and drop its bindings. Project files in `<id>/` are untouched. |
+| `/agent switch <id>` | **pip-boy only.** Route this chat to sub-agent `<id>`. To come back, use `/home` (not `/agent switch pip-boy`). |
+| `/agent reset <id>` | **pip-boy only, owner.** Rebuild `<id>`'s `.pip/` from a minimal backup — preserves `persona.md` + `HEARTBEAT.md`, and (for the root agent) workspace-shared state (`owner.md`, `bindings.json`, `agents_registry.json`, `credentials/`, `archived/`). Everything else under the `.pip/` is wiped and left to be lazily re-created. |
 | `/admin grant\|revoke\|list [name]` | Manage admin privileges (owner only). |
 | `/exit` | Quit Pip-Boy (CLI only). |
 
-Unknown slash commands are passed through to the model for interpretation — no "unknown command" error.
+`/agent` is the pip-boy-only management console. From any sub-agent it returns a redirect to `/home` — sub-agents focus on their own work and don't manage siblings. `/home` is the one idiom for "return to pip-boy", symmetric with `/agent switch <id>` for "enter a sub-agent".
 
-### Project directory structure
+Per-agent settings (`model`, `dm_scope`, description) have **no command-line flags** — edit the backing files directly:
+
+- `<workspace>/<id>/.pip/persona.md` — YAML frontmatter controls `model` / `dm_scope`.
+- `<workspace>/.pip/agents_registry.json` — descriptions and registry metadata.
+- `<workspace>/.pip/bindings.json` — channel → agent routing with optional per-binding `overrides`.
+
+Unknown slash commands (and unknown `/agent` subcommands) fail fast with an `Unknown command` error plus a `Did you mean …?` hint for close matches. They are **not** forwarded to the model — typos should not cost an LLM turn.
+
+### Workspace directory structure (v2)
 
 ```
-.pip/
-├── owner.md                     # Owner profile (read-only)
-├── .scaffold_manifest.json      # Scaffold version tracking
-├── agents/
-│   ├── bindings.json            # Channel → agent routing
-│   └── pip-boy/                 # Per-agent directory
-│       ├── persona.md           # Agent persona + config (YAML frontmatter)
-│       ├── HEARTBEAT.md         # Heartbeat prompt template
-│       ├── cron.json            # Scheduled jobs
-│       ├── state.json           # Memory pipeline cursors
-│       ├── memories.json        # L2 consolidated memories
-│       ├── axioms.md            # L3 judgment principles
-│       ├── observations/        # L1 observation files (.jsonl)
-│       ├── sessions.json        # Session-key → SDK session id map
-│       └── users/               # User profiles (.md)
+<pip_boy_workspace>/
+├── .pip/                        # pip-boy (root agent) + workspace runtime
+│   ├── persona.md               # pip-boy persona + YAML frontmatter
+│   ├── HEARTBEAT.md
+│   ├── owner.md                 # Owner profile (read-only)
+│   ├── cron.json                # pip-boy's scheduled jobs
+│   ├── state.json               # Memory pipeline cursors
+│   ├── memories.json            # L2 consolidated memories
+│   ├── axioms.md                # L3 judgment principles
+│   ├── observations/            # L1 observation files (.jsonl)
+│   ├── users/                   # User profiles (.md)
+│   ├── incoming/                # Inbound attachments landing zone
+│   ├── credentials/             # Channel keys (WeChat / WeCom)
+│   ├── bindings.json            # Channel → agent routing (workspace-wide)
+│   ├── agents_registry.json     # Known sub-agents
+│   ├── sdk_sessions.json        # session_key → SDK session id
+│   └── .scaffold_manifest.json  # Scaffold version tracking
+├── ProjectA/                    # Plain project, pip-boy operates on it directly
+└── <sub-agent-id>/              # Sub-agent with its own identity
+    ├── .pip/                    # Independent persona + memory
+    │   ├── persona.md
+    │   ├── HEARTBEAT.md
+    │   ├── state.json cron.json memories.json axioms.md
+    │   ├── observations/ users/ incoming/
+    └── .claude/                 # Optional: local CC overrides (see below)
 ```
+
+Legacy installs using `.pip/agents/<id>/` are migrated to this layout automatically on next launch. See [`docs/identity-model.md`](docs/identity-model.md).
 
 ## Architecture, in one diagram
 
@@ -183,7 +224,7 @@ Unknown slash commands are passed through to the model for interpretation — no
        │              AgentHost.process_inbound            │
        │ ┌─────────────────────────────────────────────┐   │
        │ │  Slash dispatch (host_commands.py)          │   │
-       │ │  — short-circuits /help, /status, /bind … —│   │
+       │ │  — short-circuits /help, /status, /agent … —│  │
        │ └────────────────────┬────────────────────────┘   │
        │                      │ (unknown or non-slash)     │
        │                      ▼                            │

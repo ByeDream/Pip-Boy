@@ -39,6 +39,7 @@ from pip_agent.mcp_tools import McpContext
 from pip_agent.memory import MemoryStore
 from pip_agent.memory.transcript_source import locate_session_jsonl
 from pip_agent.routing import (
+    AgentPaths,
     AgentRegistry,
     Binding,
     BindingTable,
@@ -50,17 +51,19 @@ from pip_agent.streaming_session import StaleSessionError, StreamingSession
 
 log = logging.getLogger(__name__)
 
-AGENTS_DIR = WORKDIR / ".pip" / "agents"
-BINDINGS_PATH = AGENTS_DIR / "bindings.json"
+# Workspace-level paths (v2 layout). All per-agent paths are resolved
+# through ``AgentRegistry.paths_for`` — nothing in the host except
+# ``run_host`` boot should reach for ``WORKDIR`` directly.
+WORKSPACE_PIP_DIR = WORKDIR / ".pip"
+BINDINGS_PATH = WORKSPACE_PIP_DIR / "bindings.json"
+SESSION_STORE_PATH = WORKSPACE_PIP_DIR / "sdk_sessions.json"
 
-# Inbound file/image bytes get dropped under each agent's
-# ``.pip/agents/<agent_id>/incoming/`` so (a) the LLM can reach them
-# with its native ``Read`` / ``Bash`` tools via a workdir-relative
-# path, and (b) agents don't clobber each other's uploads.
+# Inbound file/image bytes get dropped under each agent's own
+# ``.pip/incoming/`` so (a) the LLM can reach them with its native
+# ``Read`` / ``Bash`` tools via a cwd-relative path, and (b) agents
+# don't clobber each other's uploads.
 INCOMING_DIR_NAME = "incoming"
 _MAX_INCOMING_BYTES = 50 * 1024 * 1024  # 50 MB — matches send_file cap
-
-SESSION_STORE_PATH = WORKDIR / ".pip" / "sdk_sessions.json"
 
 
 @dataclass(slots=True)
@@ -398,10 +401,10 @@ def _materialize_attachments(
     can follow directly — ``unzip -l`` / ``file`` / ``grep`` etc.
 
     Conventionally ``incoming_dir`` is
-    ``{workdir}/.pip/agents/<agent_id>/incoming`` — one inbox per
-    agent so two agents on the same channel can't trample each
-    other's uploads, and ``/reset`` for one agent doesn't affect
-    another's pending files. Placing it under the per-agent dir also
+    ``{agent_cwd}/.pip/incoming`` — one inbox per agent so two
+    agents on the same channel can't trample each other's uploads,
+    and ``/agent reset`` for one agent doesn't affect another's
+    pending files. Placing it under the per-agent dir also
     matches how memory, cron, and user profiles already partition
     state. Decoupled from ``workdir`` as a parameter so tests and
     future re-targeting (e.g. TTL sweep) don't need module patches.
@@ -592,6 +595,7 @@ class _PerAgent:
     """Per-agent lazily-created service objects."""
 
     memory_store: MemoryStore
+    paths: AgentPaths
 
 
 @dataclass(slots=True)
@@ -611,6 +615,7 @@ class _PreparedTurn:
     reply_peer: str
     prompt: Any  # str | list (multimodal content)
     system_prompt: str
+    paths: AgentPaths
 
 
 class AgentHost:
@@ -756,11 +761,62 @@ class AgentHost:
 
     def _get_agent_services(self, agent_id: str) -> _PerAgent:
         if agent_id not in self._agents:
-            ms = MemoryStore(base_dir=AGENTS_DIR, agent_id=agent_id)
-            self._agents[agent_id] = _PerAgent(memory_store=ms)
+            paths = self._resolve_paths(agent_id)
+            ms = MemoryStore(
+                agent_dir=paths.pip_dir,
+                workspace_pip_dir=paths.workspace_pip_dir,
+                agent_id=paths.agent_id,
+            )
+            self._agents[agent_id] = _PerAgent(memory_store=ms, paths=paths)
         return self._agents[agent_id]
 
-    def _reap_stale_session(self, sk: str) -> str | None:
+    def invalidate_agent_cache(self, agent_id: str) -> None:
+        """Drop a per-agent service + its session rows.
+
+        Called by lifecycle commands (``delete``, ``archive``, ``reset``)
+        after they mutate the agent's on-disk state. Without this, the
+        cached ``MemoryStore`` keeps writing to the wiped/relocated
+        ``.pip/`` on the next save_state/reflect, resurrecting files
+        like ``state.json`` the user explicitly deleted. Removing the
+        session rows (both in-memory and in ``sdk_sessions.json``) also
+        ensures ``flush_and_rotate`` on ``/exit`` won't try to reflect
+        an agent that no longer exists.
+        """
+        self._agents.pop(agent_id, None)
+        prefix = f"agent:{agent_id}:"
+        dropped = [sk for sk in self._sessions if sk.startswith(prefix)]
+        if dropped:
+            for sk in dropped:
+                self._sessions.pop(sk, None)
+            _save_sessions(self._sessions)
+
+    def _resolve_paths(self, agent_id: str) -> AgentPaths:
+        """Resolve an agent's filesystem paths, auto-provisioning the root.
+
+        The registry is authoritative, but we still want a sensible
+        fallback when some code path hands us an unknown agent id (e.g.
+        a binding that references an agent whose directory was moved
+        outside of ``/agent archive``). Returning root-level paths in
+        that edge case keeps the turn alive instead of 500-ing.
+        """
+        paths = self._registry.paths_for(agent_id)
+        if paths is not None:
+            return paths
+        default = self._registry.paths_for(self._registry.default_agent().id)
+        if default is not None:
+            return default
+        # Degenerate last-resort: no workspace configured (unit tests).
+        return AgentPaths(
+            agent_id=agent_id,
+            cwd=WORKDIR,
+            pip_dir=WORKSPACE_PIP_DIR,
+            workspace_pip_dir=WORKSPACE_PIP_DIR,
+            kind="root",
+        )
+
+    def _reap_stale_session(
+        self, sk: str, *, prefer_cwd: Path | None = None,
+    ) -> str | None:
         """Return the session id for ``sk`` iff its JSONL is still on disk.
 
         A user can delete the JSONL out from under us — either by hand
@@ -779,7 +835,8 @@ class AgentHost:
         sid = self._sessions.get(sk)
         if not sid:
             return None
-        if locate_session_jsonl(sid, prefer_cwd=WORKDIR) is not None:
+        cwd = prefer_cwd or WORKDIR
+        if locate_session_jsonl(sid, prefer_cwd=cwd) is not None:
             return sid
         log.warning(
             "Session %s for %s is missing on disk — starting fresh",
@@ -841,7 +898,7 @@ class AgentHost:
                 model=prepared.eff.effective_model,
                 session_id=current_session_id,
                 system_prompt_append=prepared.system_prompt,
-                cwd=WORKDIR,
+                cwd=prepared.paths.cwd,
                 stream_text=True,
             )
 
@@ -984,7 +1041,7 @@ class AgentHost:
             # against a JSONL that's been pruned on disk.
             effective_resume = resume_session_id
             if effective_resume and locate_session_jsonl(
-                effective_resume, prefer_cwd=WORKDIR,
+                effective_resume, prefer_cwd=prepared.paths.cwd,
             ) is None:
                 log.info(
                     "stream %s: resume id %s has no JSONL — starting fresh",
@@ -1004,7 +1061,7 @@ class AgentHost:
                 session_key=session_key,
                 mcp_ctx=mcp_ctx,
                 model=prepared.eff.effective_model,
-                cwd=WORKDIR,
+                cwd=prepared.paths.cwd,
                 system_prompt_append=prepared.system_prompt,
                 resume_session_id=effective_resume,
             )
@@ -1210,13 +1267,6 @@ class AgentHost:
             # "did an LLM call actually happen for this session", which
             # is what the CLI status line needs to not lie to the user.
             def _reflect_one(sk: str, sid: str) -> None:
-                path = locate_session_jsonl(sid, prefer_cwd=WORKDIR)
-                if path is None:
-                    log.info(
-                        "flush_and_rotate: transcript for %s missing; "
-                        "skipping reflect", sid[:8],
-                    )
-                    return
                 agent_id = _agent_id_from_session_key(sk)
                 if not agent_id:
                     log.warning(
@@ -1224,8 +1274,30 @@ class AgentHost:
                         "skipping reflect", sk,
                     )
                     return
+                # An agent that was ``/agent delete``d or ``archive``d
+                # mid-run will no longer resolve in the registry. Skip
+                # it — materialising ``_get_agent_services`` would
+                # resurrect a ``.pip/`` we just wiped via
+                # ``atomic_write`` in save_state. ``invalidate_agent_cache``
+                # already removes its sessions, but a race (reflect
+                # scheduled before the invalidation landed) can still
+                # reach here.
+                if self._registry.get_agent(agent_id) is None:
+                    log.info(
+                        "flush_and_rotate: agent %r no longer registered; "
+                        "skipping reflect for session=%s",
+                        agent_id, sid[:8],
+                    )
+                    return
+                svc = self._get_agent_services(agent_id)
+                path = locate_session_jsonl(sid, prefer_cwd=svc.paths.cwd)
+                if path is None:
+                    log.info(
+                        "flush_and_rotate: transcript for %s missing; "
+                        "skipping reflect", sid[:8],
+                    )
+                    return
                 try:
-                    svc = self._get_agent_services(agent_id)
                     start_offset, new_offset, obs_count = reflect_and_persist(
                         memory_store=svc.memory_store,
                         session_id=sid,
@@ -1266,7 +1338,7 @@ class AgentHost:
     ) -> McpContext:
         return McpContext(
             memory_store=svc.memory_store,
-            workdir=WORKDIR,
+            workdir=svc.paths.cwd,
             model=model,
             session_id=session_id,
             sender_id=sender_id,
@@ -1366,6 +1438,7 @@ class AgentHost:
                         bindings_path=BINDINGS_PATH,
                         memory_store=svc.memory_store,
                         scheduler=self._scheduler,
+                        invalidate_agent=self.invalidate_agent_cache,
                     ),
                 )
             if cmd_result.handled:
@@ -1385,7 +1458,8 @@ class AgentHost:
                 dm_scope=eff.effective_dm_scope,
             )
 
-            base_prompt = eff.system_prompt(workdir=str(WORKDIR))
+            agent_cwd = svc.paths.cwd
+            base_prompt = eff.system_prompt(workdir=str(agent_cwd))
             user_text = inbound.text if isinstance(inbound.text, str) else ""
             with _profile.span_sync(
                 "memory.enrich_prompt",
@@ -1396,7 +1470,7 @@ class AgentHost:
                     base_prompt, user_text,
                     channel=inbound.channel,
                     agent_id=eff.id,
-                    workdir=str(WORKDIR),
+                    workdir=str(agent_cwd),
                     sender_id=inbound.sender_id,
                 )
 
@@ -1413,8 +1487,8 @@ class AgentHost:
             ):
                 _materialize_attachments(
                     inbound,
-                    workdir=WORKDIR,
-                    incoming_dir=AGENTS_DIR / eff.id / INCOMING_DIR_NAME,
+                    workdir=agent_cwd,
+                    incoming_dir=svc.paths.incoming_dir,
                 )
 
             with _profile.span_sync("host.format_prompt"):
@@ -1442,6 +1516,7 @@ class AgentHost:
                 eff=eff, svc=svc, sk=sk, ch=ch,
                 reply_peer=reply_peer, prompt=prompt,
                 system_prompt=system_prompt,
+                paths=svc.paths,
             )
 
     async def _execute_turn(
@@ -1580,7 +1655,9 @@ class AgentHost:
                 # Per-session serialisation is already enforced; bringing
                 # the read inside closes the gap for free.
                 async with _profile.span("host.session_preflight"):  # PROFILE
-                    current_session = self._reap_stale_session(sk)
+                    current_session = self._reap_stale_session(
+                        sk, prefer_cwd=prepared.paths.cwd,
+                    )
                 # Two distinct concepts, intentionally decoupled:
                 #
                 # * ``session_for_turn`` controls SDK *resume* — whether this
@@ -1663,7 +1740,7 @@ class AgentHost:
                                 model=eff.effective_model,
                                 session_id=session_for_turn,
                                 system_prompt_append=prepared.system_prompt,
-                                cwd=WORKDIR,
+                                cwd=prepared.paths.cwd,
                                 # Heartbeats must NOT stream: we need the full
                                 # reply before deciding whether to print (so
                                 # the HEARTBEAT_OK sentinel can be silenced).
@@ -1942,7 +2019,7 @@ def run_host(mode: str = "auto", bind_agent: str | None = None) -> None:
     ensure_workspace(WORKDIR)
     settings.check_required()
 
-    registry = AgentRegistry(AGENTS_DIR)
+    registry = AgentRegistry(WORKDIR)
     binding_table = BindingTable()
     binding_table.load(BINDINGS_PATH)
     _profile.cold_start(
@@ -2056,7 +2133,7 @@ def run_host(mode: str = "auto", bind_agent: str | None = None) -> None:
     )
 
     scheduler = HostScheduler(
-        agents_dir=AGENTS_DIR,
+        registry=registry,
         msg_queue=msg_queue,
         q_lock=q_lock,
         stop_event=stop_event,

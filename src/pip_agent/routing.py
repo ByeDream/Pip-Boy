@@ -1,16 +1,22 @@
-"""
-Multi-agent routing: binding table, agent config, session key generation.
+"""Multi-agent routing: agents registry, binding table, session keys.
 
-Inbound messages are resolved through a 5-tier binding table to determine
-which agent handles them. Each agent carries its own config (model, system
-prompt, dm_scope) loaded from ``.pip/agents/<id>/persona.md``.
+Layout model (v2)
+-----------------
+Pip-Boy runs a single service process rooted at ``WORKDIR``
+(the Pip workspace). Inside it:
 
-Tier priority (lower = more specific, matched first):
-  T1  peer_id      — route a specific user to an agent
-  T2  guild_id     — route a specific group/guild to an agent
-  T3  account_id   — route by bot account
-  T4  channel      — route an entire platform (e.g. ``wecom``)
-  T5  default      — catch-all fallback
+* The default agent ``pip-boy`` lives *at the workspace root itself*,
+  with its state under ``WORKDIR/.pip/`` (``persona.md``,
+  ``memories.json``, ``observations/``, …).
+* User-created sub-agents live in subdirectories of the workspace:
+  ``WORKDIR/<agent_id>/.pip/<...>``. Their ``cwd`` (as seen by the
+  Claude Agent SDK subprocess) is ``WORKDIR/<agent_id>``.
+* Workspace-level state shared by all agents (``owner.md``,
+  ``bindings.json``, ``sdk_sessions.json``, ``agents_registry.json``,
+  ``credentials/``) lives in ``WORKDIR/.pip/``.
+
+Binding precedence (lower tier = more specific):
+    T1 peer_id → T2 guild_id → T3 account_id → T4 channel → T5 default
 """
 
 from __future__ import annotations
@@ -19,12 +25,14 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 log = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -34,27 +42,53 @@ DEFAULT_MODEL = "claude-opus-4-6"
 DEFAULT_DM_SCOPE = "per-guild"
 DEFAULT_AGENT_ID = "pip-boy"
 
+PIP_DIRNAME = ".pip"
+REGISTRY_FILENAME = "agents_registry.json"
+BINDINGS_FILENAME = "bindings.json"
+
+REGISTRY_SCHEMA_VERSION = 1
+
+
 # ---------------------------------------------------------------------------
-# Agent ID normalisation
+# Agent ID validation
 # ---------------------------------------------------------------------------
 
-_VALID_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
-_INVALID_CHARS_RE = re.compile(r"[^a-z0-9_-]+")
+# Agent IDs double as directory names under the workspace root, so they
+# must be safe on every supported OS (Windows in particular refuses
+# control chars, ``<>:"/\\|?*``, trailing dots/spaces). We also want
+# them legible in chat commands: ``/bind ProjectStella`` reads better
+# than ``/bind project_stella_01``, so mixed case is allowed.
+_VALID_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_INVALID_CHARS_RE = re.compile(r"[^A-Za-z0-9_-]+")
+
+_RESERVED_IDS = {"", ".", "..", PIP_DIRNAME, ".claude", ".git"}
 
 
 def normalize_agent_id(value: str) -> str:
-    trimmed = value.strip()
+    """Return a filesystem-safe agent id, falling back to the default.
+
+    ``normalize_agent_id`` is intentionally lenient: it takes arbitrary
+    user input (e.g. ``"Project Stella!"``) and yields a safe directory
+    name (``"Project-Stella"``). Callers that want to reject bad input
+    outright should use :func:`is_valid_agent_id` instead.
+    """
+    trimmed = (value or "").strip()
     if not trimmed:
         return DEFAULT_AGENT_ID
-    low = trimmed.lower()
-    if _VALID_ID_RE.match(low):
-        return low
-    cleaned = _INVALID_CHARS_RE.sub("-", low).strip("-")[:64]
-    return cleaned or DEFAULT_AGENT_ID
+    if _VALID_ID_RE.match(trimmed) and trimmed not in _RESERVED_IDS:
+        return trimmed
+    cleaned = _INVALID_CHARS_RE.sub("-", trimmed).strip("-")[:64]
+    if not cleaned or cleaned in _RESERVED_IDS:
+        return DEFAULT_AGENT_ID
+    return cleaned
+
+
+def is_valid_agent_id(value: str) -> bool:
+    return bool(value) and bool(_VALID_ID_RE.match(value)) and value not in _RESERVED_IDS
 
 
 # ---------------------------------------------------------------------------
-# AgentConfig
+# AgentConfig (persona + routing knobs)
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -80,10 +114,73 @@ class AgentConfig:
         return self.dm_scope or DEFAULT_DM_SCOPE
 
     def system_prompt(self, workdir: str = "") -> str:
-        body = self.system_body if self.system_body else ""
+        body = self.system_body or ""
         body = body.replace("{workdir}", workdir)
         body = body.replace("{model_name}", self.effective_model)
         return body
+
+
+# ---------------------------------------------------------------------------
+# AgentPaths (filesystem resolution for one agent)
+# ---------------------------------------------------------------------------
+
+
+AGENT_KIND_ROOT = "root"
+AGENT_KIND_SUB = "sub"
+
+
+@dataclass(frozen=True)
+class AgentPaths:
+    """Resolved filesystem paths for one agent.
+
+    This is the single source of truth for "where does agent X live on
+    disk" — every subsystem (scaffold, memory, scheduler, SDK dispatch)
+    asks the registry for an :class:`AgentPaths` and derives its own
+    paths from it. That keeps the root-vs-sub layout asymmetry
+    (``WORKDIR/.pip`` vs ``WORKDIR/<id>/.pip``) in one place.
+    """
+
+    agent_id: str
+    cwd: Path
+    """Directory used as Claude Agent SDK ``cwd`` for this agent.
+
+    For the root agent this is the workspace root itself; for sub-agents
+    it's ``<workspace>/<agent_id>``.
+    """
+
+    pip_dir: Path
+    """The agent's own ``.pip/`` directory (persona, memory, observations)."""
+
+    workspace_pip_dir: Path
+    """The workspace root's ``.pip/`` directory.
+
+    Shared by all agents: ``owner.md``, ``bindings.json``,
+    ``sdk_sessions.json``, ``agents_registry.json``, ``credentials/``.
+    For the root agent it is the same path as :attr:`pip_dir`.
+    """
+
+    kind: str = AGENT_KIND_SUB
+    description: str = ""
+
+    @property
+    def is_root(self) -> bool:
+        return self.kind == AGENT_KIND_ROOT
+
+    @property
+    def persona_path(self) -> Path:
+        return self.pip_dir / "persona.md"
+
+    @property
+    def observations_dir(self) -> Path:
+        return self.pip_dir / "observations"
+
+    @property
+    def incoming_dir(self) -> Path:
+        return self.pip_dir / "incoming"
+
+    @property
+    def users_dir(self) -> Path:
+        return self.pip_dir / "users"
 
 
 # ---------------------------------------------------------------------------
@@ -104,16 +201,15 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
     return meta, match.group(2).strip()
 
 
-def agent_config_from_file(path: Path) -> AgentConfig:
+def agent_config_from_file(path: Path, *, default_id: str = "") -> AgentConfig:
     text = path.read_text(encoding="utf-8")
     meta, body = _parse_frontmatter(text)
-    if path.name == "persona.md":
-        default_id = path.parent.name
-    else:
-        default_id = path.stem
-
+    fallback = default_id
+    if not fallback:
+        fallback = path.parent.name if path.name == "persona.md" else path.stem
+    raw_id = meta.get("id") or fallback
     return AgentConfig(
-        id=normalize_agent_id(meta.get("id", default_id)),
+        id=normalize_agent_id(str(raw_id)),
         name=meta.get("name", ""),
         system_body=body,
         model=meta.get("model", ""),
@@ -122,7 +218,7 @@ def agent_config_from_file(path: Path) -> AgentConfig:
 
 
 # ---------------------------------------------------------------------------
-# Binding & BindingTable
+# Binding & BindingTable (routing table)
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -272,81 +368,357 @@ def build_session_key(
 # AgentRegistry
 # ---------------------------------------------------------------------------
 
+# Heading convention is **single hash at the top level** to match the
+# shipped ``scaffold/pip-boy.md``. The memory store's prompt-injection
+# regex accepts ``#+`` and therefore works with either, but keeping
+# the builtin fallback aligned with the scaffold avoids drift between
+# "scaffold never ran" (fallback) and "scaffold installed" (file)
+# surfaces ending up with cosmetically different prompts.
 _BUILTIN_DEFAULT = AgentConfig(
     id=DEFAULT_AGENT_ID,
     name="Pip-Boy",
     system_body=(
-        "## Identity\n\n"
+        "# Identity\n\n"
         "You are Pip-Boy, a personal assistant agent.\n"
         "Your working directory is {workdir}.\n"
-        "If AGENTS.md exists in your working directory, read it for project context.\n"
     ),
     model=DEFAULT_MODEL,
     dm_scope=DEFAULT_DM_SCOPE,
 )
 
 
+def _iso_now() -> str:
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 class AgentRegistry:
-    def __init__(self, agents_dir: Path | None = None) -> None:
+    """Directory + registry-backed catalog of all agents in the workspace.
+
+    Two sources of truth, merged on load:
+
+    * Disk discovery — every directory ``<workspace>/<id>/.pip/persona.md``
+      plus the root ``<workspace>/.pip/persona.md`` is treated as an
+      agent. Discovery is authoritative for "does this agent still
+      exist".
+    * Registry file (``<workspace>/.pip/agents_registry.json``) — carries
+      provenance (``created_at``, ``description``, ``kind``) that the
+      filesystem can't express on its own.
+
+    When the two disagree, discovery wins for existence and the registry
+    is treated as best-effort metadata. Missing registry entries are
+    back-filled on load so future queries are consistent.
+    """
+
+    def __init__(
+        self,
+        workspace_root: Path | None = None,
+    ) -> None:
         self._agents: dict[str, AgentConfig] = {}
-        self._agents_dir = agents_dir
-        if agents_dir:
-            self._load_dir(agents_dir)
-        if not self._agents:
+        self._paths: dict[str, AgentPaths] = {}
+        self._metadata: dict[str, dict[str, Any]] = {}  # kind / cwd / created_at / description
+        self._workspace_root = workspace_root.resolve() if workspace_root else None
+
+        if self._workspace_root is not None:
+            self._load_workspace(self._workspace_root)
+
+        if DEFAULT_AGENT_ID not in self._agents:
             self._agents[DEFAULT_AGENT_ID] = _BUILTIN_DEFAULT
+            if self._workspace_root is not None:
+                self._paths[DEFAULT_AGENT_ID] = self._build_paths(
+                    DEFAULT_AGENT_ID, AGENT_KIND_ROOT,
+                )
+                self._metadata[DEFAULT_AGENT_ID] = {
+                    "kind": AGENT_KIND_ROOT,
+                    "cwd": ".",
+                    "description": "Default Pip-Boy agent",
+                    "created_at": _iso_now(),
+                }
+
+    # ------------------------------------------------------------------
+    # Basic accessors
+    # ------------------------------------------------------------------
 
     @property
-    def agents_dir(self) -> Path | None:
-        return self._agents_dir
+    def workspace_root(self) -> Path | None:
+        return self._workspace_root
 
-    def _load_dir(self, agents_dir: Path) -> None:
-        if not agents_dir.is_dir():
-            return
-        for persona in sorted(agents_dir.glob("*/persona.md")):
-            try:
-                cfg = agent_config_from_file(persona)
-                self._agents[cfg.id] = cfg
-                log.debug("Loaded agent config: %s from %s", cfg.id, persona)
-            except Exception as exc:
-                log.warning("Failed to load agent config %s: %s", persona, exc)
-        for path in sorted(agents_dir.glob("*.md")):
-            try:
-                cfg = agent_config_from_file(path)
-                if cfg.id not in self._agents:
-                    self._agents[cfg.id] = cfg
-                    log.debug("Loaded legacy agent config: %s from %s", cfg.id, path)
-            except Exception as exc:
-                log.warning("Failed to load agent config %s: %s", path, exc)
+    @property
+    def workspace_pip_dir(self) -> Path | None:
+        if self._workspace_root is None:
+            return None
+        return self._workspace_root / PIP_DIRNAME
+
+    @property
+    def registry_path(self) -> Path | None:
+        if self._workspace_root is None:
+            return None
+        return self._workspace_root / PIP_DIRNAME / REGISTRY_FILENAME
+
+    @property
+    def bindings_path(self) -> Path | None:
+        if self._workspace_root is None:
+            return None
+        return self._workspace_root / PIP_DIRNAME / BINDINGS_FILENAME
 
     def get_agent(self, agent_id: str) -> AgentConfig | None:
-        return self._agents.get(normalize_agent_id(agent_id))
+        return self._agents.get(agent_id) or self._agents.get(normalize_agent_id(agent_id))
 
-    def register_agent(self, cfg: AgentConfig) -> None:
-        self._agents[cfg.id] = cfg
-
-    def remove_agent(self, agent_id: str, *, delete_file: bool = False) -> bool:
-        """Remove an agent from the registry and optionally delete its data."""
-        import shutil
-
-        agent_id = normalize_agent_id(agent_id)
-        if agent_id == DEFAULT_AGENT_ID:
-            return False
-        if agent_id not in self._agents:
-            return False
-        del self._agents[agent_id]
-        if delete_file and self._agents_dir:
-            agent_subtree = self._agents_dir / agent_id
-            if agent_subtree.is_dir():
-                shutil.rmtree(agent_subtree, ignore_errors=True)
-            legacy_md = self._agents_dir / f"{agent_id}.md"
-            legacy_md.unlink(missing_ok=True)
-        return True
+    def default_agent(self) -> AgentConfig:
+        return self._agents.get(DEFAULT_AGENT_ID, _BUILTIN_DEFAULT)
 
     def list_agents(self) -> list[AgentConfig]:
         return list(self._agents.values())
 
-    def default_agent(self) -> AgentConfig:
-        return self._agents.get(DEFAULT_AGENT_ID, _BUILTIN_DEFAULT)
+    def paths_for(self, agent_id: str) -> AgentPaths | None:
+        if self._workspace_root is None:
+            return None
+        aid = agent_id if agent_id in self._paths else normalize_agent_id(agent_id)
+        return self._paths.get(aid)
+
+    def metadata_for(self, agent_id: str) -> dict[str, Any]:
+        aid = agent_id if agent_id in self._metadata else normalize_agent_id(agent_id)
+        return dict(self._metadata.get(aid, {}))
+
+    # ------------------------------------------------------------------
+    # Registry persistence
+    # ------------------------------------------------------------------
+
+    def _build_paths(self, agent_id: str, kind: str) -> AgentPaths:
+        assert self._workspace_root is not None
+        if kind == AGENT_KIND_ROOT:
+            cwd = self._workspace_root
+            pip_dir = self._workspace_root / PIP_DIRNAME
+        else:
+            cwd = self._workspace_root / agent_id
+            pip_dir = cwd / PIP_DIRNAME
+        return AgentPaths(
+            agent_id=agent_id,
+            cwd=cwd,
+            pip_dir=pip_dir,
+            workspace_pip_dir=self._workspace_root / PIP_DIRNAME,
+            kind=kind,
+            description=self._metadata.get(agent_id, {}).get("description", ""),
+        )
+
+    def _load_workspace(self, root: Path) -> None:
+        """Discover agents from disk and merge registry metadata."""
+        registry_data = self._read_registry(root)
+        registered = registry_data.get("agents", {}) if isinstance(registry_data, dict) else {}
+        if not isinstance(registered, dict):
+            registered = {}
+
+        root_persona = root / PIP_DIRNAME / "persona.md"
+        if root_persona.is_file():
+            self._register_from_persona(
+                root_persona,
+                agent_id=DEFAULT_AGENT_ID,
+                kind=AGENT_KIND_ROOT,
+                meta=registered.get(DEFAULT_AGENT_ID) or {},
+            )
+
+        for child in sorted(root.iterdir()) if root.is_dir() else []:
+            if not child.is_dir():
+                continue
+            if child.name in _RESERVED_IDS:
+                continue
+            if not is_valid_agent_id(child.name):
+                continue
+            persona = child / PIP_DIRNAME / "persona.md"
+            if not persona.is_file():
+                continue
+            self._register_from_persona(
+                persona,
+                agent_id=child.name,
+                kind=AGENT_KIND_SUB,
+                meta=registered.get(child.name) or {},
+            )
+
+        for aid, meta in registered.items():
+            if aid in self._agents:
+                continue
+            if not isinstance(meta, dict):
+                continue
+            kind = meta.get("kind", AGENT_KIND_SUB)
+            log.info(
+                "Agent %r listed in registry but persona.md is missing; "
+                "keeping metadata as stale entry", aid,
+            )
+            self._metadata[aid] = dict(meta)
+            self._metadata[aid].setdefault("kind", kind)
+
+    def _register_from_persona(
+        self,
+        persona_path: Path,
+        *,
+        agent_id: str,
+        kind: str,
+        meta: dict[str, Any],
+    ) -> None:
+        try:
+            cfg = agent_config_from_file(persona_path, default_id=agent_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Failed to load persona %s: %s", persona_path, exc)
+            return
+        if cfg.id != agent_id:
+            log.debug(
+                "persona.md id=%r overrides directory name %r",
+                cfg.id, agent_id,
+            )
+            agent_id = cfg.id
+        self._agents[agent_id] = cfg
+        self._metadata[agent_id] = {
+            "kind": kind,
+            "cwd": "." if kind == AGENT_KIND_ROOT else agent_id,
+            "created_at": meta.get("created_at") or _iso_now(),
+            "description": meta.get("description", ""),
+        }
+        self._paths[agent_id] = self._build_paths(agent_id, kind)
+
+    @staticmethod
+    def _read_registry(root: Path) -> dict[str, Any]:
+        path = root / PIP_DIRNAME / REGISTRY_FILENAME
+        if not path.is_file():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            log.warning("Failed to read %s: %s", path, exc)
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return data
+
+    def save_registry(self) -> None:
+        """Persist the current metadata to ``agents_registry.json``."""
+        if self._workspace_root is None:
+            return
+        path = self.registry_path
+        assert path is not None
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": REGISTRY_SCHEMA_VERSION,
+            "agents": {
+                aid: dict(meta)
+                for aid, meta in sorted(self._metadata.items())
+                if aid in self._agents
+            },
+        }
+        path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+    # ------------------------------------------------------------------
+    # Mutation
+    # ------------------------------------------------------------------
+
+    def register_agent(
+        self,
+        cfg: AgentConfig,
+        *,
+        kind: str = AGENT_KIND_SUB,
+        description: str = "",
+    ) -> None:
+        """Register (or update) an agent in the in-memory catalog."""
+        self._agents[cfg.id] = cfg
+        prev = self._metadata.get(cfg.id, {})
+        meta = {
+            "kind": kind,
+            "cwd": "." if kind == AGENT_KIND_ROOT else cfg.id,
+            "created_at": prev.get("created_at") or _iso_now(),
+            "description": description or prev.get("description", ""),
+        }
+        self._metadata[cfg.id] = meta
+        if self._workspace_root is not None:
+            self._paths[cfg.id] = self._build_paths(cfg.id, kind)
+
+    def remove_agent(
+        self, agent_id: str, *, delete_files: bool = False,
+    ) -> bool:
+        """Remove an agent; optionally wipe only its ``.pip/`` metadata.
+
+        The root (``pip-boy``) is protected — removing it would strip
+        the workspace's own identity. Returns ``True`` if something was
+        removed, ``False`` if the id wasn't known.
+
+        Scope of ``delete_files=True``
+        ------------------------------
+        We only delete the agent's *identity surface*:
+
+        * ``<agent_cwd>/.pip/`` (persona, memory, observations, etc.)
+        * ``<agent_cwd>/.claude/`` — but **only if empty**, so we never
+          destroy user-authored CC config.
+
+        The agent's working directory itself and every non-Pip file
+        inside it (``.git/``, source code, build artefacts, …) are
+        left untouched. "Delete the agent" means "end its identity",
+        not "nuke the project".
+        """
+        import shutil
+
+        aid = agent_id if agent_id in self._agents else normalize_agent_id(agent_id)
+        meta = self._metadata.get(aid, {})
+        if meta.get("kind") == AGENT_KIND_ROOT or aid == DEFAULT_AGENT_ID:
+            return False
+        if aid not in self._agents:
+            return False
+
+        self._agents.pop(aid, None)
+        self._metadata.pop(aid, None)
+        paths = self._paths.pop(aid, None)
+
+        if delete_files and paths is not None:
+            if paths.pip_dir.is_dir():
+                shutil.rmtree(paths.pip_dir, ignore_errors=True)
+            claude_dir = paths.cwd / ".claude"
+            if claude_dir.is_dir():
+                try:
+                    # Only prune the .claude dir if empty — presence of
+                    # anything in it means the user put it there and we
+                    # have no business deleting their CC config.
+                    if not any(claude_dir.iterdir()):
+                        claude_dir.rmdir()
+                except OSError:
+                    pass
+        return True
+
+    def archive_agent(self, agent_id: str) -> Path | None:
+        """Move a sub-agent's ``.pip/`` into ``<workspace>/.pip/archived/``.
+
+        Only the agent identity surface (``.pip/``) is relocated — the
+        sub-agent's working directory and any project files inside it
+        stay in place. Returns the destination path (inside
+        ``archived/``), or ``None`` if the agent wasn't found / was the
+        root / had no ``.pip/`` on disk.
+        """
+        import shutil
+
+        aid = agent_id if agent_id in self._agents else normalize_agent_id(agent_id)
+        meta = self._metadata.get(aid, {})
+        if meta.get("kind") == AGENT_KIND_ROOT or aid == DEFAULT_AGENT_ID:
+            return None
+        paths = self._paths.get(aid)
+        if paths is None or self._workspace_root is None:
+            return None
+
+        if not paths.pip_dir.is_dir():
+            # Nothing to move — just drop the registry entry.
+            self.remove_agent(aid, delete_files=False)
+            return None
+
+        archived_root = self._workspace_root / PIP_DIRNAME / "archived"
+        archived_root.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        dest_dir = archived_root / f"{aid}-{stamp}"
+        dest_dir.mkdir(parents=True, exist_ok=False)
+        # Move the ``.pip/`` subtree into ``archived/<id>-<stamp>/.pip/``
+        # so restoring is a straight rename back.
+        shutil.move(str(paths.pip_dir), str(dest_dir / PIP_DIRNAME))
+
+        self._agents.pop(aid, None)
+        self._metadata.pop(aid, None)
+        self._paths.pop(aid, None)
+        return dest_dir
 
 
 def resolve_effective_config(

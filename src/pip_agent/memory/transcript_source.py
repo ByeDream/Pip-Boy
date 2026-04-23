@@ -255,7 +255,7 @@ def load_formatted(
 # ---------------------------------------------------------------------------
 
 
-def _encode_cwd_for_cc_projects(cwd: Path) -> str:
+def encode_cwd_for_cc_projects(cwd: Path) -> str:
     """Best-effort replica of CC's ``<enc-cwd>`` folder naming.
 
     Claude Code encodes the cwd path by replacing path separators and
@@ -270,6 +270,25 @@ def _encode_cwd_for_cc_projects(cwd: Path) -> str:
     for ch in ("\\", "/", ":"):
         s = s.replace(ch, "-")
     return s
+
+
+# Back-compat alias — existing internal call sites use the leading
+# underscore.
+_encode_cwd_for_cc_projects = encode_cwd_for_cc_projects
+
+
+def cc_project_dir_for(
+    cwd: Path, *, projects_root: Path | None = None,
+) -> Path:
+    """Return CC's project directory for ``cwd``.
+
+    Directory may not exist yet — callers that want to delete it must
+    check ``is_dir()`` first. Uses the same encoding as
+    :func:`locate_session_jsonl`'s ``prefer_cwd`` matching so "what CC
+    sees" and "what we purge" stay aligned.
+    """
+    root = projects_root or DEFAULT_PROJECTS_ROOT
+    return root / encode_cwd_for_cc_projects(cwd)
 
 
 def locate_session_jsonl(

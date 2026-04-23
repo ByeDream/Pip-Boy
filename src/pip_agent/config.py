@@ -142,8 +142,8 @@ class Settings(BaseSettings):
     wecom_bot_id: str = Field(default="")
     wecom_bot_secret: str = Field(default="")
 
-    # Heartbeat injection timing. ``HEARTBEAT.md`` at
-    # ``.pip/agents/<agent_id>/`` is fired as a ``<heartbeat>`` inbound every
+    # Heartbeat injection timing. ``HEARTBEAT.md`` at each agent's
+    # ``.pip/`` is fired as a ``<heartbeat>`` inbound every
     # ``heartbeat_interval`` seconds during the active window. Set the interval
     # to 0 to disable. Heartbeat is NOT part of the memory pipeline — reflect
     # triggers are PreCompact + ``/exit`` only.

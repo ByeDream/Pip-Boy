@@ -39,9 +39,11 @@ class TestRunHostFlushesOnCtrlC:
             lambda self: None,
         )
         monkeypatch.setattr(mod, "WORKDIR", tmp_path)
-        monkeypatch.setattr(mod, "AGENTS_DIR", tmp_path / "agents")
+        monkeypatch.setattr(
+            mod, "WORKSPACE_PIP_DIR", tmp_path / ".pip",
+        )
         monkeypatch.setattr(mod, "BINDINGS_PATH", tmp_path / "bindings.json")
-        (tmp_path / "agents").mkdir(parents=True, exist_ok=True)
+        (tmp_path / ".pip").mkdir(parents=True, exist_ok=True)
 
         class _StubRegistry:
             def __init__(self, *_a: Any, **_kw: Any) -> None: ...
@@ -124,9 +126,11 @@ class TestRunHostFlushesOnCtrlC:
             lambda self: None,
         )
         monkeypatch.setattr(mod, "WORKDIR", tmp_path)
-        monkeypatch.setattr(mod, "AGENTS_DIR", tmp_path / "agents")
+        monkeypatch.setattr(
+            mod, "WORKSPACE_PIP_DIR", tmp_path / ".pip",
+        )
         monkeypatch.setattr(mod, "BINDINGS_PATH", tmp_path / "bindings.json")
-        (tmp_path / "agents").mkdir(parents=True, exist_ok=True)
+        (tmp_path / ".pip").mkdir(parents=True, exist_ok=True)
 
         stop_calls: list[int] = []
         close_calls: list[int] = []

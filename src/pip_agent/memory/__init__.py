@@ -1,13 +1,37 @@
-"""Memory subsystem: per-agent behavioral memory with three-tier pipeline.
+"""Memory subsystem: per-agent behavioural memory with three-tier pipeline.
 
-Storage layout:
-    .pip/agents/<agent-id>/
+Storage layout (v2 / post identity-redesign)
+--------------------------------------------
+Each agent's memory lives directly under its own ``.pip/`` directory:
+
+    <agent_dir>/
         state.json
         observations/<date>.jsonl
         memories.json
         axioms.md
         users/<name>.md       (per-agent user profiles, tool-managed)
-    .pip/owner.md             (owner profile, read-only by tools)
+
+For the root ``pip-boy`` agent ``<agent_dir>`` is ``WORKDIR/.pip``.
+For a sub-agent ``X`` it is ``WORKDIR/X/.pip``.
+
+Workspace-level ACL state (``owner.md``) lives at
+``<workspace_pip_dir>/owner.md`` and is shared by every agent — the
+owner is a property of the human running Pip, not of any one agent.
+
+Construction
+~~~~~~~~~~~~
+Preferred form::
+
+    MemoryStore(agent_dir=paths.pip_dir,
+                workspace_pip_dir=paths.workspace_pip_dir,
+                agent_id=paths.agent_id)
+
+Legacy form (retained so older call sites and tests keep working — the
+old ``base_dir`` argument was ``WORKDIR/.pip/agents/``; the agent dir
+was ``base_dir / agent_id`` and ``owner.md`` lived at
+``base_dir.parent / 'owner.md'``)::
+
+    MemoryStore(base_dir, agent_id)
 """
 
 from __future__ import annotations
@@ -32,10 +56,28 @@ class MemoryStore:
     All file I/O is lazy — missing files are silently handled with defaults.
     """
 
-    def __init__(self, base_dir: Path, agent_id: str) -> None:
+    def __init__(
+        self,
+        base_dir: Path | None = None,
+        agent_id: str = "",
+        *,
+        agent_dir: Path | None = None,
+        workspace_pip_dir: Path | None = None,
+    ) -> None:
+        if agent_dir is None:
+            if base_dir is None:
+                raise TypeError(
+                    "MemoryStore needs either agent_dir or base_dir+agent_id",
+                )
+            agent_dir = base_dir / agent_id
+            if workspace_pip_dir is None:
+                workspace_pip_dir = base_dir.parent
+        if workspace_pip_dir is None:
+            workspace_pip_dir = agent_dir
+
         self.agent_id = agent_id
-        self.agent_dir = base_dir / agent_id
-        self.pip_dir = base_dir.parent  # .pip/
+        self.agent_dir = agent_dir
+        self.pip_dir = workspace_pip_dir  # shared workspace scope (owner.md)
         self._io_lock = threading.Lock()
         self.agent_dir.mkdir(parents=True, exist_ok=True)
         (self.agent_dir / "observations").mkdir(exist_ok=True)
@@ -70,6 +112,13 @@ class MemoryStore:
         with self._io_lock:
             date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             path = self.agent_dir / "observations" / f"{date_str}.jsonl"
+            # Self-heal the parent directory. ``MemoryStore.__init__``
+            # already creates ``observations/`` once, but a long-lived
+            # host caches the store across operations like
+            # ``/agent reset`` that blow away ``.pip/`` out from under
+            # it — mirroring ``atomic_write``'s mkdir-on-write contract
+            # keeps reflect working without a process restart.
+            path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8") as f:
                 for obs in observations:
                     f.write(json.dumps(obs, ensure_ascii=False) + "\n")
@@ -709,19 +758,32 @@ def _sanitize_filename(name: str) -> str:
 # Prompt section helpers
 # ----------------------------------------------------------------------
 
-_IDENTITY_RE = re.compile(r"^## Identity\b", re.MULTILINE)
-_RULES_RE = re.compile(r"^## Rules\b", re.MULTILINE)
+# Scaffold personas use top-level ``# Identity`` headings; the builtin
+# fallback and older tests use ``## Identity``. The injection logic
+# must find either — otherwise the User/Axioms sections silently fall
+# back to "prepend/append at the edges" and end up in the wrong part
+# of the prompt.
+_IDENTITY_RE = re.compile(r"^#+\s+Identity\b", re.MULTILINE)
+_RULES_RE = re.compile(r"^#+\s+Rules\b", re.MULTILINE)
+_ANY_HEADING_RE = re.compile(r"^#+\s+\S", re.MULTILINE)
 
 
 def _insert_after_identity(prompt: str, section: str) -> str:
-    """Insert a section after ## Identity (before next ##). Falls back to prepend."""
+    """Insert a section after the Identity heading. Falls back to prepend.
+
+    The "next heading" search is level-agnostic: we cut off at the
+    first heading of any depth that follows Identity, so personas
+    using either ``# Identity`` + ``# Core Philosophy`` (scaffold
+    style) or ``## Identity`` + ``## Rules`` (builtin / legacy)
+    both work.
+    """
     m = _IDENTITY_RE.search(prompt)
     if not m:
         return section + "\n\n" + prompt
 
-    next_heading = re.search(r"^## ", prompt[m.end():], re.MULTILINE)
+    next_heading = _ANY_HEADING_RE.search(prompt, m.end())
     if next_heading:
-        pos = m.end() + next_heading.start()
+        pos = next_heading.start()
     else:
         pos = len(prompt)
 

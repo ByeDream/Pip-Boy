@@ -1,4 +1,38 @@
-"""Idempotent workspace scaffold with version-tracked migration."""
+"""Idempotent workspace scaffold with version-tracked migration.
+
+Layout v2 (identity redesign)
+-----------------------------
+The workspace root itself belongs to the default ``pip-boy`` agent:
+
+    <workspace>/
+      .pip/                 <- pip-boy's own state + workspace-shared state
+        persona.md          <- pip-boy persona
+        HEARTBEAT.md
+        owner.md
+        observations/
+        users/
+        incoming/
+        credentials/
+        bindings.json
+        agents_registry.json
+        sdk_sessions.json
+        .scaffold_manifest.json
+      <sub-agent>/          <- 0..N sub-agents
+        .pip/
+          persona.md
+          HEARTBEAT.md
+          observations/
+          users/
+          incoming/
+      .env
+      .gitignore
+
+Migration from v1 (flat ``.pip/agents/<id>/`` layout):
+    * ``.pip/agents/pip-boy/*``    -> ``.pip/*``         (content bubbled up)
+    * ``.pip/agents/<other>/*``    -> ``<other>/.pip/*`` (each becomes a sub-agent)
+    * ``.pip/agents/bindings.json``-> ``.pip/bindings.json``
+    * ``.pip/agents/`` is removed once it's empty.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +40,7 @@ import hashlib
 import json
 import logging
 import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 
 from pip_agent import __version__
@@ -16,12 +51,20 @@ _SCAFFOLD_DIR = Path(__file__).resolve().parent
 
 _MANIFEST_NAME = ".scaffold_manifest.json"
 
+# (target relative to workspace root, scaffold source file)
 _SCAFFOLD_FILES: list[tuple[str, str]] = [
-    (".pip/agents/pip-boy/persona.md", "pip-boy.md"),
-    (".pip/agents/pip-boy/HEARTBEAT.md", "heartbeat.md"),
+    (".pip/persona.md", "pip-boy.md"),
+    (".pip/HEARTBEAT.md", "heartbeat.md"),
     (".pip/owner.md", "owner.md"),
     (".env", "env.example"),
 ]
+
+# Legacy paths we recognise and migrate from (v1 layout).
+_LEGACY_AGENTS_DIRNAME = ".pip/agents"
+_LEGACY_MANIFEST_KEYS = {
+    ".pip/agents/pip-boy/persona.md": ".pip/persona.md",
+    ".pip/agents/pip-boy/HEARTBEAT.md": ".pip/HEARTBEAT.md",
+}
 
 
 def _file_hash(path: Path) -> str:
@@ -45,12 +88,27 @@ def _save_manifest(workdir: Path, manifest: dict) -> None:
 
 
 def ensure_workspace(workdir: Path, *, default_agent_id: str = "pip-boy") -> None:
-    """Idempotent workspace initialization with scaffold migration."""
-    _ensure_dirs(workdir, default_agent_id=default_agent_id)
-    _migrate_legacy_layout(workdir, default_agent_id=default_agent_id)
+    """Idempotent workspace initialization with scaffold migration.
+
+    Safe to call on every process start: existing state is left alone;
+    only missing files are created and legacy layouts are migrated in
+    place on first run.
+    """
+    _migrate_v1_to_v2(workdir)
+    _ensure_dirs(workdir)
+    _ensure_registry(workdir, default_agent_id=default_agent_id)
+    _migrate_legacy_nested(workdir, default_agent_id=default_agent_id)
 
     manifest = _load_manifest(workdir)
     files_meta = manifest.get("files", {})
+
+    # Forward-compat: older manifests referenced ``.pip/agents/pip-boy/``
+    # paths that have since moved up to ``.pip/``. Rewrite their keys
+    # in place so scaffold-upgrade detection still works after the
+    # v1 -> v2 migration.
+    for old_key, new_key in _LEGACY_MANIFEST_KEYS.items():
+        if old_key in files_meta and new_key not in files_meta:
+            files_meta[new_key] = files_meta.pop(old_key)
 
     for rel_target, scaffold_name in _SCAFFOLD_FILES:
         target = workdir / rel_target
@@ -116,17 +174,17 @@ def ensure_workspace(workdir: Path, *, default_agent_id: str = "pip-boy") -> Non
     _check_git(workdir)
 
 
-
-def _ensure_dirs(workdir: Path, *, default_agent_id: str = "pip-boy") -> None:
-    # ``transcripts/`` is deliberately NOT created: Phase 4.5 moved session
-    # persistence into Claude Code's native ``~/.claude/projects/`` JSONL, and
-    # Pip no longer writes per-turn transcripts.
+def _ensure_dirs(workdir: Path) -> None:
+    """Create the v2 directory skeleton for the root (pip-boy) agent."""
+    # ``transcripts/`` is deliberately NOT created: Pip reflect reads
+    # Claude Code's native JSONL under ``~/.claude/projects/`` and we
+    # no longer maintain a per-agent transcript archive.
     dirs = [
         ".pip",
-        ".pip/agents",
-        f".pip/agents/{default_agent_id}",
-        f".pip/agents/{default_agent_id}/observations",
-        f".pip/agents/{default_agent_id}/users",
+        ".pip/observations",
+        ".pip/users",
+        ".pip/incoming",
+        ".pip/credentials",
     ]
     for rel in dirs:
         d = workdir / rel
@@ -134,77 +192,183 @@ def _ensure_dirs(workdir: Path, *, default_agent_id: str = "pip-boy") -> None:
         logger.debug("Directory ensured: %s", d)
 
 
-def _migrate_legacy_layout(
-    workdir: Path, *, default_agent_id: str = "pip-boy",
-) -> None:
-    """One-time migration from old flat layout to per-agent subdirectories."""
+def _ensure_registry(workdir: Path, *, default_agent_id: str) -> None:
+    """Guarantee ``agents_registry.json`` has at least the root entry.
+
+    We don't call :class:`AgentRegistry` here on purpose — the registry
+    module imports yaml / dataclasses that pull in transitive deps, and
+    scaffold must be runnable in a pre-import fast path.
+    """
+    registry_path = workdir / ".pip" / "agents_registry.json"
+    if registry_path.is_file():
+        try:
+            data = json.loads(registry_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            data = {}
+    else:
+        data = {}
+
+    if not isinstance(data, dict):
+        data = {}
+    data.setdefault("version", 1)
+    agents = data.get("agents")
+    if not isinstance(agents, dict):
+        agents = {}
+    if default_agent_id not in agents:
+        agents[default_agent_id] = {
+            "kind": "root",
+            "cwd": ".",
+            "created_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "description": "Default Pip-Boy agent",
+        }
+    data["agents"] = agents
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _migrate_v1_to_v2(workdir: Path) -> None:
+    """One-shot migration from the flat ``.pip/agents/<id>/`` layout."""
     pip = workdir / ".pip"
-    agents = pip / "agents"
-    default_dir = agents / default_agent_id
+    agents = pip / _LEGACY_AGENTS_DIRNAME.split("/", 1)[1]  # .pip/agents/
+    if not agents.is_dir():
+        return
 
-    # Legacy flat agent .md → per-agent persona.md
-    for md in sorted(agents.glob("*.md")):
-        agent_id = md.stem
-        persona = agents / agent_id / "persona.md"
-        if not persona.exists():
-            persona.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(md, persona)
-            logger.info("Migrated %s → %s", md, persona)
+    logger.info("Detected v1 layout at %s — migrating to v2.", agents)
 
-    # Legacy .pip/memory/<id>/ → .pip/agents/<id>/
+    # 1. Bubble pip-boy's own state up into .pip/
+    pipboy_old = agents / "pip-boy"
+    if pipboy_old.is_dir():
+        _merge_tree_into(pipboy_old, pip)
+
+    # 2. Each other <id>/ becomes <workspace>/<id>/.pip/
+    registry_agents: dict[str, dict] = {}
+    for child in sorted(agents.iterdir()):
+        if not child.is_dir():
+            continue
+        if child.name == "pip-boy":
+            continue
+        dest_pip = workdir / child.name / ".pip"
+        dest_pip.mkdir(parents=True, exist_ok=True)
+        _merge_tree_into(child, dest_pip)
+        registry_agents[child.name] = {
+            "kind": "sub",
+            "cwd": child.name,
+            "created_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "description": f"Migrated from v1 {_LEGACY_AGENTS_DIRNAME}/{child.name}",
+        }
+        logger.info(
+            "Migrated v1 agent %r to %s/.pip/",
+            child.name, dest_pip.parent,
+        )
+
+    # 3. Promote bindings.json to .pip/ root (if it wasn't already).
+    legacy_bindings = agents / "bindings.json"
+    new_bindings = pip / "bindings.json"
+    if legacy_bindings.is_file() and not new_bindings.is_file():
+        shutil.move(str(legacy_bindings), str(new_bindings))
+        logger.info("Migrated bindings.json to %s", new_bindings)
+
+    # 4. Record migrated agents in the registry (non-destructive merge).
+    if registry_agents:
+        registry_path = pip / "agents_registry.json"
+        if registry_path.is_file():
+            try:
+                data = json.loads(registry_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                data = {}
+        else:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        existing = data.get("agents") if isinstance(data.get("agents"), dict) else {}
+        merged = {**registry_agents, **existing}  # existing wins if present
+        data["version"] = 1
+        data["agents"] = merged
+        registry_path.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+    # 5. Drop the now-empty .pip/agents/.
+    try:
+        remaining = list(agents.iterdir())
+    except OSError:
+        remaining = []
+    if not remaining:
+        try:
+            agents.rmdir()
+            logger.info("Removed empty legacy directory %s", agents)
+        except OSError:
+            pass
+    else:
+        logger.warning(
+            "%s still has %d entries after migration; leaving in place for "
+            "manual inspection.", agents, len(remaining),
+        )
+
+
+def _merge_tree_into(src: Path, dest: Path) -> None:
+    """Move everything from ``src`` into ``dest``, preferring ``dest`` on conflict."""
+    dest.mkdir(parents=True, exist_ok=True)
+    for item in list(src.iterdir()):
+        target = dest / item.name
+        if target.exists():
+            if item.is_dir() and target.is_dir():
+                _merge_tree_into(item, target)
+                try:
+                    item.rmdir()
+                except OSError:
+                    pass
+            else:
+                logger.debug(
+                    "Skipping %s: %s already exists at destination",
+                    item, target,
+                )
+        else:
+            shutil.move(str(item), str(target))
+    try:
+        src.rmdir()
+    except OSError:
+        pass
+
+
+def _migrate_legacy_nested(workdir: Path, *, default_agent_id: str) -> None:
+    """Migrate pre-v1 quirks that may still exist inside ``.pip/``.
+
+    Historically some installs had ``.pip/memory/<id>/`` and
+    ``.pip/users/`` lying around from much older versions. These are
+    merged into the new layout defensively — the cost of looking is
+    negligible and it keeps upgrades from stranded legacy data.
+    """
+    pip = workdir / ".pip"
+
+    # .pip/memory/<id>/ → pip-boy's .pip/ (or <id>/.pip/ for non-default)
     legacy_memory = pip / "memory"
     if legacy_memory.is_dir():
         for sub in sorted(legacy_memory.iterdir()):
             if not sub.is_dir():
                 continue
-            target = agents / sub.name
-            target.mkdir(parents=True, exist_ok=True)
-            for item in sub.iterdir():
-                dest = target / item.name
-                if not dest.exists():
-                    if item.is_dir():
-                        shutil.copytree(item, dest)
-                    else:
-                        shutil.copy2(item, dest)
-                elif item.is_dir() and dest.is_dir():
-                    for child in item.rglob("*"):
-                        if child.is_file():
-                            child_dest = dest / child.relative_to(item)
-                            if not child_dest.exists():
-                                child_dest.parent.mkdir(parents=True, exist_ok=True)
-                                shutil.copy2(child, child_dest)
-            logger.info("Migrated memory/%s → agents/%s", sub.name, sub.name)
+            if sub.name == default_agent_id:
+                _merge_tree_into(sub, pip)
+            else:
+                dest = workdir / sub.name / ".pip"
+                _merge_tree_into(sub, dest)
+        try:
+            legacy_memory.rmdir()
+        except OSError:
+            pass
 
-    # Legacy .pip/users/ → default agent's users/
-    legacy_users = pip / "users"
-    if legacy_users.is_dir() and any(legacy_users.glob("*.md")):
-        target_users = default_dir / "users"
-        target_users.mkdir(parents=True, exist_ok=True)
-        for md in sorted(legacy_users.glob("*.md")):
-            dest = target_users / md.name
-            if not dest.exists():
-                shutil.copy2(md, dest)
-        logger.info("Migrated .pip/users/ → agents/%s/users/", default_agent_id)
-
-    # Legacy .pip/transcripts/ is no longer migrated: Pip reflect now reads
-    # Claude Code's native JSONL under ``~/.claude/projects/``. Any residual
-    # directory from pre-0.4 is removed below.
+    # Ancient ``.pip/users/`` at the ROOT (pre-multi-agent) went to the
+    # default agent's users/. Under v2 pip-boy's users/ lives at
+    # ``.pip/users/`` anyway, so the move is a no-op for fresh installs
+    # and only fires if an install was downgraded at some point.
     legacy_transcripts = pip / "transcripts"
-
-    # Also delete the per-agent ``transcripts/`` directories that older
-    # versions created empty during ``_ensure_dirs``; they are cruft now.
-    legacy_per_agent_transcripts: list[Path] = []
-    if agents.is_dir():
-        for agent_dir in agents.iterdir():
-            if agent_dir.is_dir():
-                td = agent_dir / "transcripts"
-                if td.is_dir():
-                    legacy_per_agent_transcripts.append(td)
-
-    for legacy in (legacy_memory, legacy_users, legacy_transcripts, *legacy_per_agent_transcripts):
-        if legacy.is_dir():
-            shutil.rmtree(legacy, ignore_errors=True)
-            logger.info("Removed legacy directory: %s", legacy)
+    if legacy_transcripts.is_dir():
+        shutil.rmtree(legacy_transcripts, ignore_errors=True)
+        logger.info("Removed stale %s", legacy_transcripts)
 
 
 def _ensure_gitignore(workdir: Path) -> None:

@@ -30,7 +30,7 @@ This development philosophy values clear documentation, readable code, and belie
 - **CONSTRAIN, SURFACE, NEVER COACH**: Intelligence is trained, not coded. Provide eyes (information) and hands (tools) — never inject hints, suggestions, or coaching.
 - **PROFILE**: Wrap performance-sensitive operations (API calls, tool execution, I/O) with `Profiler` (`pip_agent.profiler`). Disabled by default, zero overhead.
 - **XML-WRAP INJECTIONS**: When injecting system-generated content into user messages, wrap it in XML tags to create a clear boundary between user intent and system context.
-- **RESILIENT API CALLS**: The main turn-loop routes every `messages.create` through `ResilienceRunner` (`pip_agent.resilience`). It classifies failures (rate_limit / auth / timeout / billing / overflow), rotates between `.pip/keys.json` profiles with per-reason cooldowns, compacts messages in-place on context overflow, and degrades to fallback models before giving up with `ResilienceExhausted`.
+- **RESILIENT API CALLS**: The main turn-loop routes every `messages.create` through `ResilienceRunner` (`pip_agent.resilience`). It classifies failures (rate_limit / auth / timeout / billing / overflow), rotates between `.pip/credentials/keys.json` profiles with per-reason cooldowns, compacts messages in-place on context overflow, and degrades to fallback models before giving up with `ResilienceExhausted`.
 
 ## Tech Stack
 

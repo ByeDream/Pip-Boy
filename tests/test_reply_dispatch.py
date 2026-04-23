@@ -493,10 +493,30 @@ class TestFlushAndRotate:
         (agents_dir / "pip-boy").mkdir(parents=True)
         mem = MemoryStore(base_dir=agents_dir, agent_id="pip-boy")
 
+        # ``paths`` mirrors the v2 :class:`AgentPaths` surface used by
+        # ``flush_and_rotate`` — we only need ``cwd`` to satisfy the
+        # ``locate_session_jsonl`` call, the rest stays unread.
+        fake_paths = SimpleNamespace(
+            agent_id="pip-boy",
+            cwd=tmp_path,
+            pip_dir=agents_dir / "pip-boy",
+            workspace_pip_dir=tmp_path / ".pip",
+        )
+        # ``flush_and_rotate`` now asks the registry whether the agent
+        # still exists before materialising its services, to avoid
+        # resurrecting a ``.pip/`` that ``/agent delete`` just wiped.
+        # A tiny stub that always returns "yes" keeps the happy-path
+        # tests honest without dragging the real AgentRegistry in.
+        fake_registry = SimpleNamespace(
+            get_agent=lambda aid: SimpleNamespace(id=aid),
+        )
         host = SimpleNamespace(
             _sessions=dict(sessions),
             _agents={},
-            _get_agent_services=lambda aid: SimpleNamespace(memory_store=mem),
+            _registry=fake_registry,
+            _get_agent_services=lambda aid: SimpleNamespace(
+                memory_store=mem, paths=fake_paths,
+            ),
         )
         return host, mem, mod
 

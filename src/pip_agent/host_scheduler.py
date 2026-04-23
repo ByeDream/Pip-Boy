@@ -8,10 +8,12 @@ processes them through the same code path as any user-sent message.
 Design:
 
 * **One background thread per ``AgentHost``.** Ticks every ``_TICK_SECONDS``.
-* **Per-agent cron store** at ``.pip/agents/<agent_id>/cron.json`` — a list of
-  job dicts. Stored on disk so jobs survive restarts.
-* **Per-agent heartbeat source** at ``.pip/agents/<agent_id>/HEARTBEAT.md``. If
-  the file exists, the agent receives a ``<heartbeat>`` inbound every
+* **Per-agent cron store** at each agent's ``<pip_dir>/cron.json`` — a list
+  of job dicts. Stored on disk so jobs survive restarts. ``<pip_dir>`` is
+  resolved via :class:`AgentRegistry.paths_for`: ``WORKDIR/.pip/`` for the
+  root pip-boy agent and ``WORKDIR/<id>/.pip/`` for every sub-agent.
+* **Per-agent heartbeat source** at ``<pip_dir>/HEARTBEAT.md``. If the
+  file exists, the agent receives a ``<heartbeat>`` inbound every
   ``settings.heartbeat_interval`` seconds during the active window.
 * **Sentinel sender ids** (see :class:`_Sender`) mark host-injected messages.
   Phase 4.6 uses these to wrap the prompt with ``<cron_task>`` / ``<heartbeat>``
@@ -88,6 +90,51 @@ def _pending_key_heartbeat(agent_id: str) -> str:
     directory), so the key is per-agent.
     """
     return f"hb:{agent_id}"
+
+
+@dataclass(frozen=True)
+class _LegacyPaths:
+    """Minimal :class:`AgentPaths`-shaped bundle used by the legacy shim."""
+
+    pip_dir: Path
+    workspace_pip_dir: Path
+    cwd: Path
+
+
+class _LegacyAgentsDirRegistry:
+    """Thin adapter that exposes a v1 ``<agents_dir>/<id>/`` layout through
+    the registry-shaped surface :class:`HostScheduler` expects.
+
+    Kept purely for test/backcompat convenience — production code now
+    hands :class:`HostScheduler` a real :class:`AgentRegistry` carrying
+    the v2 per-agent ``.pip/`` directories.
+    """
+
+    def __init__(self, agents_dir: Path) -> None:
+        self._agents_dir = agents_dir
+
+    class _Cfg:
+        __slots__ = ("id",)
+
+        def __init__(self, aid: str) -> None:
+            self.id = aid
+
+    def list_agents(self) -> list["_LegacyAgentsDirRegistry._Cfg"]:
+        if not self._agents_dir.is_dir():
+            return []
+        return [
+            self._Cfg(p.name)
+            for p in sorted(self._agents_dir.iterdir())
+            if p.is_dir()
+        ]
+
+    def paths_for(self, agent_id: str) -> _LegacyPaths | None:
+        cwd = self._agents_dir / agent_id
+        return _LegacyPaths(
+            pip_dir=cwd,
+            workspace_pip_dir=self._agents_dir.parent,
+            cwd=cwd,
+        )
 
 
 @dataclass
@@ -283,12 +330,23 @@ class HostScheduler:
     def __init__(
         self,
         *,
-        agents_dir: Path,
+        registry: Any = None,
+        agents_dir: Path | None = None,
         msg_queue: list[InboundMessage],
         q_lock: threading.Lock,
         stop_event: threading.Event,
     ) -> None:
-        self._agents_dir = agents_dir
+        if registry is None:
+            if agents_dir is None:
+                raise TypeError(
+                    "HostScheduler needs either registry or agents_dir",
+                )
+            # Legacy v1 layout: ``agents_dir`` points at
+            # ``<workspace>/.pip/agents`` and each agent dir is a flat
+            # child of it. We build a tiny registry-shaped shim so the
+            # rest of the scheduler code doesn't branch on layout.
+            registry = _LegacyAgentsDirRegistry(agents_dir)
+        self._registry = registry
         self._msg_queue = msg_queue
         self._q_lock = q_lock
         self._stop_event = stop_event
@@ -394,11 +452,11 @@ class HostScheduler:
         if not job_id:
             return "Error: 'job_id' is required."
         with self._io_lock:
-            for agent_dir in self._iter_agent_dirs():
-                jobs = self._load_jobs(agent_dir.name)
+            for aid in self._iter_agent_ids():
+                jobs = self._load_jobs(aid)
                 new_jobs = [j for j in jobs if j.get("id") != job_id]
                 if len(new_jobs) != len(jobs):
-                    self._save_jobs(agent_dir.name, new_jobs)
+                    self._save_jobs(aid, new_jobs)
                     return f"Removed job {job_id}."
         return f"Job {job_id} not found."
 
@@ -414,8 +472,8 @@ class HostScheduler:
             return "Nothing to update."
 
         with self._io_lock:
-            for agent_dir in self._iter_agent_dirs():
-                jobs = self._load_jobs(agent_dir.name)
+            for aid in self._iter_agent_ids():
+                jobs = self._load_jobs(aid)
                 for job in jobs:
                     if job.get("id") != job_id:
                         continue
@@ -430,15 +488,15 @@ class HostScheduler:
                             return "Error: schedule resolves to no future fire time."
                         job["next_fire_at"] = fire_at
                     job.update(fields)
-                    self._save_jobs(agent_dir.name, jobs)
+                    self._save_jobs(aid, jobs)
                     return f"Updated job {job_id}."
         return f"Job {job_id} not found."
 
     def list_jobs(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         with self._io_lock:
-            for agent_dir in self._iter_agent_dirs():
-                out.extend(self._load_jobs(agent_dir.name))
+            for aid in self._iter_agent_ids():
+                out.extend(self._load_jobs(aid))
         return out
 
     @contextmanager
@@ -558,12 +616,17 @@ class HostScheduler:
         log.info("HostScheduler stopped")
 
     def _tick(self, now: float) -> None:
-        for agent_dir in self._iter_agent_dirs():
-            self._tick_cron(agent_dir, now)
-            self._tick_heartbeat(agent_dir, now)
-            self._tick_dream(agent_dir, now)
+        for aid, pip_dir in self._iter_agent_pip_dirs():
+            self._tick_cron(aid, now)
+            self._tick_heartbeat(aid, pip_dir, now)
+            self._tick_dream(aid, now)
 
-    def _tick_dream(self, agent_dir: Path, now: float) -> None:
+    def _tick_dream(self, agent_id: "str | Path", now: float) -> None:
+        if isinstance(agent_id, Path):
+            # Legacy callers (tests) still pass the agent directory
+            # rather than an id. Accept both forms so we don't force a
+            # mechanical tree-wide edit for a private helper.
+            agent_id = agent_id.name
         """Fire a Dream pass for this agent iff all trigger gates are met.
 
         Gates (mirrored in ``config.Settings``):
@@ -584,8 +647,6 @@ class HostScheduler:
         :meth:`_run_dream`) so the 5 s scheduler tick keeps flowing. Any
         cron / heartbeat ticks during the Dream run are unaffected.
         """
-        agent_id = agent_dir.name
-
         if not _in_dream_window(now):
             return
 
@@ -593,16 +654,8 @@ class HostScheduler:
             if agent_id in self._dream_running:
                 return
 
-        # Lazy import: keeps ``memory`` out of the import path for callers
-        # who only want the scheduler (tests for cron coalescing, etc.).
         try:
-            from pip_agent.memory import MemoryStore
-        except Exception:  # pragma: no cover — memory package is bundled
-            log.exception("Dream: memory package import failed")
-            return
-
-        try:
-            store = MemoryStore(base_dir=self._agents_dir, agent_id=agent_id)
+            store = self._make_store(agent_id)
             state = store.load_state()
         except Exception:
             log.exception("Dream: cannot load state for agent=%s", agent_id)
@@ -674,7 +727,6 @@ class HostScheduler:
         """
         try:
             from pip_agent.anthropic_client import build_anthropic_client
-            from pip_agent.memory import MemoryStore
             from pip_agent.memory.consolidate import consolidate, distill_axioms
 
             client = build_anthropic_client()
@@ -685,7 +737,7 @@ class HostScheduler:
                 )
                 return
 
-            store = MemoryStore(base_dir=self._agents_dir, agent_id=agent_id)
+            store = self._make_store(agent_id)
             if observations is None:
                 observations = store.load_all_observations()
             memories = store.load_memories()
@@ -739,8 +791,7 @@ class HostScheduler:
             with self._dream_lock:
                 self._dream_running.discard(agent_id)
 
-    def _tick_cron(self, agent_dir: Path, now: float) -> None:
-        agent_id = agent_dir.name
+    def _tick_cron(self, agent_id: str, now: float) -> None:
         with self._io_lock:
             jobs = self._load_jobs(agent_id)
         if not jobs:
@@ -802,8 +853,10 @@ class HostScheduler:
             with self._io_lock:
                 self._save_jobs(agent_id, jobs)
 
-    def _tick_heartbeat(self, agent_dir: Path, now: float) -> None:
-        hb_file = agent_dir / _HEARTBEAT_FILE
+    def _tick_heartbeat(
+        self, agent_id: str, pip_dir: Path, now: float,
+    ) -> None:
+        hb_file = pip_dir / _HEARTBEAT_FILE
         if not hb_file.is_file():
             return
         interval = int(settings.heartbeat_interval)
@@ -813,12 +866,11 @@ class HostScheduler:
             return
 
         state = self._heartbeat_state.setdefault(
-            agent_dir.name, _HeartbeatState(last_fire_at=now)
+            agent_id, _HeartbeatState(last_fire_at=now)
         )
         if now - state.last_fire_at < interval:
             return
 
-        agent_id = agent_dir.name
         pending_key = _pending_key_heartbeat(agent_id)
         with self._pending_lock:
             if pending_key in self._pending:
@@ -869,17 +921,66 @@ class HostScheduler:
             inbound.sender_id, inbound.agent_id, depth, inbound.source_job_id,
         )
 
-    def _iter_agent_dirs(self) -> list[Path]:
-        if not self._agents_dir.is_dir():
-            return []
-        return [p for p in self._agents_dir.iterdir() if p.is_dir()]
+    def _iter_agent_ids(self) -> list[str]:
+        """Return the list of registered agent ids.
 
-    def _cron_path(self, agent_id: str) -> Path:
-        return self._agents_dir / agent_id / _CRON_FILE
+        Under the v2 layout agents no longer live in a flat
+        ``.pip/agents/<id>/`` directory; each has its own ``.pip/`` folder.
+        We iterate via the registry so both pip-boy (root) and sub-agents
+        are included, and so archived agents are excluded.
+        """
+        try:
+            return [a.id for a in self._registry.list_agents()]
+        except Exception:
+            log.exception("HostScheduler: registry.list_agents() failed")
+            return []
+
+    def _iter_agent_pip_dirs(self) -> list[tuple[str, Path]]:
+        out: list[tuple[str, Path]] = []
+        for aid in self._iter_agent_ids():
+            try:
+                paths = self._registry.paths_for(aid)
+            except Exception:
+                continue
+            if paths is None:
+                continue
+            out.append((aid, paths.pip_dir))
+        return out
+
+    def _agent_pip_dir(self, agent_id: str) -> Path | None:
+        try:
+            paths = self._registry.paths_for(agent_id)
+        except Exception:
+            return None
+        return paths.pip_dir if paths else None
+
+    def _cron_path(self, agent_id: str) -> Path | None:
+        pip_dir = self._agent_pip_dir(agent_id)
+        if pip_dir is None:
+            return None
+        return pip_dir / _CRON_FILE
+
+    def _make_store(self, agent_id: str):
+        """Construct a MemoryStore bound to ``agent_id`` via the registry.
+
+        Kept private + lazy so test harnesses that don't import ``memory``
+        can still exercise the scheduler without triggering the heavy
+        import graph.
+        """
+        from pip_agent.memory import MemoryStore
+
+        paths = self._registry.paths_for(agent_id)
+        if paths is None:
+            raise LookupError(f"unknown agent_id={agent_id!r}")
+        return MemoryStore(
+            agent_dir=paths.pip_dir,
+            workspace_pip_dir=paths.workspace_pip_dir,
+            agent_id=agent_id,
+        )
 
     def _load_jobs(self, agent_id: str) -> list[dict[str, Any]]:
         path = self._cron_path(agent_id)
-        if not path.is_file():
+        if path is None or not path.is_file():
             return []
         try:
             data = json.loads(path.read_text("utf-8"))
@@ -892,6 +993,12 @@ class HostScheduler:
 
     def _save_jobs(self, agent_id: str, jobs: list[dict[str, Any]]) -> None:
         path = self._cron_path(agent_id)
+        if path is None:
+            log.warning(
+                "HostScheduler: cannot persist cron.json — unknown agent_id=%r",
+                agent_id,
+            )
+            return
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write(path, json.dumps(jobs, indent=2, ensure_ascii=False))
 

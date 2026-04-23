@@ -19,7 +19,10 @@ from pip_agent.routing import (
 
 class TestNormalizeAgentId:
     def test_simple(self):
-        assert normalize_agent_id("Pip-Boy") == "pip-boy"
+        # v2: ids are case-preserving to match directory names on disk
+        # (e.g. ``ProjectStella`` should round-trip). Only invalid
+        # characters force a rewrite.
+        assert normalize_agent_id("Pip-Boy") == "Pip-Boy"
 
     def test_empty(self):
         assert normalize_agent_id("") == DEFAULT_AGENT_ID
@@ -28,7 +31,8 @@ class TestNormalizeAgentId:
         assert normalize_agent_id("  ") == DEFAULT_AGENT_ID
 
     def test_special_chars(self):
-        assert normalize_agent_id("My Bot!") == "my-bot"
+        # Whitespace + punctuation become dashes; case is preserved.
+        assert normalize_agent_id("My Bot!") == "My-Bot"
 
     def test_already_valid(self):
         assert normalize_agent_id("pm-bot") == "pm-bot"
@@ -232,8 +236,10 @@ class TestBuildSessionKey:
         assert sk == "agent:pip-boy:cli:peer:cli-user"
 
     def test_normalizes_agent_id(self):
+        # v2: session keys preserve the case of the agent id because
+        # the id doubles as a directory name under the workspace root.
         sk = build_session_key("Pip-Boy", "cli", "cli-user")
-        assert sk.startswith("agent:pip-boy:")
+        assert sk.startswith("agent:Pip-Boy:")
 
 
 class TestAgentRegistry:
@@ -243,33 +249,39 @@ class TestAgentRegistry:
         assert len(reg.list_agents()) == 1
 
     def test_load_from_dir(self, tmp_path):
-        agents_dir = tmp_path / "agents"
-        agents_dir.mkdir()
-        bot_dir = agents_dir / "test-bot"
-        bot_dir.mkdir()
-        (bot_dir / "persona.md").write_text(
+        workspace = tmp_path / "workspace"
+        sub = workspace / "test-bot" / ".pip"
+        sub.mkdir(parents=True)
+        (sub / "persona.md").write_text(
             "---\nname: TestBot\nmodel: gpt-4\n---\nBody.\n",
             encoding="utf-8",
         )
-        reg = AgentRegistry(agents_dir)
+        reg = AgentRegistry(workspace)
         assert reg.get_agent("test-bot") is not None
         assert reg.get_agent("test-bot").name == "TestBot"
+        paths = reg.paths_for("test-bot")
+        assert paths is not None
+        assert paths.cwd == workspace / "test-bot"
+        assert paths.pip_dir == sub
 
     def test_missing_dir(self, tmp_path):
         reg = AgentRegistry(tmp_path / "nonexistent")
         assert reg.default_agent().id == DEFAULT_AGENT_ID
 
     def test_get_agent_normalizes(self, tmp_path):
-        agents_dir = tmp_path / "agents"
-        agents_dir.mkdir()
-        bot_dir = agents_dir / "my-bot"
-        bot_dir.mkdir()
-        (bot_dir / "persona.md").write_text(
+        workspace = tmp_path / "workspace"
+        sub = workspace / "my-bot" / ".pip"
+        sub.mkdir(parents=True)
+        (sub / "persona.md").write_text(
             "---\nname: MyBot\n---\nHello.\n",
             encoding="utf-8",
         )
-        reg = AgentRegistry(agents_dir)
-        assert reg.get_agent("My-Bot") is not None
+        reg = AgentRegistry(workspace)
+        # v2: agent ids are case-preserving, so case-matching lookups win.
+        # ``get_agent`` still routes through ``normalize_agent_id`` as a
+        # fallback for ids that only needed whitespace/charset cleanup.
+        assert reg.get_agent("my-bot") is not None
+        assert reg.get_agent(" my-bot ") is not None
 
 
 class TestResolveEffectiveConfig:

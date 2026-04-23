@@ -16,23 +16,33 @@ def test_fresh_init(tmp_path: Path) -> None:
     (tmp_path / ".git").mkdir()
     ensure_workspace(tmp_path)
 
+    # v2 layout: pip-boy's state lives at .pip/ (no more nested agents/<id>/).
     assert (tmp_path / ".pip").is_dir()
-    assert (tmp_path / ".pip" / "agents" / "pip-boy").is_dir()
-    assert (tmp_path / ".pip" / "agents" / "pip-boy" / "observations").is_dir()
-    assert (tmp_path / ".pip" / "agents" / "pip-boy" / "users").is_dir()
+    assert (tmp_path / ".pip" / "persona.md").exists()
+    assert (tmp_path / ".pip" / "observations").is_dir()
+    assert (tmp_path / ".pip" / "users").is_dir()
+    assert (tmp_path / ".pip" / "incoming").is_dir()
+    assert (tmp_path / ".pip" / "credentials").is_dir()
     # Phase 4.5: transcripts now live under ~/.claude/projects/ (CC native),
     # so Pip no longer creates its own ``transcripts/`` directory.
-    assert not (tmp_path / ".pip" / "agents" / "pip-boy" / "transcripts").exists()
+    assert not (tmp_path / ".pip" / "transcripts").exists()
 
     assert not (tmp_path / "AGENTS.md").exists()
-
     assert not (tmp_path / ".pip" / "models.json").exists()
     assert not (tmp_path / ".pip" / "keys.json").exists()
-    assert not (tmp_path / ".pip" / "agents" / "pip-boy" / "tasks").exists()
-    assert not (tmp_path / ".pip" / "agents" / "pip-boy" / "team").exists()
+
+    # No flat agents/<id>/ subtree under v2.
+    assert not (tmp_path / ".pip" / "agents").exists()
 
     assert (tmp_path / ".env").exists()
     assert (tmp_path / ".pip" / "owner.md").exists()
+
+    # The registry file is always seeded with the root agent.
+    registry = tmp_path / ".pip" / "agents_registry.json"
+    assert registry.is_file()
+    data = json.loads(registry.read_text(encoding="utf-8"))
+    assert "pip-boy" in data.get("agents", {})
+    assert data["agents"]["pip-boy"]["kind"] == "root"
 
     gitignore = tmp_path / ".gitignore"
     assert gitignore.exists()
@@ -43,7 +53,7 @@ def test_fresh_init(tmp_path: Path) -> None:
     assert manifest_path.exists()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert "version" in manifest
-    assert ".pip/agents/pip-boy/persona.md" in manifest["files"]
+    assert ".pip/persona.md" in manifest["files"]
 
 
 def test_idempotent(tmp_path: Path) -> None:
@@ -132,51 +142,70 @@ def test_no_git_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> Non
     assert (tmp_path / ".pip").is_dir()
 
 
-def test_legacy_flat_persona_preserved_on_upgrade(tmp_path: Path) -> None:
-    """When upgrading from old flat layout, the user's customised pip-boy.md
-    content must end up in agents/pip-boy/persona.md — NOT overwritten by the
-    new scaffold template."""
+def test_v1_flat_layout_migrates_pipboy_to_root(tmp_path: Path) -> None:
+    """``.pip/agents/pip-boy/*`` must bubble up to ``.pip/*`` on upgrade."""
     (tmp_path / ".git").mkdir()
     pip = tmp_path / ".pip"
-    agents = pip / "agents"
-    agents.mkdir(parents=True)
+    old_pipboy = pip / "agents" / "pip-boy"
+    old_pipboy.mkdir(parents=True)
 
     custom_persona = (
         "---\nname: Pip-Boy\nmodel: claude-opus-4-6\n---\n"
         "Custom system prompt from user.\n"
     )
-    (agents / "pip-boy.md").write_text(custom_persona, encoding="utf-8")
-
-    old_manifest = {
-        "version": "0.1.2",
-        "files": {
-            ".pip/agents/pip-boy.md": {
-                "scaffold_hash": "old_hash_not_matching_anything",
-                "installed_version": "0.1.2",
-            },
-        },
-    }
-    pip.mkdir(exist_ok=True)
-    (pip / _MANIFEST_NAME).write_text(
-        json.dumps(old_manifest, indent=2), encoding="utf-8",
+    (old_pipboy / "persona.md").write_text(custom_persona, encoding="utf-8")
+    (old_pipboy / "state.json").write_text(
+        '{"last_reflect_at": 100}', encoding="utf-8",
     )
 
     ensure_workspace(tmp_path)
 
-    persona_path = agents / "pip-boy" / "persona.md"
-    assert persona_path.exists()
-    content = persona_path.read_text(encoding="utf-8")
-    assert "Custom system prompt from user." in content
+    # Content surfaced to .pip/ root.
+    assert (pip / "persona.md").read_text(encoding="utf-8") == custom_persona
+    assert '"last_reflect_at": 100' in (pip / "state.json").read_text(encoding="utf-8")
+    # Legacy directory gone.
+    assert not (pip / "agents").exists()
 
-    manifest = json.loads(
-        (pip / _MANIFEST_NAME).read_text(encoding="utf-8"),
+
+def test_v1_sub_agent_promoted_to_subagent_dir(tmp_path: Path) -> None:
+    """Non-default agents under ``.pip/agents/<id>/`` become
+    ``<workspace>/<id>/.pip/`` sub-agents with a registry entry."""
+    (tmp_path / ".git").mkdir()
+    legacy = tmp_path / ".pip" / "agents" / "stella"
+    legacy.mkdir(parents=True)
+    (legacy / "persona.md").write_text(
+        "---\nname: Stella\n---\nStella persona.\n", encoding="utf-8",
     )
-    assert ".pip/agents/pip-boy/persona.md" in manifest["files"]
-    assert ".pip/agents/pip-boy.md" not in manifest["files"]
+
+    ensure_workspace(tmp_path)
+
+    new_pip = tmp_path / "stella" / ".pip"
+    assert (new_pip / "persona.md").exists()
+    assert "Stella persona." in (new_pip / "persona.md").read_text(encoding="utf-8")
+
+    registry = json.loads(
+        (tmp_path / ".pip" / "agents_registry.json").read_text(encoding="utf-8"),
+    )
+    assert "stella" in registry["agents"]
+    assert registry["agents"]["stella"]["kind"] == "sub"
 
 
-def test_legacy_memory_migrated_to_agents(tmp_path: Path) -> None:
-    """Legacy .pip/memory/<id>/ data should be copied into .pip/agents/<id>/."""
+def test_v1_bindings_moved_up(tmp_path: Path) -> None:
+    """``.pip/agents/bindings.json`` is relocated to ``.pip/bindings.json``."""
+    (tmp_path / ".git").mkdir()
+    agents = tmp_path / ".pip" / "agents"
+    agents.mkdir(parents=True)
+    payload = '{"bindings": []}\n'
+    (agents / "bindings.json").write_text(payload, encoding="utf-8")
+
+    ensure_workspace(tmp_path)
+
+    assert (tmp_path / ".pip" / "bindings.json").read_text(encoding="utf-8") == payload
+    assert not (agents / "bindings.json").exists()
+
+
+def test_legacy_memory_migrated_to_pipboy_root(tmp_path: Path) -> None:
+    """Legacy ``.pip/memory/pip-boy/`` merges up into ``.pip/``."""
     (tmp_path / ".git").mkdir()
     pip = tmp_path / ".pip"
 
@@ -191,31 +220,13 @@ def test_legacy_memory_migrated_to_agents(tmp_path: Path) -> None:
 
     ensure_workspace(tmp_path)
 
-    agent_dir = pip / "agents" / "pip-boy"
-    assert (agent_dir / "state.json").exists()
-    assert '{"last_reflect_at": 100}' in (agent_dir / "state.json").read_text(encoding="utf-8")
-    assert (agent_dir / "observations" / "2026-01-01.jsonl").exists()
-
-
-def test_legacy_users_migrated(tmp_path: Path) -> None:
-    """Legacy top-level ``.pip/users/`` migrates into the default agent."""
-    (tmp_path / ".git").mkdir()
-    pip = tmp_path / ".pip"
-
-    (pip / "users").mkdir(parents=True)
-    (pip / "users" / "alice.md").write_text("# Alice\n", encoding="utf-8")
-
-    ensure_workspace(tmp_path)
-
-    agent_dir = pip / "agents" / "pip-boy"
-    assert (agent_dir / "users" / "alice.md").exists()
-    # Legacy top-level directory is cleaned up.
-    assert not (pip / "users").exists()
+    assert (pip / "state.json").exists()
+    assert '"last_reflect_at": 100' in (pip / "state.json").read_text(encoding="utf-8")
+    assert (pip / "observations" / "2026-01-01.jsonl").exists()
 
 
 def test_legacy_transcripts_directory_is_purged(tmp_path: Path) -> None:
-    """Phase 4.5: any legacy ``.pip/transcripts/`` or ``agents/<id>/transcripts/``
-    directory is deleted on init; contents are no longer carried forward."""
+    """Phase 4.5: any legacy ``.pip/transcripts/`` directory is deleted on init."""
     (tmp_path / ".git").mkdir()
     pip = tmp_path / ".pip"
 
@@ -223,11 +234,6 @@ def test_legacy_transcripts_directory_is_purged(tmp_path: Path) -> None:
     legacy.mkdir(parents=True)
     (legacy / "1700000000.json").write_text("[]", encoding="utf-8")
 
-    per_agent = pip / "agents" / "pip-boy" / "transcripts"
-    per_agent.mkdir(parents=True)
-    (per_agent / "old.json").write_text("[]", encoding="utf-8")
-
     ensure_workspace(tmp_path)
 
     assert not legacy.exists()
-    assert not per_agent.exists()
