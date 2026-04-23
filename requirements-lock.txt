@@ -38,7 +38,7 @@ colorama==0.4.6
     #   qrcode
 cryptography==46.0.7
     # via wecom-aibot-python-sdk
-ddgs==9.13.1
+ddgs==9.14.1
     # via pip-boy (pyproject.toml)
 distro==1.9.0
     # via anthropic
