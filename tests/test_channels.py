@@ -283,6 +283,10 @@ class TestWecomPendingFrames:
                 coro.close()
             except Exception:
                 pass
+            # ``_run_async`` returns ``(ok, result)`` so callers like
+            # ``send()`` can thread a real success bool up to
+            # ``send_with_retry``. The stub simulates a clean send.
+            return True, None
         def _fake_reply_async(frame, text):  # pragma: no cover - unused
             pass
         ch._run_async = _fake_run_async  # type: ignore[attr-defined]
@@ -355,3 +359,29 @@ class TestWecomPendingFrames:
         # Short text -> one chunk; send_with_retry must still release.
         send_with_retry(ch, "peer-x", "short reply", inbound_id="id-X")
         assert "id-X" not in ch._pending_frames
+
+    def test_send_returns_false_when_run_async_fails(self, monkeypatch):
+        """Plan-B Tier-5 maintenance: ``send`` must thread the real
+        success bit from ``_run_async`` so ``send_with_retry`` can
+        actually retry. Before the ``(ok, result)`` tuple refactor,
+        ``send`` returned a constant ``True`` even when the WS
+        coroutine failed (timeout, RuntimeError from a torn-down
+        socket, arbitrary exception), making retries impossible.
+        """
+        ch, _recorded = self._make_channel(monkeypatch)
+        ch._pending_frames["id-Y"] = {"body": {}, "_pip_inbound_id": "id-Y"}
+
+        def _failing_run_async(coro):
+            try:
+                coro.close()
+            except Exception:
+                pass
+            return False, None
+
+        ch._run_async = _failing_run_async  # type: ignore[attr-defined]
+
+        ok = ch.send("peer-y", "never arrives", inbound_id="id-Y")
+        assert ok is False, (
+            "send() must surface ``_run_async`` failure; returning "
+            "True unconditionally would silently defeat send_with_retry."
+        )

@@ -550,8 +550,8 @@ class WecomChannel(Channel):
                     inbound_id or "<none>", to,
                 )
                 return self._send_proactive(to, text)
-            self._run_async(self._reply_async(frame, text))
-            return True
+            ok, _ = self._run_async(self._reply_async(frame, text))
+            return ok
 
     def release_inbound(self, inbound_id: str) -> None:
         if not inbound_id:
@@ -627,8 +627,23 @@ class WecomChannel(Channel):
             media_type: {"media_id": media_id},
         })
 
-    def _run_async(self, coro: Any) -> Any:
-        """Schedule an async coroutine on the WS thread's event loop."""
+    def _run_async(self, coro: Any) -> tuple[bool, Any]:
+        """Schedule an async coroutine on the WS thread's event loop.
+
+        Returns ``(ok, result)``. ``ok`` is ``False`` iff the loop was
+        unavailable, the coroutine timed out, aibot raised a mid-send
+        ``RuntimeError`` (socket torn down), or any other exception
+        escaped. Callers that actually need to gate retries on success
+        (``send()`` → ``send_with_retry``) should test ``ok``; callers
+        that are fire-and-forget from the dispatcher's point of view
+        (media uploads) can still ignore it.
+
+        Historical note: before this split, ``send()`` returned a
+        constant ``True`` regardless of whether the WS send succeeded,
+        so ``send_with_retry`` could never actually retry a transient
+        failure. Threading the success bit back up makes the retry
+        contract real.
+        """
         import asyncio
         import concurrent.futures
 
@@ -638,24 +653,24 @@ class WecomChannel(Channel):
         loop = self._ws_loop
         if loop is None or loop.is_closed():
             log.warning("wecom _run_async: WS loop not available")
-            return None
+            return False, None
         with _profile.span_sync("wecom.run_async_wait", channel="wecom"):
             future = asyncio.run_coroutine_threadsafe(coro, loop)
             try:
-                return future.result(timeout=30)
+                return True, future.result(timeout=30)
             except concurrent.futures.TimeoutError:
                 log.warning("wecom _run_async: timed out")
                 future.cancel()
-                return None
+                return False, None
             except RuntimeError as exc:
                 # aibot raises RuntimeError("WebSocket not connected, ...")
                 # when the socket is torn down mid-send (typical on Ctrl+C
                 # while a reply is still in flight). Log without traceback.
                 log.warning("wecom _run_async: %s", exc)
-                return None
+                return False, None
             except Exception:
                 log.exception("wecom _run_async: coroutine failed")
-                return None
+                return False, None
 
     def send_image(self, to: str, image_data: bytes, caption: str = "", **kw: Any) -> bool:
         if not self._ws_client or not image_data:
@@ -669,8 +684,8 @@ class WecomChannel(Channel):
                         "msgtype": "markdown",
                         "markdown": {"content": caption},
                     })
-            self._run_async(_do())
-            return True
+            ok, _ = self._run_async(_do())
+            return ok
         except Exception as exc:
             log.warning("wecom send_image error: %s", exc)
             return False
@@ -692,8 +707,8 @@ class WecomChannel(Channel):
                         "msgtype": "markdown",
                         "markdown": {"content": caption},
                     })
-            self._run_async(_do())
-            return True
+            ok, _ = self._run_async(_do())
+            return ok
         except Exception as exc:
             log.warning("wecom send_file error: %s", exc)
             return False
@@ -704,17 +719,19 @@ class WecomChannel(Channel):
 
         if not self._ws_client:
             return False
-        ok = True
+        all_ok = True
         for chunk in chunk_message(text, "wecom"):
             try:
-                self._run_async(self._ws_client.send_message(to, {
+                ok, _ = self._run_async(self._ws_client.send_message(to, {
                     "msgtype": "markdown",
                     "markdown": {"content": chunk},
                 }))
+                if not ok:
+                    all_ok = False
             except Exception as exc:
                 log.warning("wecom send_message error: %s", exc)
-                ok = False
-        return ok
+                all_ok = False
+        return all_ok
 
     def close(self) -> None:
         if self._ws_client:
