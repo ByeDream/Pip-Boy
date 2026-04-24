@@ -465,13 +465,20 @@ def _cmd_cron(ctx: CommandContext, _args: str) -> CommandResult:
 
 
 def _persist_agent_md(cfg: AgentConfig, pip_dir: Path | None) -> None:
-    """Write an AgentConfig to ``<pip_dir>/persona.md``."""
+    """Write an AgentConfig to ``<pip_dir>/persona.md``.
+
+    The ``id:`` field is always written so persona.md is self-describing
+    — if the directory is renamed on disk later, the agent still knows
+    its own identity. ``agent_config_from_file`` reads this field and
+    falls back to the directory name only when the frontmatter is
+    silent, which keeps legacy persona.md files loading.
+    """
     if not pip_dir:
         return
     pip_dir.mkdir(parents=True, exist_ok=True)
     md_path = pip_dir / "persona.md"
 
-    lines = ["---", f"name: {cfg.name}"]
+    lines = ["---", f"id: {cfg.id}", f"name: {cfg.name}"]
     if cfg.model:
         lines.append(f"model: {cfg.model}")
     if cfg.dm_scope:
@@ -665,8 +672,12 @@ _VALID_DM_SCOPES = {"main", "per-guild", "per-guild-peer"}
 _CREATE_USAGE = (
     "Usage: /subagent create <label> [--id ID] [--name NAME] "
     "[--model MODEL] [--dm_scope SCOPE]\n"
-    "Defaults: --id normalize(<label>), --name <id>, "
-    "--model <root agent's model>, --dm_scope per-guild.\n"
+    "The positional <label> is the directory name under the workspace "
+    "root. --id is the agent's identity key (registry + session + bind "
+    "target); it defaults to <label> when omitted, so the two stay in "
+    "sync for the simple case. Provide --id to decouple them.\n"
+    "Defaults: --name <id>, --model <root agent's model>, "
+    "--dm_scope per-guild.\n"
     "Valid scopes: main | per-guild | per-guild-peer."
 )
 
@@ -676,7 +687,8 @@ def _parse_create_flags(tokens: list[str]) -> tuple[dict[str, str], str | None]:
 
     Recognised flags: ``--id``, ``--name``, ``--model``, ``--dm_scope``.
     ``--dm-scope`` is accepted as an alias so either spelling works.
-    At most one positional argument (the label) is allowed.
+    At most one positional argument (the label, used as directory name)
+    is allowed.
     """
     allowed = {"--id", "--name", "--model", "--dm_scope", "--dm-scope"}
     opts: dict[str, str] = {}
@@ -706,12 +718,14 @@ def _parse_create_flags(tokens: list[str]) -> tuple[dict[str, str], str | None]:
 def _agent_create(ctx: CommandContext, tail: list[str]) -> CommandResult:
     """``/subagent create [label] [--id …] [--name …] [--model …] [--dm_scope …]``.
 
-    The positional label is convenient when you want id and name to
-    coincide (``/subagent create helper`` → id=helper, name=helper).
-    Any flag overrides its corresponding default, so
-    ``/subagent create --id stella --name "Stella Chen"`` or
-    ``/subagent create "Project Stella" --model claude-sonnet-4-5``
-    are both valid.
+    The positional ``<label>`` becomes the **directory name** under the
+    workspace root. ``--id`` sets the **agent id** (registry key / bind
+    target / session key). When ``--id`` is omitted, id defaults to the
+    dirname so ``/subagent create helper`` gives you a tidy
+    ``helper/.pip/`` + id ``helper``. Pass ``--id`` when you want them
+    decoupled — e.g. ``/subagent create Foo --id alice`` puts alice's
+    ``.pip/`` inside ``foo/`` (dirnames are lowercased). After that
+    both ``/bind foo`` and ``/bind alice`` route to the same agent.
     """
     opts, err = _parse_create_flags(tail)
     if err is not None:
@@ -720,28 +734,56 @@ def _agent_create(ctx: CommandContext, tail: list[str]) -> CommandResult:
         return CommandResult(handled=True, response=_CREATE_USAGE)
 
     label = opts.get("__label__", "")
-    raw_id = opts.get("--id") or label
-    if not raw_id.strip():
+    raw_id = opts.get("--id")
+    if not label.strip() and not (raw_id and raw_id.strip()):
         return CommandResult(
             handled=True,
             response=(
-                "Cannot derive an id — provide a positional label "
-                f"or --id.\n{_CREATE_USAGE}"
+                "Cannot create agent — provide a positional label "
+                f"(used as dirname) and/or --id.\n{_CREATE_USAGE}"
             ),
         )
-    agent_id = normalize_agent_id(raw_id)
+
+    dirname = normalize_agent_id(label) if label.strip() else normalize_agent_id(raw_id or "")
+    agent_id = normalize_agent_id(raw_id) if raw_id and raw_id.strip() else dirname
+
     default_id = ctx.registry.default_agent().id
-    if agent_id == default_id:
+    if agent_id == default_id or dirname == default_id:
         return CommandResult(
             handled=True,
             response=(
-                f"Cannot create '{agent_id}': reserved for the root agent."
+                f"Cannot use '{default_id}': reserved for the root agent."
             ),
         )
     if ctx.registry.get_agent(agent_id) is not None:
         return CommandResult(
-            handled=True, response=f"Agent '{agent_id}' already exists.",
+            handled=True, response=f"Agent id '{agent_id}' already exists.",
         )
+    # Dirname uniqueness: two agents can't share a directory on disk.
+    if ctx.registry.get_by_dirname(dirname) not in (None, ctx.registry.default_agent()):
+        existing = ctx.registry.get_by_dirname(dirname)
+        return CommandResult(
+            handled=True,
+            response=(
+                f"Directory '{dirname}/' is already claimed by agent "
+                f"'{existing.id}'. Pick a different label or archive the "
+                "existing agent first."
+            ),
+        )
+    # Also refuse if the directory exists on disk with a .pip/ we
+    # haven't registered — that's a collision we can't silently
+    # overwrite.
+    if ctx.registry.workspace_root is not None:
+        candidate = ctx.registry.workspace_root / dirname / ".pip"
+        if candidate.exists():
+            return CommandResult(
+                handled=True,
+                response=(
+                    f"Directory '{dirname}/.pip' already exists on disk "
+                    "but isn't registered. Remove it manually or pick a "
+                    "different label."
+                ),
+            )
 
     display_name = opts.get("--name") or agent_id
 
@@ -761,6 +803,7 @@ def _agent_create(ctx: CommandContext, tail: list[str]) -> CommandResult:
     cfg, err = _create_agent_on_disk(
         ctx.registry,
         agent_id,
+        dirname=dirname,
         name=display_name,
         model=model,
         dm_scope=dm_scope,
@@ -772,15 +815,19 @@ def _agent_create(ctx: CommandContext, tail: list[str]) -> CommandResult:
         )
     paths = ctx.registry.paths_for(cfg.id)
     loc = f" at {paths.cwd}" if paths is not None else ""
-    detail = f"  id={agent_id}  name={display_name}"
+    detail = f"  id={agent_id}  dir={dirname}/  name={display_name}"
     if model:
         detail += f"  model={model}"
     detail += f"  dm_scope={dm_scope}"
+    bind_hint = (
+        f"Use `/bind {agent_id}` (or `/bind {dirname}`) to route this chat to it."
+        if agent_id != dirname
+        else f"Use `/bind {agent_id}` to route this chat to it."
+    )
     return CommandResult(
         handled=True,
         response=(
-            f"Created agent{loc}.\n{detail}\n"
-            f"Use `/bind {agent_id}` to route this chat to it."
+            f"Created agent{loc}.\n{detail}\n{bind_hint}"
         ),
     )
 
@@ -833,11 +880,17 @@ def _create_agent_on_disk(
     registry: AgentRegistry,
     agent_id: str,
     *,
+    dirname: str = "",
     name: str = "",
     model: str = "",
     dm_scope: str = "",
 ) -> tuple[AgentConfig | None, str | None]:
     """Materialise a new sub-agent directory + registry entry.
+
+    ``dirname`` is the workspace-root-relative directory that owns the
+    agent's ``.pip/``. It can differ from ``agent_id`` — in that case
+    the registry records the mapping and the agent is reachable by
+    either key. Defaults to ``agent_id`` when empty.
 
     The new agent inherits the default (``pip-boy``) agent's **full**
     persona body — Core Philosophy, System Communication, Tone,
@@ -878,7 +931,7 @@ def _create_agent_on_disk(
         dm_scope=dm_scope,
     )
 
-    registry.register_agent(cfg)
+    registry.register_agent(cfg, dirname=dirname or agent_id)
     new_paths = registry.paths_for(cfg.id)
     if new_paths is None:
         return None, f"Failed to allocate paths for agent '{agent_id}'."
@@ -1020,12 +1073,22 @@ def _cmd_bind(ctx: CommandContext, args: str) -> CommandResult:
     delete/reset) still lives under ``/subagent`` and stays pip-boy
     only.
 
+    Input is run through :func:`normalize_agent_id` so the user can
+    type the directory name (``/bind helper``), a mixed-case variant
+    (``/bind Helper``), or even a quoted multi-word label
+    (``/bind "project stella"`` → ``project-stella``). Quoted args
+    are parsed via ``shlex`` to honour embedded spaces.
+
     ``/bind pip-boy`` is rejected with a redirect to ``/unbind``, so
     "on pip-boy" has exactly one canonical representation (no binding
     row) rather than two (absent row vs explicit row pointing at
     root).
     """
-    tail = args.split()
+    try:
+        tail = shlex.split(args) if args.strip() else []
+    except ValueError as exc:
+        return CommandResult(handled=True, response=f"Parse error: {exc}")
+
     if not tail:
         ids = [
             cfg.id
@@ -1040,10 +1103,18 @@ def _cmd_bind(ctx: CommandContext, args: str) -> CommandResult:
                 f"Known sub-agents: {known}"
             ),
         )
+    if len(tail) > 1:
+        return CommandResult(
+            handled=True,
+            response=(
+                "Usage: /bind <id>  (one argument; quote multi-word "
+                "labels, e.g. `/bind \"project stella\"`)"
+            ),
+        )
 
-    agent_id = normalize_agent_id(tail[0])
+    normalized = normalize_agent_id(tail[0])
     default_id = ctx.registry.default_agent().id
-    if agent_id == default_id:
+    if normalized == default_id:
         return CommandResult(
             handled=True,
             response=(
@@ -1052,7 +1123,17 @@ def _cmd_bind(ctx: CommandContext, args: str) -> CommandResult:
                 "Use `/unbind` to clear the current binding instead."
             ),
         )
-    agent = ctx.registry.get_agent(agent_id)
+    # Lookup order: agent_id first (registry key), dirname as fallback.
+    # Both resolution paths use the normalized form, so mixed-case
+    # input (``/bind Foo``) resolves the same as the canonical form.
+    agent = ctx.registry.get_agent(normalized)
+    matched_via = "id"
+    if agent is None:
+        agent = ctx.registry.get_by_dirname(normalized)
+        if agent is not None and agent.id != default_id:
+            matched_via = "dir"
+        else:
+            agent = None
     if agent is None:
         known = ", ".join(
             sorted(
@@ -1064,11 +1145,17 @@ def _cmd_bind(ctx: CommandContext, args: str) -> CommandResult:
         return CommandResult(
             handled=True,
             response=(
-                f"Unknown agent '{agent_id}'.\n"
+                f"Unknown agent '{normalized}'.\n"
                 f"Known sub-agents: {known}\n"
-                f"Use `/subagent create {agent_id}` to make one first "
+                f"Use `/subagent create {normalized}` to make one first "
                 "(from pip-boy)."
             ),
+        )
+    agent_id = agent.id
+    if matched_via == "dir":
+        log.debug(
+            "/bind matched %r via dirname; routing to agent %r",
+            normalized, agent_id,
         )
 
     inbound = ctx.inbound

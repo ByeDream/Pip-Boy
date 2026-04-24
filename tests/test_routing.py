@@ -95,6 +95,7 @@ class TestAgentConfigFromFile:
         md = tmp_path / "test-bot.md"
         md.write_text(
             "---\n"
+            "id: test-bot\n"
             "name: TestBot\n"
             "model: gpt-4\n"
             "dm_scope: main\n"
@@ -109,17 +110,31 @@ class TestAgentConfigFromFile:
         assert cfg.dm_scope == "main"
         assert cfg.system_body == "Be concise."
 
-    def test_no_frontmatter(self, tmp_path):
+    def test_default_id_fallback_when_frontmatter_omits_it(self, tmp_path):
+        """Callers that know the id out-of-band can pass ``default_id``."""
         md = tmp_path / "plain.md"
-        md.write_text("Just a plain body.", encoding="utf-8")
-        cfg = agent_config_from_file(md)
+        md.write_text(
+            "---\nname: Plain\n---\nJust a plain body.\n",
+            encoding="utf-8",
+        )
+        cfg = agent_config_from_file(md, default_id="plain")
         assert cfg.id == "plain"
-        assert cfg.system_body == "Just a plain body."
+
+    def test_raises_without_id_or_default(self, tmp_path):
+        """No ``id:`` and no ``default_id`` is a hard error — we don't
+        silently guess an id from the filename."""
+        import pytest
+
+        md = tmp_path / "plain.md"
+        md.write_text("Just a body, no frontmatter.", encoding="utf-8")
+        with pytest.raises(ValueError, match="missing 'id:'"):
+            agent_config_from_file(md)
 
     def test_ignores_unknown_frontmatter_keys(self, tmp_path):
         md = tmp_path / "legacy.md"
         md.write_text(
             "---\n"
+            "id: legacy\n"
             "name: Legacy\n"
             "model: gpt-4\n"
             "max_tokens: 2048\n"
@@ -274,13 +289,41 @@ class TestAgentRegistry:
         assert reg.default_agent().id == DEFAULT_AGENT_ID
         assert len(reg.list_agents()) == 1
 
+    def _scaffold(
+        self, workspace, dirname, *, agent_id=None, name="", extra_fm=""
+    ):
+        """Scaffold a registered sub-agent on disk.
+
+        Writes ``<workspace>/<dirname>/.pip/persona.md`` **and** a
+        registry entry — the registry is now the source of truth, so
+        both are required for the agent to be discovered on load.
+        """
+        import json
+
+        aid = agent_id or dirname
+        sub = workspace / dirname / ".pip"
+        sub.mkdir(parents=True)
+        fm = f"id: {aid}\nname: {name or aid}\n{extra_fm}".rstrip()
+        (sub / "persona.md").write_text(
+            f"---\n{fm}\n---\nBody.\n", encoding="utf-8",
+        )
+        reg_dir = workspace / ".pip"
+        reg_dir.mkdir(parents=True, exist_ok=True)
+        reg_path = reg_dir / "agents_registry.json"
+        if reg_path.is_file():
+            data = json.loads(reg_path.read_text(encoding="utf-8"))
+        else:
+            data = {"version": 1, "agents": {}}
+        data["agents"][aid] = {"kind": "sub", "cwd": dirname}
+        reg_path.write_text(
+            json.dumps(data), encoding="utf-8",
+        )
+        return sub
+
     def test_load_from_dir(self, tmp_path):
         workspace = tmp_path / "workspace"
-        sub = workspace / "test-bot" / ".pip"
-        sub.mkdir(parents=True)
-        (sub / "persona.md").write_text(
-            "---\nname: TestBot\nmodel: gpt-4\n---\nBody.\n",
-            encoding="utf-8",
+        sub = self._scaffold(
+            workspace, "test-bot", name="TestBot", extra_fm="model: gpt-4\n",
         )
         reg = AgentRegistry(workspace)
         assert reg.get_agent("test-bot") is not None
@@ -290,24 +333,133 @@ class TestAgentRegistry:
         assert paths.cwd == workspace / "test-bot"
         assert paths.pip_dir == sub
 
+    def test_unregistered_directory_is_ignored(self, tmp_path):
+        """A ``.pip/persona.md`` on disk without a registry entry is
+        invisible — the registry is authoritative."""
+        workspace = tmp_path / "workspace"
+        sub = workspace / "stray-bot" / ".pip"
+        sub.mkdir(parents=True)
+        (sub / "persona.md").write_text(
+            "---\nid: stray-bot\nname: Stray\n---\nBody.\n",
+            encoding="utf-8",
+        )
+        reg = AgentRegistry(workspace)
+        assert reg.get_agent("stray-bot") is None
+
     def test_missing_dir(self, tmp_path):
         reg = AgentRegistry(tmp_path / "nonexistent")
         assert reg.default_agent().id == DEFAULT_AGENT_ID
 
     def test_get_agent_normalizes(self, tmp_path):
         workspace = tmp_path / "workspace"
-        sub = workspace / "my-bot" / ".pip"
-        sub.mkdir(parents=True)
-        (sub / "persona.md").write_text(
-            "---\nname: MyBot\n---\nHello.\n",
-            encoding="utf-8",
-        )
+        self._scaffold(workspace, "my-bot", name="MyBot")
         reg = AgentRegistry(workspace)
-        # v2: agent ids are case-preserving, so case-matching lookups win.
-        # ``get_agent`` still routes through ``normalize_agent_id`` as a
-        # fallback for ids that only needed whitespace/charset cleanup.
+        # get_agent routes whitespace-noisy input through
+        # normalize_agent_id before lookup.
         assert reg.get_agent("my-bot") is not None
         assert reg.get_agent(" my-bot ") is not None
+
+
+class TestDirnameDecoupling:
+    """agent_id and dirname are distinct dimensions (see /subagent create --id)."""
+
+    def _write_persona(self, workspace, dirname, *, agent_id, name):
+        """Helper: scaffold ``<workspace>/<dirname>/.pip/persona.md``."""
+        pip = workspace / dirname / ".pip"
+        pip.mkdir(parents=True)
+        (pip / "persona.md").write_text(
+            f"---\nid: {agent_id}\nname: {name}\n---\nBody.\n",
+            encoding="utf-8",
+        )
+        return pip
+
+    def _write_registry(self, workspace, agents: dict):
+        """Helper: scaffold ``<workspace>/.pip/agents_registry.json``."""
+        import json
+
+        root_pip = workspace / ".pip"
+        root_pip.mkdir(parents=True, exist_ok=True)
+        (root_pip / "agents_registry.json").write_text(
+            json.dumps({"version": 1, "agents": agents}),
+            encoding="utf-8",
+        )
+
+    def test_register_agent_with_explicit_dirname(self, tmp_path):
+        reg = AgentRegistry(tmp_path)
+        cfg = AgentConfig(id="alice", name="Alice")
+        reg.register_agent(cfg, dirname="foo")
+        paths = reg.paths_for("alice")
+        assert paths is not None
+        assert paths.cwd == tmp_path / "foo"
+        assert paths.pip_dir == tmp_path / "foo" / ".pip"
+        assert reg.dirname_for("alice") == "foo"
+
+    def test_register_agent_defaults_dirname_to_id(self, tmp_path):
+        reg = AgentRegistry(tmp_path)
+        cfg = AgentConfig(id="bob", name="Bob")
+        reg.register_agent(cfg)
+        paths = reg.paths_for("bob")
+        assert paths is not None
+        assert paths.cwd == tmp_path / "bob"
+        assert reg.dirname_for("bob") == "bob"
+
+    def test_get_by_dirname_finds_decoupled_agent(self, tmp_path):
+        reg = AgentRegistry(tmp_path)
+        cfg = AgentConfig(id="alice", name="Alice")
+        reg.register_agent(cfg, dirname="foo")
+
+        found = reg.get_by_dirname("foo")
+        assert found is not None
+        assert found.id == "alice"
+        # normalization: mixed-case dirname input resolves the same.
+        assert reg.get_by_dirname("FOO") is not None
+        assert reg.get_by_dirname("FOO").id == "alice"
+        # get_agent still works by id as well.
+        assert reg.get_agent("alice") is not None
+
+    def test_get_by_dirname_unknown(self, tmp_path):
+        reg = AgentRegistry(tmp_path)
+        reg.register_agent(AgentConfig(id="alice"), dirname="foo")
+        assert reg.get_by_dirname("ghost") is None
+
+    def test_load_workspace_honors_registry_cwd(self, tmp_path):
+        workspace = tmp_path / "ws"
+        # Directory on disk is ``foo/`` but the agent's id is ``alice``.
+        self._write_persona(workspace, "foo", agent_id="alice", name="Alice")
+        self._write_registry(workspace, {"alice": {"kind": "sub", "cwd": "foo"}})
+
+        reg = AgentRegistry(workspace)
+        assert reg.get_agent("alice") is not None
+        assert reg.get_agent("foo") is None  # not an id, only a dirname
+        assert reg.get_by_dirname("foo") is not None
+        assert reg.get_by_dirname("foo").id == "alice"
+        paths = reg.paths_for("alice")
+        assert paths.cwd == workspace / "foo"
+
+    def test_dirname_survives_save_and_reload(self, tmp_path):
+        """Round-trip: create decoupled agent, save registry, reload — mapping preserved."""
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        # First session: create + persist.
+        self._write_persona(workspace, "foo", agent_id="alice", name="Alice")
+        reg1 = AgentRegistry(workspace)
+        reg1.register_agent(AgentConfig(id="alice", name="Alice"), dirname="foo")
+        reg1.save_registry()
+
+        # Second session: reload from disk.
+        reg2 = AgentRegistry(workspace)
+        assert reg2.get_agent("alice") is not None
+        assert reg2.get_by_dirname("foo") is not None
+        assert reg2.get_by_dirname("foo").id == "alice"
+
+    def test_root_agent_dirname_is_dot(self, tmp_path):
+        workspace = tmp_path / "ws"
+        (workspace / ".pip").mkdir(parents=True)
+        (workspace / ".pip" / "persona.md").write_text(
+            "---\nname: Pip-Boy\n---\nRoot.\n", encoding="utf-8",
+        )
+        reg = AgentRegistry(workspace)
+        assert reg.dirname_for(DEFAULT_AGENT_ID) == "."
 
 
 class TestResolveEffectiveConfig:

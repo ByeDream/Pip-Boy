@@ -619,6 +619,70 @@ class TestSubagentCommand:
         assert cfg is not None
         assert cfg.name == "Emma"
 
+    def test_create_decouples_dirname_from_id(self, tmp_path: Path):
+        """``/subagent create Foo --id alice`` puts alice's ``.pip/``
+        into ``foo/`` (dirname is lowercased) while the agent's id
+        remains ``alice``. This is the whole point of the
+        dirname-vs-id split."""
+        ctx = _build_ctx(
+            _cli_inbound("/subagent create Foo --id alice --name Alice"),
+            tmp_path,
+        )
+        result = dispatch_command(ctx)
+        assert result.handled, result.response
+
+        cfg = ctx.registry.get_agent("alice")
+        assert cfg is not None
+        assert cfg.id == "alice"
+
+        paths = ctx.registry.paths_for("alice")
+        assert paths is not None
+        # Dirname is normalized (lowercased) but distinct from id.
+        assert paths.cwd.name == "foo"
+        assert paths.pip_dir == paths.cwd / ".pip"
+        assert (paths.pip_dir / "persona.md").is_file()
+
+        # And the dirname-indexed lookup resolves to the same agent.
+        via_dir = ctx.registry.get_by_dirname("foo")
+        assert via_dir is not None
+        assert via_dir.id == "alice"
+
+        # persona.md frontmatter carries ``id:`` so the mapping
+        # survives ``agents_registry.json`` being nuked.
+        persona = (paths.pip_dir / "persona.md").read_text(encoding="utf-8")
+        assert "id: alice" in persona
+
+    def test_create_rejects_dirname_collision(self, tmp_path: Path):
+        """Two agents can't share a directory, even with different ids."""
+        ctx1 = _build_ctx(
+            _cli_inbound("/subagent create Foo --id alice"), tmp_path,
+        )
+        assert dispatch_command(ctx1).handled
+
+        ctx2 = _build_ctx(
+            _cli_inbound("/subagent create foo --id bob"), tmp_path,
+        )
+        result = dispatch_command(ctx2)
+        assert result.handled
+        msg = (result.response or "").lower()
+        assert "foo" in msg
+        # Collision message should point at the offending directory or
+        # existing claimant — either phrasing is acceptable.
+        assert "already" in msg
+        # Second agent must not have been registered.
+        assert ctx2.registry.get_agent("bob") is None
+
+    def test_create_persists_id_in_frontmatter(self, tmp_path: Path):
+        """Even when dirname == id, persona.md records ``id:`` so the
+        agent is self-describing if it's later moved/renamed."""
+        ctx = _build_ctx(_cli_inbound("/subagent create helper"), tmp_path)
+        result = dispatch_command(ctx)
+        assert result.handled, result.response
+
+        paths = ctx.registry.paths_for("helper")
+        persona = (paths.pip_dir / "persona.md").read_text(encoding="utf-8")
+        assert "id: helper" in persona
+
     def test_create_inherits_pip_boy_guidance(self, tmp_path: Path):
         """New sub-agents must ship with the full operational persona
         (Identity Recognition, Tool Calling, Memory, etc.), not just
@@ -937,6 +1001,102 @@ class TestBindCommand:
         assert len(bindings) == 1
         assert bindings[0].agent_id == "helper"
         assert bind_ctx.bindings_path.is_file()
+
+    def test_bind_normalizes_mixed_case_input(self, tmp_path: Path):
+        """Agent ids are lowercased on disk, but users may remember
+        their agent by how they originally typed it. ``/bind Helper``
+        must resolve to the ``helper`` directory."""
+        create_ctx = _build_ctx(
+            _cli_inbound("/subagent create helper"), tmp_path,
+        )
+        dispatch_command(create_ctx)
+
+        result = dispatch_command(CommandContext(
+            inbound=_cli_inbound("/bind Helper"),
+            registry=create_ctx.registry,
+            bindings=create_ctx.bindings,
+            bindings_path=create_ctx.bindings_path,
+            memory_store=None,
+            scheduler=None,
+        ))
+        assert result.handled, result.response
+        assert "Bound to" in (result.response or "")
+        assert [b.agent_id for b in create_ctx.bindings.list_all()] == ["helper"]
+
+    def test_bind_normalizes_quoted_multi_word_label(self, tmp_path: Path):
+        """Quoted multi-word labels are parsed via shlex and folded to
+        the same hyphenated id the registry created from the original
+        ``/subagent create``."""
+        create_ctx = _build_ctx(
+            _cli_inbound('/subagent create "Project Stella"'), tmp_path,
+        )
+        create_result = dispatch_command(create_ctx)
+        assert create_result.handled, create_result.response
+        assert create_ctx.registry.get_agent("project-stella") is not None
+
+        result = dispatch_command(CommandContext(
+            inbound=_cli_inbound('/bind "Project Stella"'),
+            registry=create_ctx.registry,
+            bindings=create_ctx.bindings,
+            bindings_path=create_ctx.bindings_path,
+            memory_store=None,
+            scheduler=None,
+        ))
+        assert result.handled, result.response
+        assert [b.agent_id for b in create_ctx.bindings.list_all()] == ["project-stella"]
+
+    def test_bind_rejects_extra_positionals(self, tmp_path: Path):
+        """Two bare words are a user mistake (unquoted multi-word
+        label); refuse rather than silently binding to the first
+        token."""
+        ctx = _build_ctx(_cli_inbound("/bind Project Stella"), tmp_path)
+        result = dispatch_command(ctx)
+        assert result.handled
+        body = result.response or ""
+        assert "one argument" in body.lower()
+        assert ctx.bindings.list_all() == []
+
+    def test_bind_by_dirname_when_decoupled_from_id(self, tmp_path: Path):
+        """The key post-condition of the dirname/id decoupling: both
+        ``/bind <id>`` and ``/bind <dirname>`` route to the same
+        agent. Users don't have to remember which token was the
+        "canonical" one."""
+        from pip_agent.routing import BindingTable
+
+        create_ctx = _build_ctx(
+            _cli_inbound("/subagent create Foo --id alice --name Alice"),
+            tmp_path,
+        )
+        create_result = dispatch_command(create_ctx)
+        assert create_result.handled, create_result.response
+        assert create_ctx.registry.get_agent("alice") is not None
+
+        def _bind(token: str) -> tuple[BindingTable, str]:
+            """Run /bind on a fresh, empty BindingTable and return
+            (table, response) so each invocation is independent."""
+            table = BindingTable()
+            result = dispatch_command(CommandContext(
+                inbound=_cli_inbound(f"/bind {token}"),
+                registry=create_ctx.registry,
+                bindings=table,
+                bindings_path=create_ctx.bindings_path,
+                memory_store=None,
+                scheduler=None,
+            ))
+            assert result.handled, result.response
+            return table, result.response or ""
+
+        # Path 1: bind by agent_id.
+        table, _ = _bind("alice")
+        assert [b.agent_id for b in table.list_all()] == ["alice"]
+
+        # Path 2: bind by dirname — same agent resolved.
+        table, _ = _bind("foo")
+        assert [b.agent_id for b in table.list_all()] == ["alice"]
+
+        # Mixed-case dirname input should also resolve.
+        table, _ = _bind("Foo")
+        assert [b.agent_id for b in table.list_all()] == ["alice"]
 
     def test_bind_works_from_sub_agent_direct_sibling_hop(
         self, tmp_path: Path,

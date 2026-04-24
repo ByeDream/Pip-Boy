@@ -210,12 +210,23 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
 
 
 def agent_config_from_file(path: Path, *, default_id: str = "") -> AgentConfig:
+    """Load an AgentConfig from a persona.md.
+
+    The agent id comes from the YAML ``id:`` frontmatter. Callers that
+    know the id out-of-band (e.g. loading via the registry) can pass
+    ``default_id`` as a fallback for the rare case where frontmatter
+    was hand-edited and lost the field. If neither source yields an
+    id, ``ValueError`` is raised — we'd rather fail loudly than
+    invent one.
+    """
     text = path.read_text(encoding="utf-8")
     meta, body = _parse_frontmatter(text)
-    fallback = default_id
-    if not fallback:
-        fallback = path.parent.name if path.name == "persona.md" else path.stem
-    raw_id = meta.get("id") or fallback
+    raw_id = meta.get("id") or default_id
+    if not raw_id:
+        raise ValueError(
+            f"persona.md at {path} is missing 'id:' in frontmatter "
+            "and no default_id was supplied",
+        )
     return AgentConfig(
         id=normalize_agent_id(str(raw_id)),
         name=meta.get("name", ""),
@@ -400,21 +411,19 @@ def _iso_now() -> str:
 
 
 class AgentRegistry:
-    """Directory + registry-backed catalog of all agents in the workspace.
+    """Registry-backed catalog of all agents in the workspace.
 
-    Two sources of truth, merged on load:
+    ``<workspace>/.pip/agents_registry.json`` is the source of truth
+    for which agents exist. Each entry records ``kind`` (root vs
+    sub), ``cwd`` (directory name relative to workspace root — may
+    differ from the agent id), ``created_at``, and ``description``.
 
-    * Disk discovery — every directory ``<workspace>/<id>/.pip/persona.md``
-      plus the root ``<workspace>/.pip/persona.md`` is treated as an
-      agent. Discovery is authoritative for "does this agent still
-      exist".
-    * Registry file (``<workspace>/.pip/agents_registry.json``) — carries
-      provenance (``created_at``, ``description``, ``kind``) that the
-      filesystem can't express on its own.
-
-    When the two disagree, discovery wins for existence and the registry
-    is treated as best-effort metadata. Missing registry entries are
-    back-filled on load so future queries are consistent.
+    On load, each registry entry's ``<cwd>/.pip/persona.md`` is read
+    to build the in-memory ``AgentConfig``. The root agent
+    (``<workspace>/.pip/persona.md``) is loaded unconditionally so a
+    fresh workspace with no registry yet can still bootstrap.
+    ``.pip/persona.md`` directories without a registry entry are
+    ignored — registering an agent is explicit (``/subagent create``).
     """
 
     def __init__(
@@ -491,13 +500,27 @@ class AgentRegistry:
     # Registry persistence
     # ------------------------------------------------------------------
 
-    def _build_paths(self, agent_id: str, kind: str) -> AgentPaths:
+    def _build_paths(
+        self, agent_id: str, kind: str, dirname: str = "",
+    ) -> AgentPaths:
+        """Resolve filesystem paths for an agent.
+
+        ``dirname`` is the directory-name component relative to the
+        workspace root, and is tracked separately from ``agent_id`` so
+        the two can diverge (e.g. agent id ``alice`` living in
+        ``<workspace>/foo/``). Omitting ``dirname`` reads the
+        previously-recorded ``cwd`` from metadata — used by
+        ``register_agent`` when a caller just wants to update an
+        already-known agent's config.
+        """
         assert self._workspace_root is not None
         if kind == AGENT_KIND_ROOT:
             cwd = self._workspace_root
             pip_dir = self._workspace_root / PIP_DIRNAME
         else:
-            cwd = self._workspace_root / agent_id
+            if not dirname:
+                dirname = self._metadata.get(agent_id, {}).get("cwd") or agent_id
+            cwd = self._workspace_root / dirname
             pip_dir = cwd / PIP_DIRNAME
         return AgentPaths(
             agent_id=agent_id,
@@ -508,8 +531,56 @@ class AgentRegistry:
             description=self._metadata.get(agent_id, {}).get("description", ""),
         )
 
+    def dirname_for(self, agent_id: str) -> str:
+        """Return the directory-name component for ``agent_id``.
+
+        For the root agent this is ``"."`` (the workspace root itself).
+        For sub-agents it's the ``cwd`` recorded in metadata, which may
+        differ from the agent id. Returns ``""`` if the agent is
+        unknown.
+        """
+        aid = agent_id if agent_id in self._metadata else normalize_agent_id(agent_id)
+        meta = self._metadata.get(aid)
+        if not meta:
+            return ""
+        if meta.get("kind") == AGENT_KIND_ROOT:
+            return "."
+        return str(meta.get("cwd") or aid)
+
+    def get_by_dirname(self, dirname: str) -> AgentConfig | None:
+        """Look up an agent by its directory name (``cwd`` metadata).
+
+        Accepts either a raw filesystem name (``"Foo"``) or an already-
+        normalized one (``"foo"``). Root-level ``"."`` / ``""`` also
+        route to the root agent so ``/bind`` by dir works uniformly.
+        """
+        norm = normalize_agent_id(dirname) if dirname.strip() else ""
+        if not norm or norm == DEFAULT_AGENT_ID:
+            # An empty dirname or one that normalizes to the root id
+            # should still route somewhere sensible — caller can reject
+            # it if that's wrong for their use case.
+            return self._agents.get(DEFAULT_AGENT_ID)
+        for aid, meta in self._metadata.items():
+            if meta.get("kind") == AGENT_KIND_ROOT:
+                continue
+            if str(meta.get("cwd") or aid) == norm:
+                return self._agents.get(aid)
+        return None
+
     def _load_workspace(self, root: Path) -> None:
-        """Discover agents from disk and merge registry metadata."""
+        """Discover agents from disk using the registry as source of truth.
+
+        ``agents_registry.json`` is authoritative: every sub-agent
+        must have an entry whose ``cwd`` points at a real directory
+        with ``<dir>/.pip/persona.md``. A ``.pip/persona.md`` on disk
+        without a registry entry is ignored — the registry is what
+        makes an agent real, not the presence of files.
+
+        The root agent is a fixed point: it's always loaded from
+        ``<workspace>/.pip/persona.md`` regardless of registry state,
+        because otherwise we'd have no way to bootstrap a fresh
+        workspace.
+        """
         registry_data = self._read_registry(root)
         registered = registry_data.get("agents", {}) if isinstance(registry_data, dict) else {}
         if not isinstance(registered, dict):
@@ -521,38 +592,36 @@ class AgentRegistry:
                 root_persona,
                 agent_id=DEFAULT_AGENT_ID,
                 kind=AGENT_KIND_ROOT,
+                dirname=".",
                 meta=registered.get(DEFAULT_AGENT_ID) or {},
             )
 
-        for child in sorted(root.iterdir()) if root.is_dir() else []:
-            if not child.is_dir():
-                continue
-            if child.name in _RESERVED_IDS:
-                continue
-            if not is_valid_agent_id(child.name):
-                continue
-            persona = child / PIP_DIRNAME / "persona.md"
-            if not persona.is_file():
-                continue
-            self._register_from_persona(
-                persona,
-                agent_id=child.name,
-                kind=AGENT_KIND_SUB,
-                meta=registered.get(child.name) or {},
-            )
-
         for aid, meta in registered.items():
-            if aid in self._agents:
+            if aid == DEFAULT_AGENT_ID:
                 continue
             if not isinstance(meta, dict):
                 continue
-            kind = meta.get("kind", AGENT_KIND_SUB)
-            log.info(
-                "Agent %r listed in registry but persona.md is missing; "
-                "keeping metadata as stale entry", aid,
+            if meta.get("kind") == AGENT_KIND_ROOT:
+                continue
+            dirname = str(meta.get("cwd") or aid)
+            agent_dir = root / dirname
+            persona = agent_dir / PIP_DIRNAME / "persona.md"
+            if not persona.is_file():
+                log.info(
+                    "Agent %r listed in registry (cwd=%r) but persona.md "
+                    "is missing; keeping metadata as stale entry",
+                    aid, dirname,
+                )
+                self._metadata[aid] = dict(meta)
+                self._metadata[aid].setdefault("kind", AGENT_KIND_SUB)
+                continue
+            self._register_from_persona(
+                persona,
+                agent_id=aid,
+                kind=AGENT_KIND_SUB,
+                dirname=dirname,
+                meta=meta,
             )
-            self._metadata[aid] = dict(meta)
-            self._metadata[aid].setdefault("kind", kind)
 
     def _register_from_persona(
         self,
@@ -560,8 +629,18 @@ class AgentRegistry:
         *,
         agent_id: str,
         kind: str,
+        dirname: str,
         meta: dict[str, Any],
     ) -> None:
+        """Load one agent from disk into the in-memory catalog.
+
+        ``agent_id`` is the identity key (registry key). ``dirname``
+        is the directory component under ``workspace_root`` (or ``.``
+        for root). Persona frontmatter may override ``agent_id`` via
+        an explicit ``id:`` field — this is the self-describing path
+        that keeps the agent's identity consistent if its directory
+        is ever renamed on disk.
+        """
         try:
             cfg = agent_config_from_file(persona_path, default_id=agent_id)
         except Exception as exc:  # noqa: BLE001
@@ -569,18 +648,20 @@ class AgentRegistry:
             return
         if cfg.id != agent_id:
             log.debug(
-                "persona.md id=%r overrides directory name %r",
+                "persona.md id=%r overrides registry/dirname key %r",
                 cfg.id, agent_id,
             )
             agent_id = cfg.id
         self._agents[agent_id] = cfg
         self._metadata[agent_id] = {
             "kind": kind,
-            "cwd": "." if kind == AGENT_KIND_ROOT else agent_id,
+            "cwd": "." if kind == AGENT_KIND_ROOT else dirname,
             "created_at": meta.get("created_at") or _iso_now(),
             "description": meta.get("description", ""),
         }
-        self._paths[agent_id] = self._build_paths(agent_id, kind)
+        self._paths[agent_id] = self._build_paths(
+            agent_id, kind, dirname=dirname,
+        )
 
     @staticmethod
     def _read_registry(root: Path) -> dict[str, Any]:
@@ -626,19 +707,32 @@ class AgentRegistry:
         *,
         kind: str = AGENT_KIND_SUB,
         description: str = "",
+        dirname: str = "",
     ) -> None:
-        """Register (or update) an agent in the in-memory catalog."""
+        """Register (or update) an agent in the in-memory catalog.
+
+        ``dirname`` is the directory name relative to the workspace
+        root. If omitted it falls back to any previously-recorded
+        ``cwd`` metadata, then to ``cfg.id`` — so simple callers that
+        want ``dirname == id`` keep working unchanged.
+        """
         self._agents[cfg.id] = cfg
         prev = self._metadata.get(cfg.id, {})
+        if kind == AGENT_KIND_ROOT:
+            resolved_dir = "."
+        else:
+            resolved_dir = dirname or str(prev.get("cwd") or cfg.id)
         meta = {
             "kind": kind,
-            "cwd": "." if kind == AGENT_KIND_ROOT else cfg.id,
+            "cwd": resolved_dir,
             "created_at": prev.get("created_at") or _iso_now(),
             "description": description or prev.get("description", ""),
         }
         self._metadata[cfg.id] = meta
         if self._workspace_root is not None:
-            self._paths[cfg.id] = self._build_paths(cfg.id, kind)
+            self._paths[cfg.id] = self._build_paths(
+                cfg.id, kind, dirname=resolved_dir,
+            )
 
     def remove_agent(
         self, agent_id: str, *, delete_files: bool = False,
