@@ -160,33 +160,40 @@ class TestPurgeObservations:
 
 
 # ---------------------------------------------------------------------------
-# enrich_prompt: owner.md injection + heading tolerance
+# enrich_prompt: addressbook injection + heading tolerance
 # ---------------------------------------------------------------------------
 
 
-class TestEnrichPromptOwnerInjection:
+class TestEnrichPromptAddressbookInjection:
     """Regression guard for a two-part bug:
 
     1. ``_IDENTITY_RE`` only matched ``## Identity`` (two hashes), so
-       the shipped scaffold (``# Identity``, single hash) fell out
-       of the fast-path and the owner block was prepended *before*
-       the Identity heading — a semantically wrong location that
-       some models latched onto as "chrome" instead of context.
-    2. Sub-agents shared the workspace-level ``owner.md`` but their
-       persona bodies were a 4-line stub with no guidance about
-       how to read it, so they happily answered "I don't know who
-       you are" while the owner data sat right there in the prompt.
+       the shipped scaffold (``# Identity``, single hash) fell out of
+       the fast-path and the addressbook block was prepended *before*
+       the Identity heading — a semantically wrong location that some
+       models latched onto as "chrome" instead of context.
+    2. Sub-agents needed a shared addressbook with the root agent,
+       but their persona bodies were a 4-line stub with no guidance
+       about how to read it, so they happily answered "I don't know
+       who you are" while the contact data sat right there in the
+       prompt.
 
     We cover the injection-position half here; the persona-inheritance
-    half is exercised in ``tests/test_host_commands.py::TestAgentCommand``.
+    half is exercised in ``tests/test_host_commands.py::TestSubagentCommand``.
     """
 
-    def _store_with_owner(
-        self, tmp_path: Path, owner_body: str,
+    def _store_with_contact(
+        self, tmp_path: Path, contact_body: str, *, filename: str = "eric.md",
     ) -> MemoryStore:
+        """Build a sub-agent store whose workspace-level addressbook
+        contains one contact. ``agent_dir`` lives under
+        ``<workspace>/sub/.pip`` so we can verify the sub-agent reads
+        the root's addressbook rather than a local copy."""
         workspace_pip = tmp_path / ".pip"
-        workspace_pip.mkdir(parents=True)
-        (workspace_pip / "owner.md").write_text(owner_body, encoding="utf-8")
+        (workspace_pip / "addressbook").mkdir(parents=True)
+        (workspace_pip / "addressbook" / filename).write_text(
+            contact_body, encoding="utf-8",
+        )
         agent_dir = tmp_path / "sub" / ".pip"
         agent_dir.mkdir(parents=True)
         return MemoryStore(
@@ -195,13 +202,13 @@ class TestEnrichPromptOwnerInjection:
             agent_id="sub",
         )
 
-    def test_single_hash_identity_injects_user_section_after_identity(
+    def test_single_hash_identity_injects_addressbook_after_identity(
         self, tmp_path: Path,
     ):
         """Scaffold-style ``# Identity`` headings must not bypass the
         post-Identity injection point."""
-        store = self._store_with_owner(
-            tmp_path, "- `cli:cli-user` — Owner (Eric)",
+        store = self._store_with_contact(
+            tmp_path, "# Eric\n- `cli:cli-user` — Eric\n",
         )
         base = (
             "# Identity\n\nYou are Sub.\n\n"
@@ -213,15 +220,15 @@ class TestEnrichPromptOwnerInjection:
         )
         assert "Eric" in out
         identity_pos = out.find("# Identity")
-        user_pos = out.find("## User")
+        ab_pos = out.find("## Addressbook")
         philosophy_pos = out.find("# Core Philosophy")
-        assert 0 <= identity_pos < user_pos < philosophy_pos, out
+        assert 0 <= identity_pos < ab_pos < philosophy_pos, out
 
     def test_double_hash_identity_still_works(self, tmp_path: Path):
         """Legacy ``## Identity`` (two hashes) must still match — the
         builtin fallback persona uses that form."""
-        store = self._store_with_owner(
-            tmp_path, "- `cli:cli-user` — Owner (Eric)",
+        store = self._store_with_contact(
+            tmp_path, "# Eric\n- `cli:cli-user` — Eric\n",
         )
         base = "## Identity\n\nYou are Sub.\n\n## Rules\n\nBe kind.\n"
         out = store.enrich_prompt(
@@ -229,19 +236,19 @@ class TestEnrichPromptOwnerInjection:
             workdir=str(tmp_path / "sub"), sender_id="cli-user",
         )
         identity_pos = out.find("## Identity")
-        user_pos = out.find("## User")
+        ab_pos = out.find("## Addressbook")
         rules_pos = out.find("## Rules")
-        assert 0 <= identity_pos < user_pos < rules_pos, out
+        assert 0 <= identity_pos < ab_pos < rules_pos, out
 
-    def test_sub_agent_sees_workspace_owner(self, tmp_path: Path):
-        """The whole point of the bug report: the sub-agent's
+    def test_sub_agent_sees_workspace_addressbook(self, tmp_path: Path):
+        """The shared-addressbook invariant: the sub-agent's
         ``MemoryStore`` has ``agent_dir = <workspace>/sub/.pip`` but
-        ``workspace_pip_dir = <workspace>/.pip``, and ``owner.md``
-        lives only at the latter. The injected content must come
-        from the workspace-level file."""
-        store = self._store_with_owner(
+        ``workspace_pip_dir = <workspace>/.pip``, and contacts live
+        only at the latter. The injected content must come from the
+        workspace-root ``addressbook/``."""
+        store = self._store_with_contact(
             tmp_path,
-            "# Owner\n- `cli:cli-user` — Eric (Pacific time)\n",
+            "# Eric\n- **Notes:** Pacific time\n- `cli:cli-user`\n",
         )
         out = store.enrich_prompt(
             "# Identity\n\nYou are Sub.\n",
@@ -254,11 +261,37 @@ class TestEnrichPromptOwnerInjection:
         assert "Eric" in out
         assert "Pacific time" in out
 
-    def test_no_owner_file_does_not_inject_user_section(
+    def test_sub_agent_remember_user_writes_to_root_addressbook(
         self, tmp_path: Path,
     ):
-        """No owner file + no per-agent users → no ``## User``
-        section at all, not an empty one."""
+        """A sub-agent's ``update_user_profile`` must land in the
+        workspace-root addressbook, not a local sub-agent copy — that's
+        the whole point of the shared addressbook."""
+        workspace_pip = tmp_path / ".pip"
+        workspace_pip.mkdir(parents=True)
+        agent_dir = tmp_path / "sub" / ".pip"
+        agent_dir.mkdir(parents=True)
+        store = MemoryStore(
+            agent_dir=agent_dir,
+            workspace_pip_dir=workspace_pip,
+            agent_id="sub",
+        )
+        result = store.update_user_profile(
+            sender_id="alice", channel="wecom",
+            name="Alice", call_me="Alice",
+        )
+        assert "alice" in result.lower()
+        root_ab = workspace_pip / "addressbook"
+        assert any(p.name == "alice.md" for p in root_ab.glob("*.md"))
+        # No local addressbook was created under the sub-agent dir.
+        assert not (agent_dir / "addressbook").exists()
+        assert not (agent_dir / "users").exists()
+
+    def test_no_contacts_does_not_inject_addressbook_section(
+        self, tmp_path: Path,
+    ):
+        """Empty addressbook → no ``## Addressbook`` section at all,
+        not an empty one."""
         workspace_pip = tmp_path / ".pip"
         workspace_pip.mkdir(parents=True)
         agent_dir = tmp_path / "sub" / ".pip"
@@ -276,4 +309,5 @@ class TestEnrichPromptOwnerInjection:
             workdir=str(tmp_path / "sub"),
             sender_id="cli-user",
         )
+        assert "## Addressbook" not in out
         assert "## User" not in out

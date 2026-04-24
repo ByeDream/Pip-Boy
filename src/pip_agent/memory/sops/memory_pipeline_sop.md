@@ -27,7 +27,7 @@ You are extracting observations from conversation transcripts. Observations fall
 - **Specific code snippets or file paths** — Ephemeral context. Record the lesson or design rationale behind the code, not the code itself.
 - **One-off implementation details** — "Changed line 42 of agent.py" is not useful. "The agent.py bug was caused by referencing an unqualified variable name in a method that receives context via a parameter" is a reusable lesson.
 - **Emotional reactions to isolated events** — A single frustration is not a pattern; repeated frustration with the same type of issue is.
-- **Information already stored in user profiles** — Names, timezones, identifiers belong in `users/*.md`, not observations.
+- **Information already stored in user profiles** — Names, timezones, identifiers belong in `addressbook/*.md`, not observations.
 
 ### Observation Granularity
 

@@ -20,7 +20,12 @@ def test_fresh_init(tmp_path: Path) -> None:
     assert (tmp_path / ".pip").is_dir()
     assert (tmp_path / ".pip" / "persona.md").exists()
     assert (tmp_path / ".pip" / "observations").is_dir()
-    assert (tmp_path / ".pip" / "users").is_dir()
+    # Addressbook replaces the per-agent ``users/`` directory: one
+    # shared contact list under the workspace root, no ``users/``
+    # anywhere. Same for ``owner.md`` — there is no owner concept.
+    assert (tmp_path / ".pip" / "addressbook").is_dir()
+    assert not (tmp_path / ".pip" / "users").exists()
+    assert not (tmp_path / ".pip" / "owner.md").exists()
     assert (tmp_path / ".pip" / "incoming").is_dir()
     assert (tmp_path / ".pip" / "credentials").is_dir()
     # Phase 4.5: transcripts now live under ~/.claude/projects/ (CC native),
@@ -35,7 +40,6 @@ def test_fresh_init(tmp_path: Path) -> None:
     assert not (tmp_path / ".pip" / "agents").exists()
 
     assert (tmp_path / ".env").exists()
-    assert (tmp_path / ".pip" / "owner.md").exists()
 
     # The registry file is always seeded with the root agent.
     registry = tmp_path / ".pip" / "agents_registry.json"
@@ -125,13 +129,13 @@ def test_scaffold_migration_skips_modified(
     (tmp_path / ".git").mkdir()
     ensure_workspace(tmp_path)
 
-    owner_md = tmp_path / ".pip" / "owner.md"
-    owner_md.write_text("# Custom owner profile\n", encoding="utf-8")
+    persona = tmp_path / ".pip" / "persona.md"
+    persona.write_text("# Custom persona\n", encoding="utf-8")
 
     with caplog.at_level(logging.WARNING, logger="pip_agent.scaffold"):
         ensure_workspace(tmp_path)
 
-    assert owner_md.read_text(encoding="utf-8") == "# Custom owner profile\n"
+    assert persona.read_text(encoding="utf-8") == "# Custom persona\n"
 
 
 def test_no_git_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:

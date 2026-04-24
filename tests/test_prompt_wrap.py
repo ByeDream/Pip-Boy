@@ -11,11 +11,20 @@ from pip_agent.channels import Attachment, InboundMessage
 
 
 class TestFormatPrompt:
-    def test_cli_user_passes_through(self):
+    def test_cli_message_wraps_with_user_query(self):
+        # CLI is no longer a pass-through: the local terminal user
+        # goes through the same ``<user_query>`` wrap as remote peers
+        # so the agent can see who is speaking and run the shared
+        # identity-recognition flow (``remember_user`` etc.).
         inbound = InboundMessage(
             text="hello", sender_id="cli-user", channel="cli", peer_id="cli-user",
         )
-        assert _format_prompt(inbound, None) == "hello"
+        out = _format_prompt(inbound, None)
+        assert isinstance(out, str)
+        assert "<user_query" in out
+        assert 'from="cli:cli-user"' in out
+        assert 'status="unverified"' in out
+        assert "hello" in out
 
     def test_cron_sentinel_wraps_regardless_of_channel(self):
         inbound = InboundMessage(
@@ -224,12 +233,13 @@ class TestAttachmentBlocks:
         assert out[1]["type"] == "image"
         assert out[2]["type"] == "text" and "<attached-file" in out[2]["text"]
 
-    def test_empty_text_with_image_only_omits_text_block(self):
-        # No caption means no leading text block — we should NOT emit
-        # an empty ``{"type": "text", "text": ""}`` because that's an
-        # invalid Anthropic block and an unnecessary payload.
+    def test_empty_text_with_image_still_includes_identity_wrap(self):
+        # Empty caption on a CLI image: we no longer emit an empty
+        # ``{"type": "text", "text": ""}`` block, but the
+        # ``<user_query>`` wrap around the (empty) body IS non-empty
+        # and must be present so the agent knows who sent the image.
         inbound = InboundMessage(
-            text="", sender_id="u1", channel="cli", peer_id="cli-user",
+            text="", sender_id="cli-user", channel="cli", peer_id="cli-user",
             attachments=[Attachment(
                 type="image", data=b"\x89PNG", mime_type="image/png",
             )],
@@ -237,7 +247,12 @@ class TestAttachmentBlocks:
         out = _format_prompt(inbound, None)
         assert isinstance(out, list)
         assert all(b.get("text", "non-empty") != "" for b in out)
-        assert out[0]["type"] == "image"
+        # Leading text block is the user_query wrap with sender id;
+        # then the image follows.
+        assert out[0]["type"] == "text"
+        assert "<user_query" in out[0]["text"]
+        assert 'from="cli:cli-user"' in out[0]["text"]
+        assert out[1]["type"] == "image"
 
     def test_unrenderable_attachment_preserves_text_prompt(self):
         # Unknown attachment type should not take down the inbound —
@@ -255,17 +270,25 @@ class TestAttachmentBlocks:
         else:
             assert "hello" in out
 
-    def test_only_unrenderable_with_no_text_falls_back_to_str(self):
-        # Edge case the code handles defensively: zero text AND zero
-        # renderable attachments → blocks is empty → we must return
-        # the (possibly empty) text instead of handing the SDK an
-        # invalid empty block list.
+    def test_only_unrenderable_with_no_text_still_has_identity_block(self):
+        # Edge case: zero caption AND zero renderable attachments. With
+        # CLI wrapping the ``<user_query>`` block itself is the only
+        # content; we must still hand the SDK something non-empty so
+        # it knows who sent the (empty) message. Either a bare string
+        # or a single-text-block list is acceptable — what matters is
+        # that the sender identity survives.
         inbound = InboundMessage(
-            text="", sender_id="u1", channel="cli", peer_id="cli-user",
+            text="", sender_id="cli-user", channel="cli", peer_id="cli-user",
             attachments=[Attachment(type="mystery")],
         )
         out = _format_prompt(inbound, None)
-        assert isinstance(out, str)
+        if isinstance(out, list):
+            joined = "".join(
+                b.get("text", "") for b in out if b.get("type") == "text"
+            )
+            assert 'from="cli:cli-user"' in joined
+        else:
+            assert 'from="cli:cli-user"' in out
 
 
 class TestMaterializeAttachments:

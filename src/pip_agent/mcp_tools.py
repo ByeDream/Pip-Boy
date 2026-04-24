@@ -221,8 +221,12 @@ def _memory_tools(ctx: McpContext) -> list[SdkMcpTool]:
         SdkMcpTool(
             name="remember_user",
             description=(
-                "Remember or update a user's identity. Use when an unverified "
-                "user reveals who they are, or to update a verified user's info."
+                "Remember or update a contact in the workspace-shared "
+                "addressbook (<workspace>/.pip/addressbook/). Use when an "
+                "unverified user reveals who they are, or to update a "
+                "verified user's info. All agents (root and sub-agents) "
+                "read and write the same addressbook, so a contact saved "
+                "from any agent is immediately visible to every other."
             ),
             input_schema={
                 "type": "object",

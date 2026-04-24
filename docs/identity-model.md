@@ -13,13 +13,16 @@ layers; each inherits from the one above:
 | --- | --- | --- | --- |
 | System (lowest) | `~/.pip/` | Per-user system settings | Only CLI preferences and `settings.json` (logging / profiler / network defaults). No channel credentials, no bindings. |
 | Workspace | `<pip_boy_workspace>/.pip/` | The root `pip-boy` agent's home + shared runtime state | Holds `bindings.json`, `agents_registry.json`, `credentials/`, `sdk_sessions.json`. |
-| Sub-agent | `<pip_boy_workspace>/<id>/.pip/` | An individual sub-agent | Independent `persona.md`, `memory`, `observations/`, `users/`. |
+| Sub-agent | `<pip_boy_workspace>/<id>/.pip/` | An individual sub-agent | Independent `persona.md`, `memory`, `observations/`. Contacts live in the shared workspace-level `addressbook/` and are not duplicated per sub-agent. |
 
 Scalar settings from higher tiers override lower tiers; array-valued
 settings (like permission allow-lists) are unioned with dedup.
 
-**Persona, memory, observations, axioms, and per-user profiles never
-merge.** Each agent — including `pip-boy` itself — owns its own.
+**Persona, memory, observations, and axioms never merge.** Each agent —
+including `pip-boy` itself — owns its own. The `addressbook/` is the
+one deliberate exception: it lives at the workspace root and is read /
+written by every agent so a contact learned anywhere is known
+everywhere.
 
 ## Directory layout
 
@@ -34,7 +37,7 @@ merge.** Each agent — including `pip-boy` itself — owns its own.
     HEARTBEAT.md
     state.json cron.json memories.json axioms.md
     observations/*.jsonl
-    users/*.md
+    addressbook/*.md          # shared contacts (every agent reads / writes)
     incoming/
     credentials/             # channel keys (WeChat / WeCom)
     bindings.json            # global channel -> agent routing table
@@ -73,14 +76,19 @@ Two separate concerns with two separate verb surfaces:
 
 | Command | Effect | ACL |
 | --- | --- | --- |
-| `/bind <id>` | Route this chat to sub-agent `<id>`. Works from any agent. `/bind pip-boy` is rejected with a redirect to `/unbind`. | owner-or-admin |
-| `/unbind` | Clear this chat's binding so routing falls back to pip-boy. No-op when already on pip-boy. | owner-or-admin |
-| `/subagent` | **pip-boy only.** List known sub-agents (alias for `/subagent list`). | owner-or-admin |
-| `/subagent list` | **pip-boy only.** List known sub-agents. | owner-or-admin |
-| `/subagent create <id>` | **pip-boy only.** Scaffold `<workspace>/<id>/.pip/` with a cloned persona + HEARTBEAT and register it. | owner |
-| `/subagent archive <id>` | **pip-boy only.** Move `<id>/.pip/` → `<workspace>/.pip/archived/<id>-<ts>/.pip/`, drop bindings. Project files in `<id>/` untouched. | owner |
-| `/subagent delete <id> --yes` | **pip-boy only.** `rmtree(<id>/.pip/)` and drop bindings. Project files in `<id>/` untouched. | owner |
-| `/subagent reset <id>` | **pip-boy only.** Rebuild sub-agent `<id>`'s `.pip/` from a minimal backup (see below). Refused on the root agent. | owner |
+| `/bind <id>` | Route this chat to sub-agent `<id>`. Works from any agent. `/bind pip-boy` is rejected with a redirect to `/unbind`. | open |
+| `/unbind` | Clear this chat's binding so routing falls back to pip-boy. No-op when already on pip-boy. | open |
+| `/subagent` | **pip-boy only.** List known sub-agents (alias for `/subagent list`). | CLI-only |
+| `/subagent list` | **pip-boy only.** List known sub-agents. | CLI-only |
+| `/subagent create <id>` | **pip-boy only.** Scaffold `<workspace>/<id>/.pip/` with a cloned persona + HEARTBEAT and register it. | CLI-only |
+| `/subagent archive <id>` | **pip-boy only.** Move `<id>/.pip/` → `<workspace>/.pip/archived/<id>-<ts>/.pip/`, drop bindings. Project files in `<id>/` untouched. | CLI-only |
+| `/subagent delete <id> --yes` | **pip-boy only.** `rmtree(<id>/.pip/)` and drop bindings. Project files in `<id>/` untouched. | CLI-only |
+| `/subagent reset <id>` | **pip-boy only.** Rebuild sub-agent `<id>`'s `.pip/` from a minimal backup (see below). Refused on the root agent. | CLI-only |
+
+"CLI-only" commands are refused outright on remote channels (WeCom,
+WeChat, …) and are not advertised in the remote `/help` listing, so a
+random peer on those channels can't even discover they exist. "Open"
+commands run for anyone regardless of channel.
 
 There are no CLI flags for `model` / `dm_scope` / `description`. Edit
 the relevant file directly:
@@ -115,13 +123,14 @@ SDK session.
 
 What survives: identity (`persona.md` + `HEARTBEAT.md`).
 What's wiped: observations, memories.json, axioms.md, state.json,
-users/, incoming/, cron.json, sdk_sessions entries for this agent,
+incoming/, cron.json, sdk_sessions entries for this agent,
 scaffold manifest, etc. These are all lazily re-created by the host
-on the next turn.
+on the next turn. The shared `addressbook/` lives at the workspace
+root and is never touched by a sub-agent reset.
 
 **Root agent is refused.** `/subagent reset pip-boy` returns an
 explanatory error instead of running. The root's `.pip/` holds
-workspace-shared state (`owner.md`, `bindings.json`,
+workspace-shared state (`addressbook/`, `bindings.json`,
 `agents_registry.json`, `credentials/`, `archived/`) that other
 agents depend on, and its `MemoryStore` / `StreamingSession` are
 in active use by the very command handler that would perform the

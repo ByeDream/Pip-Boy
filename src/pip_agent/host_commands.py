@@ -17,20 +17,24 @@ Phase S11 removing. So they get their own lane, short-circuited here.
 
 Contract
 --------
-* Commands are **flat**. No subcommands except ``/admin`` (which keeps
-  ``grant|revoke|list`` inline because its surface was already minimal
-  and would be awkward as separate commands).
+* Commands are **flat**. ``/subagent`` is the one family with
+  subcommands (``list``, ``create``, ``archive``, ``delete``,
+  ``reset``) because they manage a tightly-coupled lifecycle and
+  would pollute the top-level namespace if split out.
 * A handler returns a :class:`CommandResult`. ``handled=True`` stops
   further processing of the inbound; ``handled=False`` means "this
   wasn't a command I recognize, pass it on to the agent".
-* **ACL gates** are owned here, not by individual handlers:
+* **ACL gates** are owned here, not by individual handlers. The model
+  is intentionally minimal:
 
-  - ``/help`` and ``/status`` are open to everyone.
-  - ``/admin`` is owner-only.
-  - Everything else requires owner OR admin.
-  - CLI is always owner (there's only one person at a local TTY; any
-    further gate is theater).
-  - No memory store? Fail-open — we're pre-boot, nothing to protect.
+  - Every command is open to every sender, with one exception.
+  - CLI-only commands (``/subagent`` family, ``/exit``) are refused
+    on remote channels (WeCom, WeChat, ...) and omitted from the
+    ``/help`` listing those channels see — so a random chat peer
+    doesn't even learn they exist.
+  - There is no "owner" / "admin" concept. Whoever is using Pip is
+    a regular contact; identity is tracked in the shared
+    ``addressbook/`` via the ``remember_user`` tool.
 
 * Unknown ``/foo`` is **NOT handled**. The caller forwards it to the
   agent, which can treat it as free-form text. That preserves the old
@@ -178,40 +182,14 @@ def dispatch_command(ctx: CommandContext) -> CommandResult:
 
     # --- ACL gate ---
     #
-    # Policy (plan M9):
-    #   * CLI is always owner.  The only way to reach the CLI prompt is
-    #     to have shell access on the host, so there is no useful threat
-    #     model where we would want to deny it.  This holds even when
-    #     ``memory_store`` is ``None`` (tests, early boot, etc.).
-    #   * Non-CLI channels fail **closed** when ``memory_store`` is
-    #     missing.  Without the store we cannot evaluate ``owner.md`` or
-    #     the admin flag on a user profile, and silently treating a
-    #     remote sender as "owner" would bypass the whole ACL surface.
-    #     Tests that need to exercise remote ACL paths must supply a
-    #     memory store (real or fake).
-    ch, sid = ctx.inbound.channel, ctx.inbound.sender_id
-    ms = ctx.memory_store
-    if ch == "cli":
-        owner = True
-    elif ms is None:
-        owner = False
-    else:
-        owner = ms.is_owner(ch, sid)
-
-    if cmd not in _OPEN_COMMANDS:
-        if cmd in _OWNER_ONLY_COMMANDS and not owner:
-            return CommandResult(
-                handled=True, response="Permission denied: owner only.",
-            )
-        if not owner:
-            # ``is_admin`` needs the memory store for the same reason
-            # ``is_owner`` does. Fail closed when it is unavailable.
-            admin = ms.is_admin(ch, sid) if ms is not None else False
-            if not admin:
-                return CommandResult(
-                    handled=True,
-                    response="Permission denied: admin privileges required.",
-                )
+    # Only one rule: CLI-only commands (destructive / operator-flavoured
+    # things like the ``/subagent`` lifecycle family and ``/exit``) are
+    # refused on remote channels. Everything else is open.
+    if cmd in _CLI_ONLY_COMMANDS and ctx.inbound.channel != "cli":
+        return CommandResult(
+            handled=True,
+            response=f"`{cmd}` is only available from the CLI.",
+        )
 
     try:
         return handler(ctx, args)
@@ -227,7 +205,7 @@ def dispatch_command(ctx: CommandContext) -> CommandResult:
 # ---------------------------------------------------------------------------
 
 
-_HELP_TEXT = """\
+_HELP_COMMON = """\
 Available commands:
 
   /help                         Show this help
@@ -236,8 +214,6 @@ Available commands:
   /axioms                       Current judgment principles
   /recall <query>               Search stored memories
   /cron                         List scheduled cron jobs
-  /admin grant|revoke|list      Manage admin privileges (owner only)
-  /exit                         Quit Pip-Boy (CLI only)
 
   /bind <id>                    Route this chat to sub-agent <id>
                                 (bind pip-boy is a redirect to /unbind)
@@ -245,8 +221,21 @@ Available commands:
                                 falls back to pip-boy (no-op when
                                 already on pip-boy)
 
+Bindings:
+  /bind in a group chat creates a guild-level binding; in a private
+  chat, a peer-level binding. Bindings persist across restarts in
+  <workspace>/.pip/bindings.json. /unbind removes the binding for
+  the current chat so routing falls back to pip-boy."""
+
+
+_HELP_CLI_EXTRA = """\
+
+CLI-only commands (unavailable on remote channels):
+
+  /exit                         Quit Pip-Boy
+
   /subagent                     pip-boy only: list known sub-agents
-  /subagent create <label>      pip-boy only, owner: create a new sub-agent.
+  /subagent create <label>      pip-boy only: create a new sub-agent.
       [--id ID]                 Default: normalize(<label>) — lowercased,
                                 safe for a directory name.
       [--name NAME]             Default: same as id. Human-facing display
@@ -254,11 +243,11 @@ Available commands:
       [--model MODEL]           Default: pip-boy's model.
       [--dm_scope SCOPE]        Default: per-guild.
                                 Valid: main | per-guild | per-guild-peer.
-  /subagent archive <id>        pip-boy only, owner: move <id>/.pip/ to
+  /subagent archive <id>        pip-boy only: move <id>/.pip/ to
                                 .pip/archived/ (project files untouched)
-  /subagent delete <id> --yes   pip-boy only, owner: wipe <id>/.pip/
+  /subagent delete <id> --yes   pip-boy only: wipe <id>/.pip/
                                 (project files untouched)
-  /subagent reset <id>          pip-boy only, owner: rebuild sub-agent
+  /subagent reset <id>          pip-boy only: rebuild sub-agent
                                 <id>'s .pip/ from a minimal backup —
                                 persona.md and HEARTBEAT.md are
                                 preserved, everything else is wiped
@@ -272,23 +261,14 @@ Per-agent settings after creation (model, dm_scope, description) are
 edited directly on disk:
   <workspace>/<id>/.pip/persona.md       (name, model, dm_scope)
   <workspace>/.pip/agents_registry.json  (description)
-  <workspace>/.pip/bindings.json         (routing bindings)
-
-Permissions:
-  Owner (CLI or an identity listed in owner.md) can use all commands.
-  Admin users can read everything and /bind/unbind, but not
-  /subagent create|archive|delete|reset or /admin.
-  Others are locked out.
-
-Bindings:
-  /bind in a group chat creates a guild-level binding; in a private
-  chat, a peer-level binding. Bindings persist across restarts in
-  <workspace>/.pip/bindings.json. /unbind removes the binding for
-  the current chat so routing falls back to pip-boy."""
+  <workspace>/.pip/bindings.json         (routing bindings)"""
 
 
-def _cmd_help(_ctx: CommandContext, _args: str) -> CommandResult:
-    return CommandResult(handled=True, response=_HELP_TEXT)
+def _cmd_help(ctx: CommandContext, _args: str) -> CommandResult:
+    text = _HELP_COMMON
+    if ctx.inbound.channel == "cli":
+        text = text + "\n" + _HELP_CLI_EXTRA
+    return CommandResult(handled=True, response=text)
 
 
 # ---------------------------------------------------------------------------
@@ -544,18 +524,6 @@ def _purge_cc_project_dir(cwd: Path) -> Path | None:
     return project_dir
 
 
-_SUBAGENT_OWNER_ONLY_SUBCOMMANDS = {"create", "archive", "delete", "reset"}
-
-
-def _is_owner(ctx: CommandContext) -> bool:
-    """Match the ACL rules in :func:`dispatch_command`."""
-    ch, sid = ctx.inbound.channel, ctx.inbound.sender_id
-    if ch == "cli":
-        return True
-    ms = ctx.memory_store
-    return bool(ms and ms.is_owner(ch, sid))
-
-
 def _cmd_subagent(ctx: CommandContext, args: str) -> CommandResult:
     """Dispatcher for the ``/subagent`` subcommand family — pip-boy only.
 
@@ -586,12 +554,11 @@ def _cmd_subagent(ctx: CommandContext, args: str) -> CommandResult:
     to pip-boy**. From a sub-agent, ``/subagent`` returns a polite
     redirect to ``/unbind`` — sub-agents don't manage siblings.
 
-    Owner gating
-    ------------
-    Read-only ops (``list``, bare ``/subagent``) ride the top-level
-    "owner-or-admin" gate from :func:`dispatch_command`. Destructive
-    ops (``create``, ``archive``, ``delete``, ``reset``) re-check
-    owner here.
+    Channel gating
+    --------------
+    The whole family is CLI-only — the top-level dispatcher rejects
+    it on remote channels before we get here. No further per-subcommand
+    gate is needed.
     """
     try:
         tokens = shlex.split(args) if args.strip() else []
@@ -634,11 +601,6 @@ def _cmd_subagent(ctx: CommandContext, args: str) -> CommandResult:
             ),
         )
 
-    if sub in _SUBAGENT_OWNER_ONLY_SUBCOMMANDS and not _is_owner(ctx):
-        return CommandResult(
-            handled=True,
-            response=f"Permission denied: `/subagent {sub}` is owner only.",
-        )
     return handler(ctx, tail)
 
 
@@ -895,11 +857,11 @@ def _create_agent_on_disk(
     The new agent inherits the default (``pip-boy``) agent's **full**
     persona body — Core Philosophy, System Communication, Tone,
     Identity Recognition, Tool Calling, Memory guidance, etc. — so
-    it actually knows how to interpret the ``# User`` block that
-    :meth:`MemoryStore.enrich_prompt` injects at prompt time.
+    it actually knows how to interpret the ``## Addressbook`` block
+    that :meth:`MemoryStore.enrich_prompt` injects at prompt time.
 
     Only the ``# Identity`` section is rewritten, to flag the
-    shared-owner relationship with Pip-Boy. The identity body still
+    sibling relationship with Pip-Boy. The identity body still
     references ``{agent_name}`` / ``{model_name}`` / ``{workdir}``
     as template variables — they are resolved at prompt-compose time
     by :meth:`AgentConfig.system_prompt` from the YAML frontmatter,
@@ -1211,14 +1173,14 @@ def _agent_reset(ctx: CommandContext, tail: list[str]) -> CommandResult:
 
     Outcome: persona + identity preserved, memory layer and any
     other bookkeeping files (observations, memories.json, axioms.md,
-    state.json, users/, incoming/, cron.json, sdk_sessions entries
-    for this agent, .scaffold_manifest.json, ...) wiped and left to
-    be lazily re-created by the running host.
+    state.json, incoming/, cron.json, sdk_sessions entries for this
+    agent, .scaffold_manifest.json, ...) wiped and left to be lazily
+    re-created by the running host.
 
     Root (pip-boy) refusal
     ----------------------
     ``/subagent reset pip-boy`` is rejected outright. The root agent's
-    ``.pip/`` carries workspace-shared state (``owner.md``,
+    ``.pip/`` carries workspace-shared state (``addressbook/``,
     ``bindings.json``, ``agents_registry.json``, ``credentials/``,
     ``archived/``) AND its ``MemoryStore`` / ``StreamingSession`` are
     in active use by the very handler that would perform the reset.
@@ -1255,7 +1217,7 @@ def _agent_reset(ctx: CommandContext, tail: list[str]) -> CommandResult:
                 f"Cannot reset the root agent '{default_id}' from within "
                 "the running host. Its memory store and session are in "
                 "active use by this very command, and its .pip/ holds "
-                "workspace-shared state (owner.md, bindings.json, "
+                "workspace-shared state (addressbook/, bindings.json, "
                 "agents_registry.json, credentials/, archived/) that "
                 "other agents rely on. Stop the host (/exit) and "
                 "rebuild the root .pip/ offline if you really need to."
@@ -1311,9 +1273,10 @@ def _agent_reset(ctx: CommandContext, tail: list[str]) -> CommandResult:
         # produces. Without this, any cached per-agent service
         # (AgentHost._agents) keeps a MemoryStore whose directories
         # no longer exist, and the first reflect after reset dies
-        # with ENOENT on ``observations/<date>.jsonl``.
+        # with ENOENT on ``observations/<date>.jsonl``. Addressbook
+        # lives at the workspace root and is deliberately NOT touched
+        # here — a sub-agent reset must not nuke shared contacts.
         (pip_dir / "observations").mkdir(exist_ok=True)
-        (pip_dir / "users").mkdir(exist_ok=True)
         for name in preserve_files:
             staged = stash / name
             if staged.is_file():
@@ -1432,47 +1395,6 @@ def _cmd_unbind(ctx: CommandContext, _args: str) -> CommandResult:
 
 
 # ---------------------------------------------------------------------------
-# /admin
-# ---------------------------------------------------------------------------
-
-
-def _cmd_admin(ctx: CommandContext, args: str) -> CommandResult:
-    """Manage admin privileges (owner only)."""
-    ms = ctx.memory_store
-    if not ms:
-        return CommandResult(handled=True, response="Memory store unavailable.")
-
-    parts = args.strip().split(None, 1)
-    if not parts:
-        return CommandResult(
-            handled=True, response="Usage: /admin grant|revoke|list [name]",
-        )
-
-    sub = parts[0].lower()
-    name = parts[1].strip() if len(parts) > 1 else ""
-
-    if sub == "list":
-        admins = ms.list_admins()
-        if not admins:
-            return CommandResult(handled=True, response="No admin users.")
-        return CommandResult(
-            handled=True,
-            response="Admin users:\n" + "\n".join(f"  - {a}" for a in admins),
-        )
-    if sub in ("grant", "revoke"):
-        if not name:
-            return CommandResult(
-                handled=True, response=f"Usage: /admin {sub} <name>",
-            )
-        result = ms.set_admin(name, grant=(sub == "grant"))
-        return CommandResult(handled=True, response=result)
-    return CommandResult(
-        handled=True,
-        response="Usage: /admin grant|revoke <name> | /admin list",
-    )
-
-
-# ---------------------------------------------------------------------------
 # (Legacy handlers /agents, /create-agent, /archive-agent, /delete-agent,
 # /switch, /reset removed — functionality consolidated into
 # `/subagent <subcommand>`, `/bind`, `/unbind` above. The earlier
@@ -1512,17 +1434,14 @@ _HANDLERS: dict[
     "/axioms": _cmd_axioms,
     "/recall": _cmd_recall,
     "/cron": _cmd_cron,
-    "/admin": _cmd_admin,
     "/subagent": _cmd_subagent,
     "/bind": _cmd_bind,
     "/unbind": _cmd_unbind,
     "/exit": _cmd_exit,
 }
 
-_OPEN_COMMANDS = {"/help", "/status"}
-# ``/subagent create`` / ``archive`` / ``delete`` / ``reset`` are
-# owner-only, but since they're all subcommands of a single top-level
-# ``/subagent``, we gate per-subcommand inside the dispatcher rather
-# than at this top-level ACL table. Pure-read ``/subagent [list]``
-# and ``/bind`` / ``/unbind`` remain owner-or-admin (the default).
-_OWNER_ONLY_COMMANDS = {"/admin"}
+# Commands that are only valid at the local CLI. Remote channels
+# (WeCom / WeChat / ...) get a terse refusal AND the ``/help`` text
+# they see simply doesn't advertise these — remote peers never even
+# learn the commands exist.
+_CLI_ONLY_COMMANDS = {"/subagent", "/exit"}

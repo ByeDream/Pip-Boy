@@ -330,9 +330,11 @@ def _format_text_prompt(
        wrapped in ``<cron_task>`` / ``<heartbeat>`` regardless of channel, so
        the agent can distinguish them from user messages even when the
        originating channel is ``cli``.
-    2. **CLI messages** pass through bare (matches how developers type).
-    3. **Remote-channel messages** get ``<user_query>`` XML with sender
-       identity so the agent sees who is talking.
+    2. **All user-originated messages** (including CLI) get
+       ``<user_query>`` XML with sender identity. CLI carries a stable
+       ``cli:cli-user`` identifier so the local terminal user goes
+       through the same verify / ``remember_user`` flow as a remote
+       peer — there is no "owner" shortcut anymore.
     """
     clean_text = _LEADING_AT_RE.sub("", inbound.text, count=1)
 
@@ -340,9 +342,6 @@ def _format_text_prompt(
         return f"<cron_task>\n{clean_text}\n</cron_task>"
     if inbound.sender_id == _HEARTBEAT_SENDER:
         return f"<heartbeat>\n{clean_text}\n</heartbeat>"
-
-    if inbound.channel == "cli":
-        return clean_text
 
     sender_status = "unverified"
     if memory_store and inbound.sender_id:

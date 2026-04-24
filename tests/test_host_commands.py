@@ -1,19 +1,13 @@
 """Regression coverage for :mod:`pip_agent.host_commands`.
 
-Phase 6 scope: the dispatcher itself — recognition rules, ACL gate,
-@mention handling, and a representative handful of handler happy-paths
-to prove the wiring is live. Per-handler deep coverage (every edge case
-of /subagent, /admin subcommand matrix, etc.) is explicitly deferred
-to Phase 11 so this file stays readable.
-
 What we DO cover here:
   * A non-slash inbound is not handled.
   * An unknown slash is rejected with a helpful error (never forwarded
     to the model — typos should fail fast).
   * Leading @mention is stripped before slash detection.
-  * ``/help`` / ``/status`` are open to every caller.
-  * ``/admin`` is owner-only; CLI is always owner.
-  * Other commands require owner OR admin.
+  * Every command is open to every sender, with one exception: the
+    CLI-only family (``/subagent`` lifecycle, ``/exit``) refuses to
+    run on remote channels and is omitted from their ``/help`` listing.
   * Handler exceptions become ``[error] …`` responses, not crashes.
   * A handful of read-only handlers (``/help``, ``/memory``, ``/axioms``,
     ``/recall``, ``/cron``, ``/status``) return their expected shape.
@@ -56,20 +50,17 @@ def _wecom_inbound(text: str, sender_id: str = "u1") -> InboundMessage:
 
 class _FakeMemoryStore:
     """Minimal stand-in for ``MemoryStore`` covering the methods the
-    dispatcher actually calls. Each attribute is a plain value so
-    tests can edit it inline to exercise different ACL configurations."""
+    dispatcher's handlers actually call (``stats``, ``load_axioms``,
+    ``search``). No ACL methods — the dispatcher itself no longer
+    consults the store for permissions."""
 
     def __init__(
         self,
         *,
-        owners: set[tuple[str, str]] | None = None,
-        admins: set[tuple[str, str]] | None = None,
         stats: dict[str, Any] | None = None,
         axioms: str = "",
         recall_hits: list[dict[str, Any]] | None = None,
     ) -> None:
-        self._owners = owners or set()
-        self._admins = admins or set()
         self._stats = stats or {
             "agent_id": "pip-boy",
             "observations": 0,
@@ -79,23 +70,6 @@ class _FakeMemoryStore:
         }
         self._axioms = axioms
         self._recall_hits = recall_hits or []
-
-    def is_owner(self, channel: str, sender_id: str) -> bool:
-        # Mirror the real :class:`MemoryStore` contract: CLI is always
-        # owner. Tests that want to exercise "wecom user is not owner"
-        # simply leave ``_owners`` empty and use a wecom inbound.
-        if channel == "cli":
-            return True
-        return (channel, sender_id) in self._owners
-
-    def is_admin(self, channel: str, sender_id: str) -> bool:
-        return (channel, sender_id) in self._admins
-
-    def list_admins(self) -> list[str]:
-        return [f"{c}:{s}" for (c, s) in sorted(self._admins)]
-
-    def set_admin(self, name: str, *, grant: bool) -> str:
-        return f"{'granted' if grant else 'revoked'} admin for {name}"
 
     def stats(self) -> dict[str, Any]:
         return dict(self._stats)
@@ -166,8 +140,7 @@ class TestDispatchRecognition:
         assert "/subagent" in (result.response or "")
 
     def test_leading_at_mention_is_stripped(self, tmp_path: Path):
-        # WeCom @-prefix should not block slash detection. CLI gets
-        # owner by virtue of channel=cli.
+        # WeCom @-prefix should not block slash detection.
         ctx = _build_ctx(_cli_inbound("@bot /help"), tmp_path)
         result = dispatch_command(ctx)
         assert result.handled is True
@@ -195,60 +168,46 @@ class TestDispatchRecognition:
 
 
 class TestACLGate:
-    def test_cli_is_always_owner_no_memory_store(self, tmp_path: Path):
-        # Fresh boot with no MemoryStore yet — CLI must still have
-        # full access so the operator can run /admin before anything
-        # else is initialised.
-        ctx = _build_ctx(_cli_inbound("/admin list"), tmp_path)
-        result = dispatch_command(ctx)
-        assert result.handled is True
-        # No memory_store → /admin handler itself short-circuits with
-        # "Memory store unavailable." — that's acceptable; the gate
-        # still let the caller through.
-        assert "Memory store unavailable." in (result.response or "")
-
-    def test_non_cli_without_memory_store_open_command_still_works(
+    def test_remote_open_command_works_without_memory_store(
         self, tmp_path: Path,
     ):
+        # Fresh boot with no MemoryStore yet — open commands still run.
         ctx = _build_ctx(_wecom_inbound("/help"), tmp_path)
         result = dispatch_command(ctx)
         assert result.handled is True
         assert "/help" in (result.response or "")
 
-    def test_non_cli_unprivileged_rejected(self, tmp_path: Path):
+    def test_remote_memory_command_runs(self, tmp_path: Path):
+        # /memory is open on every channel now — no owner/admin gate.
         ms = _FakeMemoryStore()
         ctx = _build_ctx(_wecom_inbound("/memory"), tmp_path, memory_store=ms)
         result = dispatch_command(ctx)
         assert result.handled is True
-        assert "admin" in (result.response or "").lower()
+        body = result.response or ""
+        # Handler ran and returned stats, not a permission-denied line.
+        assert "Observations:" in body
 
-    def test_non_cli_admin_passes(self, tmp_path: Path):
-        ms = _FakeMemoryStore(admins={("wecom", "u1")})
-        ctx = _build_ctx(_wecom_inbound("/memory"), tmp_path, memory_store=ms)
+    def test_remote_subagent_is_refused(self, tmp_path: Path):
+        # /subagent family is CLI-only. Remote senders get a terse
+        # refusal regardless of subcommand.
+        for text in (
+            "/subagent",
+            "/subagent list",
+            "/subagent create helper",
+            "/subagent delete helper --yes",
+            "/subagent reset helper",
+        ):
+            ctx = _build_ctx(_wecom_inbound(text), tmp_path)
+            result = dispatch_command(ctx)
+            assert result.handled is True, text
+            body = (result.response or "").lower()
+            assert "cli" in body, text
+
+    def test_remote_exit_is_refused(self, tmp_path: Path):
+        ctx = _build_ctx(_wecom_inbound("/exit"), tmp_path)
         result = dispatch_command(ctx)
         assert result.handled is True
-        # Admin passed the gate → handler ran → response is stats, not
-        # a permission-denied line.
-        assert "admin" not in (result.response or "").lower()
-
-    def test_admin_blocked_from_admin_command(self, tmp_path: Path):
-        # /admin is owner-only; admins are explicitly *not* allowed.
-        ms = _FakeMemoryStore(admins={("wecom", "u1")})
-        ctx = _build_ctx(
-            _wecom_inbound("/admin list"), tmp_path, memory_store=ms,
-        )
-        result = dispatch_command(ctx)
-        assert result.handled is True
-        assert "owner only" in (result.response or "").lower()
-
-    def test_non_cli_owner_passes_admin(self, tmp_path: Path):
-        ms = _FakeMemoryStore(owners={("wecom", "u1")})
-        ctx = _build_ctx(
-            _wecom_inbound("/admin list"), tmp_path, memory_store=ms,
-        )
-        result = dispatch_command(ctx)
-        assert result.handled is True
-        assert "admin" in (result.response or "").lower()
+        assert "cli" in (result.response or "").lower()
 
 
 # ---------------------------------------------------------------------------
@@ -282,17 +241,34 @@ class TestErrorIsolation:
 
 
 class TestHandlerOutputs:
-    def test_help_lists_commands(self, tmp_path: Path):
+    def test_help_on_cli_lists_all_commands(self, tmp_path: Path):
         ctx = _build_ctx(_cli_inbound("/help"), tmp_path)
         result = dispatch_command(ctx)
         assert result.handled
+        body = result.response or ""
         for cmd in (
             "/help", "/status", "/memory", "/axioms", "/cron",
             "/bind <id>", "/unbind",
             "/subagent", "/subagent create",
             "/subagent reset <id>",
+            "/exit",
         ):
-            assert cmd in (result.response or "")
+            assert cmd in body, cmd
+
+    def test_help_on_remote_hides_cli_only_commands(self, tmp_path: Path):
+        # WeCom / WeChat users must not even learn that /subagent and
+        # /exit exist — the CLI-only family is entirely omitted from
+        # their /help so random chat peers can't probe it.
+        ctx = _build_ctx(_wecom_inbound("/help"), tmp_path)
+        result = dispatch_command(ctx)
+        assert result.handled
+        body = result.response or ""
+        # Open commands still advertised.
+        for cmd in ("/help", "/status", "/memory", "/bind", "/unbind"):
+            assert cmd in body, cmd
+        # CLI-only family hidden.
+        assert "/subagent" not in body
+        assert "/exit" not in body
 
     def test_status_shows_agent_and_session(self, tmp_path: Path):
         ctx = _build_ctx(_cli_inbound("/status"), tmp_path)
@@ -324,8 +300,8 @@ class TestHandlerOutputs:
         assert "Last reflect:" in body
 
     def test_memory_without_store_is_friendly(self, tmp_path: Path):
-        # CLI is still owner, so the gate passes; the handler itself
-        # handles the missing-store case with a specific message.
+        # The handler handles the missing-store case with a specific
+        # message rather than crashing.
         ctx = _build_ctx(_cli_inbound("/memory"), tmp_path)
         result = dispatch_command(ctx)
         assert result.handled
@@ -423,10 +399,10 @@ class TestHandlerOutputs:
         assert "CLI" in (result.response or "")
 
     def test_exit_on_non_cli_is_friendly(self, tmp_path: Path):
-        ms = _FakeMemoryStore(admins={("wecom", "u1")})
-        ctx = _build_ctx(
-            _wecom_inbound("/exit"), tmp_path, memory_store=ms,
-        )
+        # Non-CLI /exit is caught by the CLI-only dispatcher gate
+        # before the handler ever runs; the refusal still mentions
+        # the CLI so a confused remote operator learns where to go.
+        ctx = _build_ctx(_wecom_inbound("/exit"), tmp_path)
         result = dispatch_command(ctx)
         assert result.handled
         assert "CLI" in (result.response or "")
@@ -468,19 +444,6 @@ class TestSubagentCommand:
         # "lst" is one char off "list" — should hint.
         assert "list" in body
 
-    def test_create_owner_only_for_remote_admin(self, tmp_path: Path):
-        # An admin (non-owner) on wecom passes the top-level gate but
-        # must be blocked at the per-subcommand owner check.
-        ms = _FakeMemoryStore(admins={("wecom", "u1")})
-        ctx = _build_ctx(
-            _wecom_inbound("/subagent create helper"),
-            tmp_path,
-            memory_store=ms,
-        )
-        result = dispatch_command(ctx)
-        assert result.handled
-        assert "owner only" in (result.response or "").lower()
-
     def _seed_rich_pip_boy_persona(self, tmp_path: Path):
         """Write a pip-boy persona.md that has structured guidance
         beyond ``# Identity``, then rebuild the registry so
@@ -503,8 +466,9 @@ class TestSubagentCommand:
             "You are Pip-Boy, a personal assistant agent.\n"
             "Your working directory is {workdir}.\n\n"
             "# Identity Recognition\n\n"
-            "Each `<user_query>` carries sender metadata; the owner "
-            "profile is read-only and lives at `.pip/owner.md`.\n\n"
+            "Each `<user_query>` carries sender metadata; contacts are "
+            "tracked in `<workspace>/.pip/addressbook/` and managed via "
+            "the `remember_user` tool.\n\n"
             "# Tool Calling\n\nPrefer specialized tools.\n\n"
             "# Memory\n\nReflect after meaningful work.\n",
             encoding="utf-8",
@@ -687,9 +651,9 @@ class TestSubagentCommand:
         """New sub-agents must ship with the full operational persona
         (Identity Recognition, Tool Calling, Memory, etc.), not just
         a 4-line identity stub. Otherwise they see the injected
-        ``# User`` block in their prompt but have no framework to
-        interpret it — exactly the "sub-agent doesn't know the owner"
-        bug from the identity-redesign thread."""
+        ``## Addressbook`` block in their prompt but have no framework
+        to interpret it — exactly the "sub-agent doesn't know who the
+        user is" bug from the identity-redesign thread."""
         self._seed_rich_pip_boy_persona(tmp_path)
         ctx = _build_ctx(_cli_inbound("/subagent create helper"), tmp_path)
         result = dispatch_command(ctx)
@@ -705,7 +669,6 @@ class TestSubagentCommand:
         assert "You are {agent_name}" in persona
         assert "name: helper" in persona
         assert "Pip-Boy" in persona
-        assert "owner" in persona.lower()
 
         # Inherited sections survived the identity rewrite.
         for heading in ("# Identity Recognition", "# Tool Calling", "# Memory"):
@@ -1250,8 +1213,10 @@ class TestSubagentReset:
         assert not (pip_dir / "memories.json").exists()
         obs_after = pip_dir / "observations"
         assert obs_after.is_dir() and list(obs_after.iterdir()) == []
-        users_after = pip_dir / "users"
-        assert users_after.is_dir() and list(users_after.iterdir()) == []
+        # Sub-agents no longer carry a local addressbook — contacts
+        # live at the workspace root and are shared across agents.
+        assert not (pip_dir / "addressbook").exists()
+        assert not (pip_dir / "users").exists()
 
     def test_reset_refuses_root_agent(self, tmp_path: Path):
         """Root reset is rejected: the handler's own MemoryStore /
@@ -1269,7 +1234,9 @@ class TestSubagentReset:
         pip_dir.mkdir(parents=True, exist_ok=True)
         (pip_dir / "memories.json").write_text("[\"keep\"]", encoding="utf-8")
         (pip_dir / "state.json").write_text("{\"keep\": true}", encoding="utf-8")
-        (pip_dir / "owner.md").write_text("owner", encoding="utf-8")
+        ab = pip_dir / "addressbook"
+        ab.mkdir(exist_ok=True)
+        (ab / "alice.md").write_text("# Alice\n", encoding="utf-8")
 
         result = dispatch_command(ctx)
         assert result.handled, result.response
@@ -1281,7 +1248,7 @@ class TestSubagentReset:
         # mutation, which is the whole point.
         assert (pip_dir / "memories.json").read_text(encoding="utf-8") == "[\"keep\"]"
         assert (pip_dir / "state.json").read_text(encoding="utf-8") == "{\"keep\": true}"
-        assert (pip_dir / "owner.md").read_text(encoding="utf-8") == "owner"
+        assert (ab / "alice.md").read_text(encoding="utf-8") == "# Alice\n"
 
     def test_reset_strips_sdk_session_entries_for_agent(
         self, tmp_path: Path,
@@ -1385,61 +1352,6 @@ class TestSubagentReset:
         result = dispatch_command(reset_ctx)
         assert result.handled, result.response
         assert called == ["helper"]
-
-
-# ---------------------------------------------------------------------------
-# /admin subcommand matrix — owner-only gate already covered; here we
-# verify routing to the MemoryStore ACL methods
-# ---------------------------------------------------------------------------
-
-
-class TestAdminSubcommands:
-    def test_admin_requires_subcommand(self, tmp_path: Path):
-        ms = _FakeMemoryStore()
-        ctx = _build_ctx(
-            _cli_inbound("/admin"), tmp_path, memory_store=ms,
-        )
-        result = dispatch_command(ctx)
-        assert result.handled
-        assert "Usage:" in (result.response or "")
-
-    def test_admin_list_empty(self, tmp_path: Path):
-        ms = _FakeMemoryStore()
-        ctx = _build_ctx(
-            _cli_inbound("/admin list"), tmp_path, memory_store=ms,
-        )
-        result = dispatch_command(ctx)
-        assert result.handled
-        assert "No admin users" in (result.response or "")
-
-    def test_admin_list_populated(self, tmp_path: Path):
-        ms = _FakeMemoryStore(admins={("wecom", "u1"), ("wecom", "u2")})
-        ctx = _build_ctx(
-            _cli_inbound("/admin list"), tmp_path, memory_store=ms,
-        )
-        result = dispatch_command(ctx)
-        assert result.handled
-        body = result.response or ""
-        assert "wecom:u1" in body
-        assert "wecom:u2" in body
-
-    def test_admin_grant_requires_name(self, tmp_path: Path):
-        ms = _FakeMemoryStore()
-        ctx = _build_ctx(
-            _cli_inbound("/admin grant"), tmp_path, memory_store=ms,
-        )
-        result = dispatch_command(ctx)
-        assert result.handled
-        assert "Usage:" in (result.response or "")
-
-    def test_admin_grant_forwards_to_store(self, tmp_path: Path):
-        ms = _FakeMemoryStore()
-        ctx = _build_ctx(
-            _cli_inbound("/admin grant alice"), tmp_path, memory_store=ms,
-        )
-        result = dispatch_command(ctx)
-        assert result.handled
-        assert "granted admin for alice" in (result.response or "")
 
 
 # ---------------------------------------------------------------------------

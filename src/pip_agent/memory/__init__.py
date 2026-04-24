@@ -1,7 +1,7 @@
 """Memory subsystem: per-agent behavioural memory with three-tier pipeline.
 
-Storage layout (v2 / post identity-redesign)
---------------------------------------------
+Storage layout
+--------------
 Each agent's memory lives directly under its own ``.pip/`` directory:
 
     <agent_dir>/
@@ -9,14 +9,19 @@ Each agent's memory lives directly under its own ``.pip/`` directory:
         observations/<date>.jsonl
         memories.json
         axioms.md
-        users/<name>.md       (per-agent user profiles, tool-managed)
 
 For the root ``pip-boy`` agent ``<agent_dir>`` is ``WORKDIR/.pip``.
 For a sub-agent ``X`` it is ``WORKDIR/X/.pip``.
 
-Workspace-level ACL state (``owner.md``) lives at
-``<workspace_pip_dir>/owner.md`` and is shared by every agent — the
-owner is a property of the human running Pip, not of any one agent.
+Addressbook (user profiles) is **workspace-shared** — one flat directory
+under the root ``.pip`` that every agent reads and writes:
+
+    <workspace_pip_dir>/addressbook/<name>.md
+
+There is no "owner" concept. Whoever is using Pip is just another
+contact the agent learns through conversation and records via
+``remember_user``. Sub-agents use the same tool and see the same
+addressbook as the root agent.
 
 Construction
 ~~~~~~~~~~~~
@@ -61,11 +66,17 @@ class MemoryStore:
 
         self.agent_id = agent_id
         self.agent_dir = agent_dir
-        self.pip_dir = workspace_pip_dir  # shared workspace scope (owner.md)
+        # Workspace-shared scope: addressbook/ (user profiles) lives
+        # here, visible to every agent in the workspace.
+        self.pip_dir = workspace_pip_dir
         self._io_lock = threading.Lock()
         self.agent_dir.mkdir(parents=True, exist_ok=True)
         (self.agent_dir / "observations").mkdir(exist_ok=True)
-        (self.agent_dir / "users").mkdir(exist_ok=True)
+        # Addressbook is shared — only the root's workspace_pip_dir
+        # actually owns the directory on disk, but every MemoryStore
+        # self-heals it so a pre-root sub-agent invocation still works.
+        self.pip_dir.mkdir(parents=True, exist_ok=True)
+        (self.pip_dir / "addressbook").mkdir(exist_ok=True)
 
     # ------------------------------------------------------------------
     # State
@@ -247,7 +258,7 @@ class MemoryStore:
             atomic_write(path, text)
 
     # ------------------------------------------------------------------
-    # User profiles (owner.md read-only + users/*.md tool-managed)
+    # Addressbook (user profiles, workspace-shared, tool-managed)
     # ------------------------------------------------------------------
 
     _FIELD_MAP: dict[str, str] = {
@@ -257,31 +268,21 @@ class MemoryStore:
         "notes": "Notes",
     }
 
-    def load_user_profile(self) -> str:
-        """Load the owner profile (read-only, never modified by tools)."""
-        path = self.pip_dir / "owner.md"
-        if not path.is_file():
-            return ""
-        try:
-            return path.read_text(encoding="utf-8").strip()
-        except OSError:
-            return ""
+    @property
+    def addressbook_dir(self) -> Path:
+        return self.pip_dir / "addressbook"
 
     def _all_profile_paths(self) -> list[Path]:
-        """Return owner.md + all per-agent users/*.md paths."""
-        paths: list[Path] = []
-        owner = self.pip_dir / "owner.md"
-        if owner.is_file():
-            paths.append(owner)
-        users_dir = self.agent_dir / "users"
-        if users_dir.is_dir():
-            paths.extend(sorted(users_dir.glob("*.md")))
-        return paths
+        """Return every contact file in the shared addressbook."""
+        ab = self.addressbook_dir
+        if not ab.is_dir():
+            return []
+        return sorted(ab.glob("*.md"))
 
     def find_profile_by_sender(
         self, channel: str, sender_id: str,
     ) -> Path | None:
-        """Find which profile file contains this channel:sender_id."""
+        """Find which contact file contains this channel:sender_id."""
         if not sender_id:
             return None
         target = f"{channel}:{sender_id}"
@@ -306,34 +307,12 @@ class MemoryStore:
         log.debug("find_profile_by_sender: no match for %r", expected)
         return None
 
-    def _find_in_users(
-        self, channel: str, sender_id: str,
-    ) -> Path | None:
-        """Find a sender_id only within per-agent users/*.md (excludes owner.md)."""
-        if not sender_id:
-            return None
-        target = f"{channel}:{sender_id}"
-        users_dir = self.agent_dir / "users"
-        if not users_dir.is_dir():
-            return None
-        for path in sorted(users_dir.glob("*.md")):
-            try:
-                for line in path.read_text(encoding="utf-8").splitlines():
-                    if line.strip() == f"- `{target}`":
-                        return path
-            except OSError:
-                continue
-        return None
-
     def _find_user_by_name(self, name: str) -> Path | None:
-        """Find a per-agent users/*.md profile whose Name or What to call them matches."""
+        """Find a contact whose Name or What to call them matches."""
         if not name:
             return None
-        users_dir = self.agent_dir / "users"
-        if not users_dir.is_dir():
-            return None
         target_lower = name.strip().lower()
-        for path in sorted(users_dir.glob("*.md")):
+        for path in self._all_profile_paths():
             try:
                 for line in path.read_text(encoding="utf-8").splitlines():
                     stripped = line.strip()
@@ -371,23 +350,23 @@ class MemoryStore:
         channel: str = "",
         **fields: str,
     ) -> str:
-        """Create or update a user profile in users/. Returns confirmation.
+        """Create or update a contact in the shared addressbook.
 
-        Only operates on per-agent users/ directory — never touches owner.md.
-        A registered sender is locked to their own profile.
-        An unregistered sender may join an existing profile by name or create new.
+        A sender already bound to a profile (matching ``channel:sender_id``
+        in its Identifiers list) is locked to that profile. An unbound
+        sender may join an existing profile by Name match or create a
+        brand new contact.
         """
         if sender_id and channel and sender_id.startswith(f"{channel}:"):
             sender_id = sender_id[len(channel) + 1:]
 
-        if sender_id and channel and channel != "cli" and self.is_owner(channel, sender_id):
-            return "This sender is the owner. Owner profile is read-only."
-
         new_id = f"{channel}:{sender_id}" if sender_id and channel else ""
-        users_dir = self.agent_dir / "users"
-        users_dir.mkdir(parents=True, exist_ok=True)
+        ab = self.addressbook_dir
+        ab.mkdir(parents=True, exist_ok=True)
 
-        registered_path = self._find_in_users(channel, sender_id) if new_id else None
+        registered_path = (
+            self.find_profile_by_sender(channel, sender_id) if new_id else None
+        )
 
         if registered_path:
             target_path = registered_path
@@ -398,11 +377,10 @@ class MemoryStore:
                 target_path = existing
             else:
                 safe = _sanitize_filename(name or sender_id or "unknown")
-                target_path = users_dir / f"{safe}.md"
+                target_path = ab / f"{safe}.md"
 
         current: dict[str, str] = {}
         current_ids: list[str] = []
-        current_admin: str | None = None
         if target_path.is_file():
             try:
                 in_ids = False
@@ -412,8 +390,6 @@ class MemoryStore:
                         prefix = f"- **{label}:**"
                         if stripped.startswith(prefix):
                             current[key] = stripped[len(prefix):].strip()
-                    if stripped.startswith("- **Admin:**"):
-                        current_admin = stripped[len("- **Admin:**"):].strip()
                     if stripped == "- **Identifiers:**":
                         in_ids = True
                         continue
@@ -450,8 +426,6 @@ class MemoryStore:
         for key, label in self._FIELD_MAP.items():
             val = current.get(key, "")
             lines.append(f"- **{label}:** {val}")
-        if current_admin is not None:
-            lines.append(f"- **Admin:** {current_admin}")
         if current_ids:
             lines.append("- **Identifiers:**")
             for ident in current_ids:
@@ -460,114 +434,13 @@ class MemoryStore:
 
         target_path.parent.mkdir(parents=True, exist_ok=True)
         # Atomic write so a crash mid-flush (Ctrl+C, OOM, power loss)
-        # can't leave a user profile half-written. The file is the
-        # source of truth for identity binding, admin bit, and the
-        # aliases list — a truncated write would silently demote a
-        # user to "unregistered" on the next load.
+        # can't leave a contact half-written. The file is the source
+        # of truth for identity binding and the aliases list — a
+        # truncated write would silently demote a user to "unregistered"
+        # on the next load.
         from pip_agent.fileutil import atomic_write
         atomic_write(target_path, "\n".join(lines))
-        return f"Updated user profile ({target_path.name}): {', '.join(updated_keys)}"
-
-    # ------------------------------------------------------------------
-    # ACL: owner / admin
-    # ------------------------------------------------------------------
-
-    def is_owner(self, channel: str, sender_id: str) -> bool:
-        """Check if sender is the owner (CLI always True; otherwise match owner.md)."""
-        if channel == "cli":
-            return True
-        if not sender_id:
-            return False
-        target = f"{channel}:{sender_id}"
-        owner_path = self.pip_dir / "owner.md"
-        if not owner_path.is_file():
-            return False
-        try:
-            for line in owner_path.read_text(encoding="utf-8").splitlines():
-                if line.strip() == f"- `{target}`":
-                    return True
-        except OSError:
-            pass
-        return False
-
-    def is_admin(self, channel: str, sender_id: str) -> bool:
-        """Check if sender has admin privileges in their user profile."""
-        if not sender_id:
-            return False
-        profile = self._find_in_users(channel, sender_id)
-        if not profile:
-            return False
-        try:
-            for line in profile.read_text(encoding="utf-8").splitlines():
-                stripped = line.strip()
-                if stripped.startswith("- **Admin:**"):
-                    val = stripped[len("- **Admin:**"):].strip().lower()
-                    return val == "yes"
-        except OSError:
-            pass
-        return False
-
-    def set_admin(self, name: str, *, grant: bool) -> str:
-        """Grant or revoke admin for a user identified by name."""
-        profile = self._find_user_by_name(name)
-        if not profile:
-            return f"[error] User profile not found for '{name}'."
-        try:
-            content = profile.read_text(encoding="utf-8")
-        except OSError:
-            return f"[error] Cannot read profile for '{name}'."
-
-        lines = content.splitlines()
-        new_val = "yes" if grant else "no"
-        found = False
-        for i, line in enumerate(lines):
-            if line.strip().startswith("- **Admin:**"):
-                lines[i] = f"- **Admin:** {new_val}"
-                found = True
-                break
-
-        if not found:
-            insert_idx = len(lines)
-            for i, line in enumerate(lines):
-                if line.strip() == "- **Identifiers:**":
-                    insert_idx = i
-                    break
-            lines.insert(insert_idx, f"- **Admin:** {new_val}")
-
-        # Atomic write mirrors ``update_user_profile``: a torn write
-        # here would revert the admin flag to its previous value (or
-        # worse, corrupt the whole profile) on the next load.
-        from pip_agent.fileutil import atomic_write
-        atomic_write(profile, "\n".join(lines))
-        action = "Granted" if grant else "Revoked"
-        return f"{action} admin for '{name}'."
-
-    def list_admins(self) -> list[str]:
-        """Return names of all users with admin privileges."""
-        admins: list[str] = []
-        users_dir = self.agent_dir / "users"
-        if not users_dir.is_dir():
-            return admins
-        for path in sorted(users_dir.glob("*.md")):
-            try:
-                is_admin = False
-                name = ""
-                for line in path.read_text(encoding="utf-8").splitlines():
-                    stripped = line.strip()
-                    if stripped.startswith("- **Admin:**"):
-                        val = stripped[len("- **Admin:**"):].strip().lower()
-                        is_admin = val == "yes"
-                    if not name:
-                        for prefix in ("- **What to call them:**", "- **Name:**"):
-                            if stripped.startswith(prefix):
-                                val = stripped[len(prefix):].strip()
-                                if val:
-                                    name = val
-                if is_admin and name:
-                    admins.append(name)
-            except OSError:
-                continue
-        return admins
+        return f"Updated addressbook entry ({target_path.name}): {', '.join(updated_keys)}"
 
     # ------------------------------------------------------------------
     # Search / Recall
@@ -623,29 +496,24 @@ class MemoryStore:
         """Inject dynamic context into the system prompt.
 
         Layers (injected in order):
-          1. ## User — owner profile + all known user profiles
+          1. ## Addressbook — every known contact (workspace-shared)
           2. ## Judgment Principles — per-agent axioms
           3. ## Recalled Context — TF-IDF matched memories
           4. ## Context — runtime metadata
           5. ## Channel — channel hints
         """
         sections: list[str] = []
-        owner_text = self.load_user_profile()
-        if owner_text:
-            sections.append(owner_text)
-        users_dir = self.agent_dir / "users"
-        if users_dir.is_dir():
-            for path in sorted(users_dir.glob("*.md")):
-                try:
-                    text = path.read_text(encoding="utf-8").strip()
-                    if text:
-                        sections.append(text)
-                except OSError:
-                    continue
+        for path in self._all_profile_paths():
+            try:
+                text = path.read_text(encoding="utf-8").strip()
+                if text:
+                    sections.append(text)
+            except OSError:
+                continue
         if sections:
             system_prompt = _insert_after_identity(
                 system_prompt,
-                "## User\n\n" + "\n\n---\n\n".join(sections),
+                "## Addressbook\n\n" + "\n\n---\n\n".join(sections),
             )
 
         axioms = self.load_axioms()

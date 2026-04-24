@@ -8,9 +8,8 @@ The workspace root itself belongs to the default ``pip-boy`` agent:
       .pip/                 <- pip-boy's own state + workspace-shared state
         persona.md          <- pip-boy persona
         HEARTBEAT.md
-        owner.md
+        addressbook/        <- shared contacts (all agents read/write)
         observations/
-        users/
         incoming/
         credentials/
         bindings.json
@@ -22,7 +21,6 @@ The workspace root itself belongs to the default ``pip-boy`` agent:
           persona.md
           HEARTBEAT.md
           observations/
-          users/
           incoming/
       .env
       .gitignore
@@ -49,7 +47,6 @@ _MANIFEST_NAME = ".scaffold_manifest.json"
 _SCAFFOLD_FILES: list[tuple[str, str]] = [
     (".pip/persona.md", "pip-boy.md"),
     (".pip/HEARTBEAT.md", "heartbeat.md"),
-    (".pip/owner.md", "owner.md"),
     (".env", "env.example"),
 ]
 
@@ -160,7 +157,7 @@ def _ensure_dirs(workdir: Path) -> None:
     dirs = [
         ".pip",
         ".pip/observations",
-        ".pip/users",
+        ".pip/addressbook",
         ".pip/incoming",
         ".pip/credentials",
     ]

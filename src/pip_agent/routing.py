@@ -11,7 +11,7 @@ Pip-Boy runs a single service process rooted at ``WORKDIR``
 * User-created sub-agents live in subdirectories of the workspace:
   ``WORKDIR/<agent_id>/.pip/<...>``. Their ``cwd`` (as seen by the
   Claude Agent SDK subprocess) is ``WORKDIR/<agent_id>``.
-* Workspace-level state shared by all agents (``owner.md``,
+* Workspace-level state shared by all agents (``addressbook/``,
   ``bindings.json``, ``sdk_sessions.json``, ``agents_registry.json``,
   ``credentials/``) lives in ``WORKDIR/.pip/``.
 
@@ -162,7 +162,7 @@ class AgentPaths:
     workspace_pip_dir: Path
     """The workspace root's ``.pip/`` directory.
 
-    Shared by all agents: ``owner.md``, ``bindings.json``,
+    Shared by all agents: ``addressbook/``, ``bindings.json``,
     ``sdk_sessions.json``, ``agents_registry.json``, ``credentials/``.
     For the root agent it is the same path as :attr:`pip_dir`.
     """
@@ -185,10 +185,6 @@ class AgentPaths:
     @property
     def incoming_dir(self) -> Path:
         return self.pip_dir / "incoming"
-
-    @property
-    def users_dir(self) -> Path:
-        return self.pip_dir / "users"
 
 
 # ---------------------------------------------------------------------------

@@ -34,9 +34,9 @@ One Pip-Boy host, many surfaces. All channels feed into the same inbound message
 
 ### User identity & ACL
 
-- **Owner profile** — `owner.md` is the source of truth for who owns this workspace. CLI is always owner.
-- **User profiles** — The `remember_user` MCP tool lets the agent record identity / preferences about whoever is talking to it (`users/*.md`).
-- **ACL gate** — `/admin` is owner-only; other mutating slash commands require admin or owner. Gate is enforced in the host dispatcher, not in individual handlers.
+- **Shared addressbook** — Every contact the agent recognizes lives in one flat directory at `<workspace>/.pip/addressbook/<name>.md`. The root agent and every sub-agent read and write the same addressbook, so a user recorded from any agent is immediately known to every other. There is no special "owner" role — the local CLI user is just another entry, remembered via `remember_user` after a first-contact conversation.
+- **`remember_user` MCP tool** — How the agent stores / updates a contact's name, preferred form of address, timezone, notes, and channel identifiers.
+- **ACL gate** — All commands are open on every channel except the `/subagent` lifecycle family and `/exit`, which are **CLI-only**. The `/help` output on remote channels (WeCom, WeChat) hides these commands entirely, so remote peers don't even learn they exist.
 
 ### Durable scheduling
 
@@ -149,11 +149,11 @@ Two separate verb surfaces:
 - **`/subagent`** — sibling lifecycle (create, archive, delete, reset, list). Pip-boy only. Git-style subcommands; no `--flag` options.
 - **`/bind` / `/unbind`** — a symmetric routing pair for *this chat*. Works from any agent, including directly between sibling sub-agents without round-tripping through pip-boy. This is user navigation, not sibling management, so it's not gated to pip-boy.
 
-ACL: `/help` and `/status` are open; `/admin` and the destructive `/subagent` subcommands (`create`, `archive`, `delete`, `reset`) are owner-only; the rest require owner or admin. CLI is always owner.
+ACL: every command is open to every sender on every channel with one exception — the `/subagent` lifecycle family and `/exit` are **CLI-only**, refused on remote channels and hidden from the remote `/help` output. There is no "owner" / "admin" concept anymore; identity is tracked in the shared `addressbook/` and recorded via the `remember_user` tool.
 
 | Command | Description |
 |---|---|
-| `/help` | Show all available commands. |
+| `/help` | Show all available commands (CLI-only commands are hidden on remote channels). |
 | `/status` | Current agent, session key, binding, and channel. |
 | `/memory` | Memory statistics for the current agent. |
 | `/axioms` | Current judgment principles (`axioms.md`). |
@@ -161,14 +161,13 @@ ACL: `/help` and `/status` are open; `/admin` and the destructive `/subagent` su
 | `/cron` | List scheduled cron jobs. |
 | `/bind <id>` | Route this chat to sub-agent `<id>`. Works from any agent. `/bind pip-boy` is rejected with a redirect to `/unbind` — "on pip-boy" has exactly one canonical representation (no binding row). |
 | `/unbind` | Clear this chat's binding so routing falls back to pip-boy. No-op when already on pip-boy. |
-| `/subagent` | **pip-boy only.** List known sub-agents (alias for `/subagent list`). |
-| `/subagent list` | **pip-boy only.** List known sub-agents. |
-| `/subagent create <id>` | **pip-boy only, owner.** Scaffold `<workspace>/<id>/.pip/` and register the sub-agent. |
-| `/subagent archive <id>` | **pip-boy only, owner.** Move the sub-agent's `.pip/` to `<workspace>/.pip/archived/` and drop its bindings. Project files in `<id>/` are untouched. |
-| `/subagent delete <id> --yes` | **pip-boy only, owner.** Wipe the sub-agent's `.pip/` and drop its bindings. Project files in `<id>/` are untouched. |
-| `/subagent reset <id>` | **pip-boy only, owner.** Rebuild sub-agent `<id>`'s `.pip/` from a minimal backup — preserves `persona.md` + `HEARTBEAT.md`; everything else is wiped and lazily re-created. Refused on the root agent (pip-boy can't safely self-surgery while running; stop the host and rebuild offline instead). |
-| `/admin grant\|revoke\|list [name]` | Manage admin privileges (owner only). |
-| `/exit` | Quit Pip-Boy (CLI only). |
+| `/subagent` | **pip-boy only, CLI-only.** List known sub-agents (alias for `/subagent list`). |
+| `/subagent list` | **pip-boy only, CLI-only.** List known sub-agents. |
+| `/subagent create <id>` | **pip-boy only, CLI-only.** Scaffold `<workspace>/<id>/.pip/` and register the sub-agent. |
+| `/subagent archive <id>` | **pip-boy only, CLI-only.** Move the sub-agent's `.pip/` to `<workspace>/.pip/archived/` and drop its bindings. Project files in `<id>/` are untouched. |
+| `/subagent delete <id> --yes` | **pip-boy only, CLI-only.** Wipe the sub-agent's `.pip/` and drop its bindings. Project files in `<id>/` are untouched. |
+| `/subagent reset <id>` | **pip-boy only, CLI-only.** Rebuild sub-agent `<id>`'s `.pip/` from a minimal backup — preserves `persona.md` + `HEARTBEAT.md`; everything else is wiped and lazily re-created. Refused on the root agent (pip-boy can't safely self-surgery while running; stop the host and rebuild offline instead). |
+| `/exit` | **CLI-only.** Quit Pip-Boy. |
 
 `/subagent` is the pip-boy-only management console. From any sub-agent it returns a redirect to `/unbind` — sub-agents focus on their own work and don't manage siblings. Routing (`/bind` / `/unbind`) is a separate pair of commands that navigate *this chat* and work from anywhere.
 
@@ -187,13 +186,12 @@ Unknown slash commands (and unknown `/subagent` subcommands) fail fast with an `
 ├── .pip/                        # pip-boy (root agent) + workspace runtime
 │   ├── persona.md               # pip-boy persona + YAML frontmatter
 │   ├── HEARTBEAT.md
-│   ├── owner.md                 # Owner profile (read-only)
+│   ├── addressbook/             # Shared contacts (.md) — every agent reads / writes here
 │   ├── cron.json                # pip-boy's scheduled jobs
 │   ├── state.json               # Memory pipeline cursors
 │   ├── memories.json            # L2 consolidated memories
 │   ├── axioms.md                # L3 judgment principles
 │   ├── observations/            # L1 observation files (.jsonl)
-│   ├── users/                   # User profiles (.md)
 │   ├── incoming/                # Inbound attachments landing zone
 │   ├── credentials/             # Channel keys (WeChat / WeCom)
 │   ├── bindings.json            # Channel → agent routing (workspace-wide)
@@ -206,7 +204,7 @@ Unknown slash commands (and unknown `/subagent` subcommands) fail fast with an `
     │   ├── persona.md
     │   ├── HEARTBEAT.md
     │   ├── state.json cron.json memories.json axioms.md
-    │   ├── observations/ users/ incoming/
+    │   ├── observations/ incoming/    # sub-agents share the root's addressbook/
     └── .claude/                 # Optional: local CC overrides (see below)
 ```
 

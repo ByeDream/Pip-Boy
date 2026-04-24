@@ -42,7 +42,8 @@ def _make_store(agents_root: Path, agent_id: str = "pip-boy") -> MemoryStore:
     that these tests still use internally (the tests don't care about
     the exact tree — only that a working store lives somewhere under
     ``tmp_path``). ``workspace_pip_dir`` is set to ``agents_root`` so
-    ``owner.md`` lookups, when they happen, stay isolated.
+    the shared ``addressbook/`` lives there alongside any per-test
+    scratch state.
     """
     agent_dir = agents_root / agent_id
     return MemoryStore(
@@ -213,9 +214,11 @@ class TestRememberUser:
     * ``channel:peer`` sender_id prefix is stripped before persistence.
       This contract matters because the LLM frequently re-emits the fully
       qualified id it saw in the prompt, and double-prefixing would
-      corrupt the users/ filename space.
+      corrupt the addressbook filename space.
     * Channel is inferred from ``ctx.channel`` when not given, defaulting
-      to ``"cli"`` so CLI-owner onboarding works from day one.
+      to ``"cli"`` so local terminal onboarding works from day one.
+    * The addressbook is workspace-shared: writes from any agent land in
+      ``<workspace>/.pip/addressbook/``.
     """
 
     def _call(self, ctx, args):
@@ -251,7 +254,7 @@ class TestRememberUser:
         )
         self._call(ctx, {"name": "Alice", "timezone": "Asia/Shanghai"})
         # Prefix must be stripped — otherwise the file lands at
-        # users/wecom_wecom_alice.md and nothing can find it again.
+        # addressbook/wecom_wecom_alice.md and nothing can find it again.
         assert seen["sender_id"] == "alice"
         assert seen["channel"] == "wecom"
         assert seen["fields"]["name"] == "Alice"
@@ -265,10 +268,46 @@ class TestRememberUser:
             lambda **kw: (seen.update(kw), "ok")[1],
         )
         ctx = McpContext(memory_store=ms, sender_id="local")
-        self._call(ctx, {"name": "Owner"})
+        self._call(ctx, {"name": "User"})
         assert seen["channel"] == "cli"
         # ``local`` has no ``cli:`` prefix, so it passes through unchanged.
         assert seen["sender_id"] == "local"
+
+    def test_write_lands_in_workspace_addressbook(self, tmp_path):
+        """End-to-end: a ``remember_user`` call from a sub-agent's
+        ``MemoryStore`` must persist in the workspace root's
+        ``addressbook/``, not under the sub-agent's own ``.pip/``."""
+        workspace = tmp_path / "workspace"
+        workspace_pip = workspace / ".pip"
+        workspace_pip.mkdir(parents=True)
+        sub_dir = workspace / "sub" / ".pip"
+        sub_dir.mkdir(parents=True)
+        ms = MemoryStore(
+            agent_dir=sub_dir,
+            workspace_pip_dir=workspace_pip,
+            agent_id="sub",
+        )
+
+        class _FakeCh:
+            name = "wecom"
+
+        ctx = McpContext(
+            memory_store=ms,
+            channel=_FakeCh(),  # type: ignore[arg-type]
+            sender_id="wecom:alice",
+        )
+        result = self._call(ctx, {"name": "Alice", "call_me": "Ali"})
+        assert result.get("is_error") is not True
+
+        root_ab = workspace_pip / "addressbook"
+        assert root_ab.is_dir()
+        files = list(root_ab.glob("*.md"))
+        assert files, "expected the contact to land in the root addressbook"
+        body = files[0].read_text(encoding="utf-8")
+        assert "Alice" in body
+        # The sub-agent dir stays addressbook-free.
+        assert not (sub_dir / "addressbook").exists()
+        assert not (sub_dir / "users").exists()
 
 
 # ---------------------------------------------------------------------------
