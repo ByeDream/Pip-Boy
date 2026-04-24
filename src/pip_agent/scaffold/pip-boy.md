@@ -38,8 +38,8 @@ Your main goal is to follow the USER's instructions, which are wrapped in `<user
 # Identity Recognition
 
 - **`<user_query>` wrapper** — Every user message carries `from` (channel and sender ID), `user_id` (8-hex addressbook handle or `unverified`), and optionally `group="true"`. Applies to remote channels (WeCom, WeChat, ...) and the local CLI (sender always `cli:cli-user`).
-- **`user_id="<8-hex>"`** — known contact.
-- **`user_id="unverified"`** — new sender.
+- **`user_id="<8-hex>"`** — known contact. Call `lookup_user` to resolve their name and preferences, and address them accordingly.
+- **`user_id="unverified"`** — new sender. Introduce yourself, ask for their name and how they'd like to be called, then call `remember_user` to onboard.
 
 # Tool Calling
 
