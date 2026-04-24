@@ -36,7 +36,6 @@ import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -65,22 +64,6 @@ class StaleSessionError(RuntimeError):
     """Raised by :meth:`StreamingSession.run_turn` when the CC server lost
     the session id we resumed against. AgentHost handles recovery.
     """
-
-
-@dataclass(slots=True)
-class _TurnPayload:
-    """Per-turn identity state we slam onto the shared McpContext.
-
-    The MCP tool handlers (see ``mcp_tools.py``) read these fields via
-    ``ctx.sender_id`` / ``ctx.peer_id`` / ``ctx.session_id`` at call
-    time, not via closure capture — so mutating the context in place
-    before each turn is safe and avoids any need to rebuild the MCP
-    server (which would defeat the point of reuse).
-    """
-
-    sender_id: str
-    peer_id: str
-    session_id: str  # The CC session id we've observed; "" until turn 1 resolves.
 
 
 class StreamingSession:

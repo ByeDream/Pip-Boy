@@ -66,7 +66,6 @@ from typing import Any
 # without touching ``sys.executable`` launcher time. Every ``cold_start(...)``
 # event records the delta from this anchor.
 PROCESS_START_MONO_NS: int = time.perf_counter_ns()
-PROCESS_START_TS: float = time.time()
 
 _ENABLED: bool = False
 _FILE: Any = None

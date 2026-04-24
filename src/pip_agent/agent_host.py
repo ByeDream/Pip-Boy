@@ -61,8 +61,8 @@ SESSION_STORE_PATH = WORKSPACE_PIP_DIR / "sdk_sessions.json"
 # Inbound file/image bytes get dropped under each agent's own
 # ``.pip/incoming/`` so (a) the LLM can reach them with its native
 # ``Read`` / ``Bash`` tools via a cwd-relative path, and (b) agents
-# don't clobber each other's uploads.
-INCOMING_DIR_NAME = "incoming"
+# don't clobber each other's uploads. The "incoming" directory name
+# itself lives on ``AgentPaths.incoming_dir``.
 _MAX_INCOMING_BYTES = 50 * 1024 * 1024  # 50 MB — matches send_file cap
 
 
@@ -1530,11 +1530,7 @@ class AgentHost:
         note on H4 — and splitting would force either re-entry or a
         fragile lock-hand-off between methods.
         """
-        eff = prepared.eff
-        svc = prepared.svc
         sk = prepared.sk
-        ch = prepared.ch
-        reply_peer = prepared.reply_peer
 
         is_heartbeat = inbound.sender_id == _HEARTBEAT_SENDER
         # Scheduler-injected senders skip SDK session persistence —
