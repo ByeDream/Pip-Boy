@@ -508,7 +508,7 @@ class TestFlushAndRotate:
         )
         # ``flush_and_rotate`` now asks the registry whether the agent
         # still exists before materialising its services, to avoid
-        # resurrecting a ``.pip/`` that ``/agent delete`` just wiped.
+        # resurrecting a ``.pip/`` that ``/subagent delete`` just wiped.
         # A tiny stub that always returns "yes" keeps the happy-path
         # tests honest without dragging the real AgentRegistry in.
         fake_registry = SimpleNamespace(

@@ -55,24 +55,26 @@ REGISTRY_SCHEMA_VERSION = 1
 
 # Agent IDs double as directory names under the workspace root, so they
 # must be safe on every supported OS (Windows in particular refuses
-# control chars, ``<>:"/\\|?*``, trailing dots/spaces). We also want
-# them legible in chat commands: ``/bind ProjectStella`` reads better
-# than ``/bind project_stella_01``, so mixed case is allowed.
-_VALID_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
-_INVALID_CHARS_RE = re.compile(r"[^A-Za-z0-9_-]+")
+# control chars, ``<>:"/\\|?*``, trailing dots/spaces). Windows is also
+# case-insensitive on disk — ``Helper`` and ``helper`` would collide —
+# so we canonicalise ids to lowercase. Human-facing display names live
+# in the ``name:`` frontmatter field instead.
+_VALID_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_INVALID_CHARS_RE = re.compile(r"[^a-z0-9_-]+")
 
 _RESERVED_IDS = {"", ".", "..", PIP_DIRNAME, ".claude", ".git"}
 
 
 def normalize_agent_id(value: str) -> str:
-    """Return a filesystem-safe agent id, falling back to the default.
+    """Return a filesystem-safe, lowercase agent id.
 
-    ``normalize_agent_id`` is intentionally lenient: it takes arbitrary
-    user input (e.g. ``"Project Stella!"``) and yields a safe directory
-    name (``"Project-Stella"``). Callers that want to reject bad input
+    Intentionally lenient: takes arbitrary user input
+    (e.g. ``"Project Stella!"``) and yields a safe directory name
+    (``"project-stella"``). Empty or fully-invalid input falls back to
+    :data:`DEFAULT_AGENT_ID`. Callers that want to reject bad input
     outright should use :func:`is_valid_agent_id` instead.
     """
-    trimmed = (value or "").strip()
+    trimmed = (value or "").strip().lower()
     if not trimmed:
         return DEFAULT_AGENT_ID
     if _VALID_ID_RE.match(trimmed) and trimmed not in _RESERVED_IDS:
@@ -113,10 +115,16 @@ class AgentConfig:
     def effective_dm_scope(self) -> str:
         return self.dm_scope or DEFAULT_DM_SCOPE
 
+    @property
+    def display_name(self) -> str:
+        """Human-facing name for this agent — ``name:`` frontmatter or id fallback."""
+        return self.name or self.id
+
     def system_prompt(self, workdir: str = "") -> str:
         body = self.system_body or ""
         body = body.replace("{workdir}", workdir)
         body = body.replace("{model_name}", self.effective_model)
+        body = body.replace("{agent_name}", self.display_name)
         return body
 
 
@@ -379,7 +387,7 @@ _BUILTIN_DEFAULT = AgentConfig(
     name="Pip-Boy",
     system_body=(
         "# Identity\n\n"
-        "You are Pip-Boy, a personal assistant agent.\n"
+        "You are {agent_name}, a personal assistant agent.\n"
         "Your working directory is {workdir}.\n"
     ),
     model=DEFAULT_MODEL,

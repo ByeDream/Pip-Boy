@@ -403,7 +403,7 @@ def _materialize_attachments(
     Conventionally ``incoming_dir`` is
     ``{agent_cwd}/.pip/incoming`` — one inbox per agent so two
     agents on the same channel can't trample each other's uploads,
-    and ``/agent reset`` for one agent doesn't affect another's
+    and ``/subagent reset`` for one agent doesn't affect another's
     pending files. Placing it under the per-agent dir also
     matches how memory, cron, and user profiles already partition
     state. Decoupled from ``workdir`` as a parameter so tests and
@@ -796,7 +796,7 @@ class AgentHost:
         The registry is authoritative, but we still want a sensible
         fallback when some code path hands us an unknown agent id (e.g.
         a binding that references an agent whose directory was moved
-        outside of ``/agent archive``). Returning root-level paths in
+        outside of ``/subagent archive``). Returning root-level paths in
         that edge case keeps the turn alive instead of 500-ing.
         """
         paths = self._registry.paths_for(agent_id)
@@ -1274,7 +1274,7 @@ class AgentHost:
                         "skipping reflect", sk,
                     )
                     return
-                # An agent that was ``/agent delete``d or ``archive``d
+                # An agent that was ``/subagent delete``d or ``archive``d
                 # mid-run will no longer resolve in the registry. Skip
                 # it — materialising ``_get_agent_services`` would
                 # resurrect a ``.pip/`` we just wiped via

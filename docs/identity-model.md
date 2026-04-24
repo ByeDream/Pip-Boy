@@ -52,29 +52,35 @@ merge.** Each agent — including `pip-boy` itself — owns its own.
     .claude/                 # optional: local CC overrides (see below)
 ```
 
-## Sub-agent lifecycle
+## Sub-agent lifecycle and routing
 
-Agent-lifecycle management lives under a single `/agent` verb — **the
-pip-boy-exclusive management console**. From a sub-agent, `/agent`
-returns a redirect to `/home`; sub-agents focus on their own work and
-don't manage siblings. Routing direction is symmetric:
+Two separate concerns with two separate verb surfaces:
 
-- `/agent switch <id>` — pip-boy → sub-agent (only available from pip-boy).
-- `/home` — sub-agent → pip-boy (available everywhere; no-op on pip-boy).
+- **`/subagent`** — sibling lifecycle (create, archive, delete, reset,
+  list). Pip-boy only; sub-agents don't manage siblings. Subcommand
+  style is git-like; no `--flag` options for configuration.
+- **`/bind` / `/unbind`** — symmetric routing pair for *this chat*.
+  Works from any agent, including directly from one sub-agent to
+  another. It's user navigation, not sibling management, so it's
+  not gated to pip-boy.
 
-The subcommand style is git-like; no `--flag` options for
-configuration.
+  - `/bind <id>` — route this chat to sub-agent `<id>`.
+  - `/unbind` — clear the binding; routing falls back to pip-boy.
+
+  `/bind pip-boy` is rejected with a redirect to `/unbind` so
+  "on pip-boy" has exactly one canonical representation (no binding
+  row), not two (absent row vs explicit row pointing at root).
 
 | Command | Effect | ACL |
 | --- | --- | --- |
-| `/home` | Clear this chat's binding so routing falls back to pip-boy. No-op when already on pip-boy. | owner-or-admin |
-| `/agent` | **pip-boy only.** Show pip-boy's detail + memory summary. | owner-or-admin |
-| `/agent list` | **pip-boy only.** List known agents. | owner-or-admin |
-| `/agent create <id>` | **pip-boy only.** Scaffold `<workspace>/<id>/.pip/` with a cloned persona + HEARTBEAT and register it. | owner |
-| `/agent archive <id>` | **pip-boy only.** Move `<id>/.pip/` → `<workspace>/.pip/archived/<id>-<ts>/.pip/`, drop bindings. Project files in `<id>/` untouched. | owner |
-| `/agent delete <id> --yes` | **pip-boy only.** `rmtree(<id>/.pip/)` and drop bindings. Project files in `<id>/` untouched. | owner |
-| `/agent switch <id>` | **pip-boy only.** Route this chat to sub-agent `<id>`. Use `/home` to come back. | owner-or-admin |
-| `/agent reset <id>` | **pip-boy only.** Rebuild `<id>`'s `.pip/` from a minimal backup (see below). | owner |
+| `/bind <id>` | Route this chat to sub-agent `<id>`. Works from any agent. `/bind pip-boy` is rejected with a redirect to `/unbind`. | owner-or-admin |
+| `/unbind` | Clear this chat's binding so routing falls back to pip-boy. No-op when already on pip-boy. | owner-or-admin |
+| `/subagent` | **pip-boy only.** List known sub-agents (alias for `/subagent list`). | owner-or-admin |
+| `/subagent list` | **pip-boy only.** List known sub-agents. | owner-or-admin |
+| `/subagent create <id>` | **pip-boy only.** Scaffold `<workspace>/<id>/.pip/` with a cloned persona + HEARTBEAT and register it. | owner |
+| `/subagent archive <id>` | **pip-boy only.** Move `<id>/.pip/` → `<workspace>/.pip/archived/<id>-<ts>/.pip/`, drop bindings. Project files in `<id>/` untouched. | owner |
+| `/subagent delete <id> --yes` | **pip-boy only.** `rmtree(<id>/.pip/)` and drop bindings. Project files in `<id>/` untouched. | owner |
+| `/subagent reset <id>` | **pip-boy only.** Rebuild sub-agent `<id>`'s `.pip/` from a minimal backup (see below). Refused on the root agent. | owner |
 
 There are no CLI flags for `model` / `dm_scope` / `description`. Edit
 the relevant file directly:
@@ -92,17 +98,13 @@ Destructive commands (`create`, `archive`, `delete`, `reset`) are
 never touched. "Delete the agent" means "end its identity", not "nuke
 the project".
 
-### `/agent reset <id>` — backup, delete, rebuild
+### `/subagent reset <id>` — backup, delete, rebuild
 
 `reset` is implemented as a clean four-step dance, not as surgical
 field-by-field clearing:
 
 1. **Stash** the identity files (`persona.md`, `HEARTBEAT.md`) to a
-   sibling temp directory. For the root agent (`pip-boy`), the
-   workspace-shared state is stashed too: `owner.md`, `bindings.json`,
-   `agents_registry.json`, `credentials/`, `archived/`. These are
-   the files you lose channel access / ACL / sub-agent inventory
-   over if they vanish — they're preserved by definition.
+   sibling temp directory.
 2. **Delete** the agent's entire `.pip/` directory.
 3. **Rebuild** an empty `.pip/` and restore the stash into it.
 4. **Drop** the temp stash.
@@ -111,12 +113,23 @@ As a side-step, entries keyed `agent:<id>:…` in the workspace-shared
 `sdk_sessions.json` are also removed, so the next turn opens a fresh
 SDK session.
 
-What survives: identity (persona + HEARTBEAT) and, for pip-boy, the
-five workspace-shared artefacts above.
+What survives: identity (`persona.md` + `HEARTBEAT.md`).
 What's wiped: observations, memories.json, axioms.md, state.json,
 users/, incoming/, cron.json, sdk_sessions entries for this agent,
 scaffold manifest, etc. These are all lazily re-created by the host
 on the next turn.
+
+**Root agent is refused.** `/subagent reset pip-boy` returns an
+explanatory error instead of running. The root's `.pip/` holds
+workspace-shared state (`owner.md`, `bindings.json`,
+`agents_registry.json`, `credentials/`, `archived/`) that other
+agents depend on, and its `MemoryStore` / `StreamingSession` are
+in active use by the very command handler that would perform the
+reset — any in-process self-surgery has a window in which the
+cached store points at wiped paths, sessions hold handles against
+CC's project dir, and concurrent writes can resurrect the files
+we just deleted. If you really need to reset the root, stop the
+host (`/exit`) and rebuild the root `.pip/` offline.
 
 ## How `.claude/` inheritance works (zero bridging)
 

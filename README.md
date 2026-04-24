@@ -144,7 +144,12 @@ Claude Code's `.claude/` configuration is inherited automatically via the Agent 
 
 ### Slash commands
 
-All agent lifecycle + routing lives under a single `/agent` verb with git-style subcommands. ACL: `/help` and `/status` are open; `/admin` and the destructive `/agent` subcommands (`create`, `archive`, `delete`, `reset`) are owner-only; the rest require owner or admin. CLI is always owner.
+Two separate verb surfaces:
+
+- **`/subagent`** — sibling lifecycle (create, archive, delete, reset, list). Pip-boy only. Git-style subcommands; no `--flag` options.
+- **`/bind` / `/unbind`** — a symmetric routing pair for *this chat*. Works from any agent, including directly between sibling sub-agents without round-tripping through pip-boy. This is user navigation, not sibling management, so it's not gated to pip-boy.
+
+ACL: `/help` and `/status` are open; `/admin` and the destructive `/subagent` subcommands (`create`, `archive`, `delete`, `reset`) are owner-only; the rest require owner or admin. CLI is always owner.
 
 | Command | Description |
 |---|---|
@@ -154,18 +159,18 @@ All agent lifecycle + routing lives under a single `/agent` verb with git-style 
 | `/axioms` | Current judgment principles (`axioms.md`). |
 | `/recall <query>` | Search stored memories. |
 | `/cron` | List scheduled cron jobs. |
-| `/home` | Leave the current sub-agent and return to pip-boy. Clears this chat's binding; routing falls back to the default agent. No-op when already on pip-boy. |
-| `/agent` | **pip-boy only.** Show pip-boy's detail + memory summary. |
-| `/agent list` | **pip-boy only.** List known agents. |
-| `/agent create <id>` | **pip-boy only, owner.** Scaffold `<workspace>/<id>/.pip/` and register the sub-agent. |
-| `/agent archive <id>` | **pip-boy only, owner.** Move the sub-agent's `.pip/` to `<workspace>/.pip/archived/` and drop its bindings. Project files in `<id>/` are untouched. |
-| `/agent delete <id> --yes` | **pip-boy only, owner.** Wipe the sub-agent's `.pip/` and drop its bindings. Project files in `<id>/` are untouched. |
-| `/agent switch <id>` | **pip-boy only.** Route this chat to sub-agent `<id>`. To come back, use `/home` (not `/agent switch pip-boy`). |
-| `/agent reset <id>` | **pip-boy only, owner.** Rebuild `<id>`'s `.pip/` from a minimal backup — preserves `persona.md` + `HEARTBEAT.md`, and (for the root agent) workspace-shared state (`owner.md`, `bindings.json`, `agents_registry.json`, `credentials/`, `archived/`). Everything else under the `.pip/` is wiped and left to be lazily re-created. |
+| `/bind <id>` | Route this chat to sub-agent `<id>`. Works from any agent. `/bind pip-boy` is rejected with a redirect to `/unbind` — "on pip-boy" has exactly one canonical representation (no binding row). |
+| `/unbind` | Clear this chat's binding so routing falls back to pip-boy. No-op when already on pip-boy. |
+| `/subagent` | **pip-boy only.** List known sub-agents (alias for `/subagent list`). |
+| `/subagent list` | **pip-boy only.** List known sub-agents. |
+| `/subagent create <id>` | **pip-boy only, owner.** Scaffold `<workspace>/<id>/.pip/` and register the sub-agent. |
+| `/subagent archive <id>` | **pip-boy only, owner.** Move the sub-agent's `.pip/` to `<workspace>/.pip/archived/` and drop its bindings. Project files in `<id>/` are untouched. |
+| `/subagent delete <id> --yes` | **pip-boy only, owner.** Wipe the sub-agent's `.pip/` and drop its bindings. Project files in `<id>/` are untouched. |
+| `/subagent reset <id>` | **pip-boy only, owner.** Rebuild sub-agent `<id>`'s `.pip/` from a minimal backup — preserves `persona.md` + `HEARTBEAT.md`; everything else is wiped and lazily re-created. Refused on the root agent (pip-boy can't safely self-surgery while running; stop the host and rebuild offline instead). |
 | `/admin grant\|revoke\|list [name]` | Manage admin privileges (owner only). |
 | `/exit` | Quit Pip-Boy (CLI only). |
 
-`/agent` is the pip-boy-only management console. From any sub-agent it returns a redirect to `/home` — sub-agents focus on their own work and don't manage siblings. `/home` is the one idiom for "return to pip-boy", symmetric with `/agent switch <id>` for "enter a sub-agent".
+`/subagent` is the pip-boy-only management console. From any sub-agent it returns a redirect to `/unbind` — sub-agents focus on their own work and don't manage siblings. Routing (`/bind` / `/unbind`) is a separate pair of commands that navigate *this chat* and work from anywhere.
 
 Per-agent settings (`model`, `dm_scope`, description) have **no command-line flags** — edit the backing files directly:
 
@@ -173,7 +178,7 @@ Per-agent settings (`model`, `dm_scope`, description) have **no command-line fla
 - `<workspace>/.pip/agents_registry.json` — descriptions and registry metadata.
 - `<workspace>/.pip/bindings.json` — channel → agent routing with optional per-binding `overrides`.
 
-Unknown slash commands (and unknown `/agent` subcommands) fail fast with an `Unknown command` error plus a `Did you mean …?` hint for close matches. They are **not** forwarded to the model — typos should not cost an LLM turn.
+Unknown slash commands (and unknown `/subagent` subcommands) fail fast with an `Unknown command` error plus a `Did you mean …?` hint for close matches. They are **not** forwarded to the model — typos should not cost an LLM turn.
 
 ### Workspace directory structure (v2)
 
@@ -224,7 +229,7 @@ See [`docs/identity-model.md`](docs/identity-model.md) for the full three-tier i
        │              AgentHost.process_inbound            │
        │ ┌─────────────────────────────────────────────┐   │
        │ │  Slash dispatch (host_commands.py)          │   │
-       │ │  — short-circuits /help, /status, /agent … —│  │
+       │ │  — short-circuits /help, /status, /subagent … —│  │
        │ └────────────────────┬────────────────────────┘   │
        │                      │ (unknown or non-slash)     │
        │                      ▼                            │

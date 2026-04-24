@@ -19,10 +19,9 @@ from pip_agent.routing import (
 
 class TestNormalizeAgentId:
     def test_simple(self):
-        # v2: ids are case-preserving to match directory names on disk
-        # (e.g. ``ProjectStella`` should round-trip). Only invalid
-        # characters force a rewrite.
-        assert normalize_agent_id("Pip-Boy") == "Pip-Boy"
+        # Ids are lowercased — Windows is case-insensitive on disk, so
+        # ``Helper`` and ``helper`` would collide.
+        assert normalize_agent_id("Pip-Boy") == "pip-boy"
 
     def test_empty(self):
         assert normalize_agent_id("") == DEFAULT_AGENT_ID
@@ -31,11 +30,16 @@ class TestNormalizeAgentId:
         assert normalize_agent_id("  ") == DEFAULT_AGENT_ID
 
     def test_special_chars(self):
-        # Whitespace + punctuation become dashes; case is preserved.
-        assert normalize_agent_id("My Bot!") == "My-Bot"
+        # Whitespace + punctuation become dashes, and case is folded.
+        assert normalize_agent_id("My Bot!") == "my-bot"
 
     def test_already_valid(self):
         assert normalize_agent_id("pm-bot") == "pm-bot"
+
+    def test_uppercase_already_valid_charset(self):
+        # Even if the characters would be valid after lowercasing, mixed
+        # case input is folded rather than rejected.
+        assert normalize_agent_id("ProjectStella") == "projectstella"
 
     def test_long_id(self):
         result = normalize_agent_id("a" * 100)
@@ -62,6 +66,28 @@ class TestAgentConfig:
         cfg = AgentConfig(id="my-agent")
         prompt = cfg.system_prompt()
         assert prompt == ""
+
+    def test_system_prompt_substitutes_agent_name(self):
+        # ``{agent_name}`` is the source of truth for how the model
+        # introduces itself — it's sourced from YAML ``name:`` with a
+        # fallback to id so frontmatter edits take effect without a
+        # body rewrite.
+        cfg = AgentConfig(
+            id="helper", name="Stella",
+            system_body="You are {agent_name}, an assistant running {model_name}.",
+            model="claude-opus-4-6",
+        )
+        prompt = cfg.system_prompt()
+        assert "You are Stella" in prompt
+        assert "claude-opus-4-6" in prompt
+
+    def test_system_prompt_agent_name_fallback_to_id(self):
+        cfg = AgentConfig(id="helper", system_body="You are {agent_name}.")
+        assert cfg.system_prompt() == "You are helper."
+
+    def test_display_name_prefers_name_over_id(self):
+        assert AgentConfig(id="pip-boy", name="Pip-Boy").display_name == "Pip-Boy"
+        assert AgentConfig(id="helper").display_name == "helper"
 
 
 class TestAgentConfigFromFile:
@@ -236,10 +262,10 @@ class TestBuildSessionKey:
         assert sk == "agent:pip-boy:cli:peer:cli-user"
 
     def test_normalizes_agent_id(self):
-        # v2: session keys preserve the case of the agent id because
-        # the id doubles as a directory name under the workspace root.
+        # Session keys use the lowercased, filesystem-safe id — the
+        # same one that names the agent's directory on disk.
         sk = build_session_key("Pip-Boy", "cli", "cli-user")
-        assert sk.startswith("agent:Pip-Boy:")
+        assert sk.startswith("agent:pip-boy:")
 
 
 class TestAgentRegistry:

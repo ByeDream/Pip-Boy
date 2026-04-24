@@ -64,7 +64,7 @@ class TestMemoryStoreBasics:
         self, tmp_path: Path,
     ):
         """Regression: a long-lived host caches ``MemoryStore`` across
-        ``/agent reset``, which wipes ``.pip/`` out from under it. The
+        ``/subagent reset``, which wipes ``.pip/`` out from under it. The
         next reflect must not die with ENOENT on
         ``observations/<date>.jsonl`` — ``write_observations`` re-creates
         the parent dir on demand the same way ``atomic_write`` does for

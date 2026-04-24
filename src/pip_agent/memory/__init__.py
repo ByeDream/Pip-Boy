@@ -99,7 +99,7 @@ class MemoryStore:
             # Self-heal the parent directory. ``MemoryStore.__init__``
             # already creates ``observations/`` once, but a long-lived
             # host caches the store across operations like
-            # ``/agent reset`` that blow away ``.pip/`` out from under
+            # ``/subagent reset`` that blow away ``.pip/`` out from under
             # it — mirroring ``atomic_write``'s mkdir-on-write contract
             # keeps reflect working without a process restart.
             path.parent.mkdir(parents=True, exist_ok=True)

@@ -45,7 +45,7 @@ Out of scope (intentional omissions for v0.4.0)
 * ``/profiles`` / ``/cooldowns`` / ``/stats`` / ``/simulate-failure`` /
   ``/fallback`` — the resilience runner was removed; CC owns retries.
 * ``/update`` — out-of-band upgrade flow isn't re-designed yet.
-* ``/clean`` — ``/agent delete <id> --yes`` covers the narrow safe
+* ``/clean`` — ``/subagent delete <id> --yes`` covers the narrow safe
   version (wipe metadata, keep project files); anything broader would
   be the chat-as-root-shell footgun.
 """
@@ -239,44 +239,52 @@ Available commands:
   /admin grant|revoke|list      Manage admin privileges (owner only)
   /exit                         Quit Pip-Boy (CLI only)
 
-  /home                         Leave the current sub-agent and return
-                                to pip-boy (clears this chat's binding)
+  /bind <id>                    Route this chat to sub-agent <id>
+                                (bind pip-boy is a redirect to /unbind)
+  /unbind                       Clear this chat's binding so routing
+                                falls back to pip-boy (no-op when
+                                already on pip-boy)
 
-  /agent                        pip-boy only: show pip-boy detail + memory
-  /agent list                   pip-boy only: list known agents
-  /agent create <id>            pip-boy only, owner: create a new sub-agent
-  /agent archive <id>           pip-boy only, owner: move <id>/.pip/ to
+  /subagent                     pip-boy only: list known sub-agents
+  /subagent create <label>      pip-boy only, owner: create a new sub-agent.
+      [--id ID]                 Default: normalize(<label>) — lowercased,
+                                safe for a directory name.
+      [--name NAME]             Default: same as id. Human-facing display
+                                name; can be mixed-case, spaces, CJK.
+      [--model MODEL]           Default: pip-boy's model.
+      [--dm_scope SCOPE]        Default: per-guild.
+                                Valid: main | per-guild | per-guild-peer.
+  /subagent archive <id>        pip-boy only, owner: move <id>/.pip/ to
                                 .pip/archived/ (project files untouched)
-  /agent delete <id> --yes      pip-boy only, owner: wipe <id>/.pip/
+  /subagent delete <id> --yes   pip-boy only, owner: wipe <id>/.pip/
                                 (project files untouched)
-  /agent switch <id>            pip-boy only: route this chat to <id>
-                                (to come back, use /home)
-  /agent reset <id>             pip-boy only, owner: rebuild <id>'s .pip/
-                                from a minimal backup — persona.md and
-                                HEARTBEAT.md are preserved, the root's
-                                workspace-shared state (owner.md,
-                                bindings.json, agents_registry.json,
-                                credentials/, archived/) is preserved,
-                                everything else is wiped and re-created.
+  /subagent reset <id>          pip-boy only, owner: rebuild sub-agent
+                                <id>'s .pip/ from a minimal backup —
+                                persona.md and HEARTBEAT.md are
+                                preserved, everything else is wiped
+                                and re-created. Not allowed on pip-boy
+                                itself (the running host is the one
+                                thing we can't safely self-surgery);
+                                stop the host and rebuild out-of-band
+                                if you really need to.
 
-Per-agent settings (model, dm_scope, description) are configured via
-  <workspace>/<id>/.pip/persona.md
-  <workspace>/.pip/agents_registry.json
-  <workspace>/.pip/bindings.json
-There are no command-line flags for these: edit the file if you need
-to deviate from the defaults.
+Per-agent settings after creation (model, dm_scope, description) are
+edited directly on disk:
+  <workspace>/<id>/.pip/persona.md       (name, model, dm_scope)
+  <workspace>/.pip/agents_registry.json  (description)
+  <workspace>/.pip/bindings.json         (routing bindings)
 
 Permissions:
   Owner (CLI or an identity listed in owner.md) can use all commands.
-  Admin users can read everything and /agent switch, but not
-  create/archive/delete/reset or /admin.
+  Admin users can read everything and /bind/unbind, but not
+  /subagent create|archive|delete|reset or /admin.
   Others are locked out.
 
 Bindings:
-  /agent switch in a group chat creates a guild-level binding; in a
-  private chat, a peer-level binding. Bindings persist across
-  restarts in <workspace>/.pip/bindings.json. /home removes the
-  binding for the current chat so routing falls back to pip-boy."""
+  /bind in a group chat creates a guild-level binding; in a private
+  chat, a peer-level binding. Bindings persist across restarts in
+  <workspace>/.pip/bindings.json. /unbind removes the binding for
+  the current chat so routing falls back to pip-boy."""
 
 
 def _cmd_help(_ctx: CommandContext, _args: str) -> CommandResult:
@@ -413,16 +421,36 @@ def _cmd_cron(ctx: CommandContext, _args: str) -> CommandResult:
 
 
 # ---------------------------------------------------------------------------
-# /agent — pip-boy's management console; /home — leave a sub-agent
+# /subagent — pip-boy's management console for sibling sub-agents
+# /bind + /unbind — symmetric routing pair for the current chat
 # ---------------------------------------------------------------------------
 #
+# Naming
+# ------
+# ``/subagent`` (not ``/agent``) because the verb surface ONLY manages
+# siblings under pip-boy. "/agent" misleadingly suggested "the current
+# agent's console"; "/subagent" matches the actual scope.
+#
+# Routing is a separate, symmetric pair:
+#
+#   /bind <id>   — route this chat to sub-agent <id>
+#   /unbind      — clear the binding, fall back to pip-boy
+#
+# These are **not** nested under /subagent, because they're navigation
+# actions on *this chat*, not management of the sibling registry. They
+# work from any agent (including from one sub-agent to another),
+# unlike the lifecycle verbs below.
+#
 # Design principles (agreed in the identity-redesign thread):
-#   * ``/agent`` is **pip-boy exclusive**: the whole subcommand family
-#     is only accessible when the current chat is bound to the root
-#     (``pip-boy``). Sub-agents focus on their own work; they don't
-#     manage siblings. To go back to pip-boy, use ``/home``.
-#   * Subcommand style (``git``-like), NOT ``--flag`` style.
-#   * Exactly one verb per action. No ``/bind`` vs ``/switch`` duplication.
+#   * ``/subagent`` is **pip-boy exclusive**: create/archive/delete/reset
+#     of siblings is only accessible when the current chat is bound to
+#     pip-boy. Sub-agents focus on their own work; they don't manage
+#     siblings. To go back to pip-boy, use ``/unbind``.
+#   * ``/bind`` / ``/unbind`` are **not** gated to pip-boy. They mutate
+#     this chat's routing only, which is a user navigation concern.
+#   * Subcommand style (``git``-like) for /subagent, NOT ``--flag`` style.
+#   * Exactly one verb per action. No duplication between /bind and
+#     /subagent.
 #   * Zero CLI options beyond the subcommand + id. Per-agent tweaks
 #     (model, dm_scope, description, binding scope) live in
 #     ``persona.md`` / ``agents_registry.json`` / ``bindings.json`` —
@@ -430,11 +458,10 @@ def _cmd_cron(ctx: CommandContext, _args: str) -> CommandResult:
 #   * archive/delete operate on the agent *identity surface* only
 #     (``.pip/``); project files in the sub-agent's cwd are never
 #     touched (see :meth:`AgentRegistry.remove_agent`).
-#   * ``/agent reset <id>`` preserves identity (``persona.md`` +
-#     ``HEARTBEAT.md``) and the root's workspace-shared state
-#     (``owner.md``, ``bindings.json``, ``agents_registry.json``,
-#     ``credentials/``, ``archived/``); everything else in the
-#     agent's ``.pip/`` is wiped and left to be lazily re-created.
+#   * ``/subagent reset <id>`` preserves identity (``persona.md`` +
+#     ``HEARTBEAT.md``); everything else in the agent's ``.pip/``
+#     is wiped and left to be lazily re-created. Root (pip-boy) is
+#     refused — see ``_agent_reset`` for the self-surgery argument.
 
 
 def _persist_agent_md(cfg: AgentConfig, pip_dir: Path | None) -> None:
@@ -487,7 +514,7 @@ def _purge_cc_project_dir(cwd: Path) -> Path | None:
     CC keeps per-project state under ``~/.claude/projects/<enc-cwd>/``:
     session JSONL transcripts *and* its native ``memory/`` folder
     (``MEMORY.md`` + ``user_*.md`` cards). That folder survives
-    ``/agent delete`` by default, so a freshly recreated agent at the
+    ``/subagent delete`` by default, so a freshly recreated agent at the
     same cwd inherits the previous identity's "who is my user" memory
     via CC's own recall — defeating the purpose of the delete.
 
@@ -510,7 +537,7 @@ def _purge_cc_project_dir(cwd: Path) -> Path | None:
     return project_dir
 
 
-_AGENT_OWNER_ONLY_SUBCOMMANDS = {"create", "archive", "delete", "reset"}
+_SUBAGENT_OWNER_ONLY_SUBCOMMANDS = {"create", "archive", "delete", "reset"}
 
 
 def _is_owner(ctx: CommandContext) -> bool:
@@ -522,32 +549,42 @@ def _is_owner(ctx: CommandContext) -> bool:
     return bool(ms and ms.is_owner(ch, sid))
 
 
-def _cmd_agent(ctx: CommandContext, args: str) -> CommandResult:
-    """Dispatcher for the ``/agent`` subcommand family — pip-boy only.
+def _cmd_subagent(ctx: CommandContext, args: str) -> CommandResult:
+    """Dispatcher for the ``/subagent`` subcommand family — pip-boy only.
 
     Subcommands:
 
-    * ``/agent``                   — show pip-boy detail + memory summary
-    * ``/agent list``              — list all known agents
-    * ``/agent create <id>``       — materialise ``<workspace>/<id>/.pip/``
-    * ``/agent archive <id>``      — move ``<id>/.pip/`` to ``.pip/archived/``
-    * ``/agent delete <id> --yes`` — rmtree ``<id>/.pip/`` (project files kept)
-    * ``/agent switch <id>``       — route this chat to sub-agent ``<id>``
-    * ``/agent reset <id>``        — factory-reset ``<id>``'s memory
-                                      (identity preserved; see helper below)
+    * ``/subagent``                           — list all known sub-agents
+                                                  (alias for ``/subagent list``)
+    * ``/subagent list``                      — list all known sub-agents
+    * ``/subagent create <label> [flags]``    — materialise
+                                                  ``<workspace>/<id>/.pip/``.
+                                                  Flags: ``--id``, ``--name``,
+                                                  ``--model``, ``--dm_scope``.
+    * ``/subagent archive <id>``              — move ``<id>/.pip/`` to
+                                                  ``.pip/archived/``
+    * ``/subagent delete <id> --yes``         — rmtree ``<id>/.pip/`` (project
+                                                  files kept)
+    * ``/subagent reset <id>``                — factory-reset ``<id>``'s memory
+                                                  (identity preserved; see
+                                                  helper below)
+
+    Routing (/bind, /unbind) is deliberately NOT a subcommand here:
+    it's user navigation, not sibling management, and it works from
+    any agent. See :func:`_cmd_bind` / :func:`_cmd_unbind`.
 
     Pip-boy gating
     --------------
     The whole family is **only usable when the current chat is bound
-    to pip-boy**. From a sub-agent, ``/agent`` returns a polite
-    redirect to ``/home`` — sub-agents don't manage siblings.
+    to pip-boy**. From a sub-agent, ``/subagent`` returns a polite
+    redirect to ``/unbind`` — sub-agents don't manage siblings.
 
     Owner gating
     ------------
-    Read-only ops (``list``, ``switch``, bare ``/agent``) ride the
-    top-level "owner-or-admin" gate from :func:`dispatch_command`.
-    Destructive ops (``create``, ``archive``, ``delete``, ``reset``)
-    re-check owner here.
+    Read-only ops (``list``, bare ``/subagent``) ride the top-level
+    "owner-or-admin" gate from :func:`dispatch_command`. Destructive
+    ops (``create``, ``archive``, ``delete``, ``reset``) re-check
+    owner here.
     """
     try:
         tokens = shlex.split(args) if args.strip() else []
@@ -560,79 +597,42 @@ def _cmd_agent(ctx: CommandContext, args: str) -> CommandResult:
         return CommandResult(
             handled=True,
             response=(
-                f"`/agent` is only available from {root_id}. "
+                f"`/subagent` is only available from {root_id}. "
                 f"You are currently on `{current_id}`. "
-                "Run `/home` to return to pip-boy first."
+                "Run `/unbind` to return to pip-boy first."
             ),
         )
 
+    # Bare ``/subagent`` is an alias for ``/subagent list`` — the old
+    # "show current agent" branch was always dumping pip-boy's detail
+    # (because the family is gated to pip-boy anyway), which made it
+    # a weird echo of ``/status`` + ``/memory``. Listing siblings is
+    # the genuinely useful zero-arg form.
     if not tokens:
-        return _agent_show(ctx)
+        return _agent_list(ctx, [])
 
     sub = tokens[0].lower()
     tail = tokens[1:]
-    handler = _AGENT_SUBCOMMANDS.get(sub)
+    handler = _SUBAGENT_SUBCOMMANDS.get(sub)
     if handler is None:
         from difflib import get_close_matches
-        hint = get_close_matches(sub, _AGENT_SUBCOMMANDS.keys(), n=1, cutoff=0.6)
-        suffix = f" Did you mean `/agent {hint[0]}`?" if hint else ""
+        hint = get_close_matches(sub, _SUBAGENT_SUBCOMMANDS.keys(), n=1, cutoff=0.6)
+        suffix = f" Did you mean `/subagent {hint[0]}`?" if hint else ""
         return CommandResult(
             handled=True,
             response=(
-                f"Unknown /agent subcommand '{sub}'.{suffix}\n"
-                "Valid: list, create, archive, delete, switch, reset. "
+                f"Unknown /subagent subcommand '{sub}'.{suffix}\n"
+                "Valid: list, create, archive, delete, reset. "
                 "Run `/help` for full usage."
             ),
         )
 
-    if sub in _AGENT_OWNER_ONLY_SUBCOMMANDS and not _is_owner(ctx):
+    if sub in _SUBAGENT_OWNER_ONLY_SUBCOMMANDS and not _is_owner(ctx):
         return CommandResult(
             handled=True,
-            response=f"Permission denied: `/agent {sub}` is owner only.",
+            response=f"Permission denied: `/subagent {sub}` is owner only.",
         )
     return handler(ctx, tail)
-
-
-def _agent_show(ctx: CommandContext) -> CommandResult:
-    """``/agent`` — current agent detail + memory summary."""
-    aid = _resolved_agent_id(ctx)
-    agent = ctx.registry.get_agent(aid) or ctx.registry.default_agent()
-    meta = ctx.registry.metadata_for(agent.id)
-    paths = ctx.registry.paths_for(agent.id)
-
-    lines = [
-        f"Agent: {agent.name or agent.id} ({agent.id})",
-        f"Kind:  {meta.get('kind', 'sub')}",
-    ]
-    if paths is not None:
-        lines.append(f"Cwd:   {paths.cwd}")
-    desc = meta.get("description", "")
-    if desc:
-        lines.append(f"Description: {desc}")
-    lines.append(f"Model: {agent.model or '(default)'}")
-    lines.append(f"Scope: {agent.dm_scope or '(default)'}")
-
-    ms = ctx.memory_store
-    if ms is not None and ms.agent_id == agent.id:
-        s = ms.stats()
-        lines.append("")
-        lines.append("Memory:")
-        lines.append(f"  observations: {s['observations']}")
-        lines.append(f"  memories:     {s['memories']}")
-        lines.append(
-            f"  axioms:       {s['axiom_lines']} lines "
-            f"({'yes' if s['has_axioms'] else 'none'})"
-        )
-        for key, label in (
-            ("last_reflect_at", "  last reflect: "),
-            ("last_consolidate_at", "  last consolidate: "),
-        ):
-            ts = s.get(key)
-            if ts:
-                t = datetime.fromtimestamp(float(ts), tz=UTC)
-                lines.append(f"{label}{t.strftime('%Y-%m-%d %H:%M UTC')}")
-
-    return CommandResult(handled=True, response="\n".join(lines))
 
 
 def _agent_list(ctx: CommandContext, _tail: list[str]) -> CommandResult:
@@ -653,37 +653,118 @@ def _agent_list(ctx: CommandContext, _tail: list[str]) -> CommandResult:
         lines.append(
             f"  [{kind}] {cfg.id}{marker} ({cfg.name or cfg.id}){descr}"
         )
-    lines.append("\n* = currently routed for this chat. "
-                 "Use `/agent switch <id>` to change.")
+    lines.append(
+        "\n* = currently routed for this chat. "
+        "Use `/bind <id>` to change, `/unbind` to return to pip-boy.",
+    )
     return CommandResult(handled=True, response="\n".join(lines))
 
 
+_VALID_DM_SCOPES = {"main", "per-guild", "per-guild-peer"}
+
+_CREATE_USAGE = (
+    "Usage: /subagent create <label> [--id ID] [--name NAME] "
+    "[--model MODEL] [--dm_scope SCOPE]\n"
+    "Defaults: --id normalize(<label>), --name <id>, "
+    "--model <root agent's model>, --dm_scope per-guild.\n"
+    "Valid scopes: main | per-guild | per-guild-peer."
+)
+
+
+def _parse_create_flags(tokens: list[str]) -> tuple[dict[str, str], str | None]:
+    """Parse ``[positional] [--flag value]...`` into ``(opts, error)``.
+
+    Recognised flags: ``--id``, ``--name``, ``--model``, ``--dm_scope``.
+    ``--dm-scope`` is accepted as an alias so either spelling works.
+    At most one positional argument (the label) is allowed.
+    """
+    allowed = {"--id", "--name", "--model", "--dm_scope", "--dm-scope"}
+    opts: dict[str, str] = {}
+    positional: list[str] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok.startswith("--"):
+            if tok not in allowed:
+                return {}, f"Unknown flag '{tok}'."
+            if i + 1 >= len(tokens):
+                return {}, f"Flag '{tok}' needs a value."
+            key = "--dm_scope" if tok == "--dm-scope" else tok
+            opts[key] = tokens[i + 1]
+            i += 2
+            continue
+        positional.append(tok)
+        i += 1
+
+    if len(positional) > 1:
+        return {}, "Only one positional label is allowed."
+    if positional:
+        opts["__label__"] = positional[0]
+    return opts, None
+
+
 def _agent_create(ctx: CommandContext, tail: list[str]) -> CommandResult:
-    if not tail:
-        return CommandResult(
-            handled=True, response="Usage: /agent create <id>",
-        )
-    # We deliberately accept no description / no flags — edit
-    # ``agents_registry.json`` by hand if you want a description, or
-    # tweak ``<id>/.pip/persona.md`` for model/scope. The command line
-    # stays single-purpose.
-    raw_id = tail[0]
-    if len(tail) > 1:
+    """``/subagent create [label] [--id …] [--name …] [--model …] [--dm_scope …]``.
+
+    The positional label is convenient when you want id and name to
+    coincide (``/subagent create helper`` → id=helper, name=helper).
+    Any flag overrides its corresponding default, so
+    ``/subagent create --id stella --name "Stella Chen"`` or
+    ``/subagent create "Project Stella" --model claude-sonnet-4-5``
+    are both valid.
+    """
+    opts, err = _parse_create_flags(tail)
+    if err is not None:
+        return CommandResult(handled=True, response=f"{err}\n{_CREATE_USAGE}")
+    if not opts:
+        return CommandResult(handled=True, response=_CREATE_USAGE)
+
+    label = opts.get("__label__", "")
+    raw_id = opts.get("--id") or label
+    if not raw_id.strip():
         return CommandResult(
             handled=True,
             response=(
-                "Usage: /agent create <id>\n"
-                "(No options. Edit <id>/.pip/persona.md or "
-                "agents_registry.json for model / scope / description.)"
+                "Cannot derive an id — provide a positional label "
+                f"or --id.\n{_CREATE_USAGE}"
             ),
         )
-
     agent_id = normalize_agent_id(raw_id)
+    default_id = ctx.registry.default_agent().id
+    if agent_id == default_id:
+        return CommandResult(
+            handled=True,
+            response=(
+                f"Cannot create '{agent_id}': reserved for the root agent."
+            ),
+        )
     if ctx.registry.get_agent(agent_id) is not None:
         return CommandResult(
             handled=True, response=f"Agent '{agent_id}' already exists.",
         )
-    cfg, err = _create_agent_on_disk(ctx.registry, agent_id)
+
+    display_name = opts.get("--name") or agent_id
+
+    root_cfg = ctx.registry.default_agent()
+    model = opts.get("--model") or (root_cfg.model or "")
+
+    dm_scope = opts.get("--dm_scope") or "per-guild"
+    if dm_scope not in _VALID_DM_SCOPES:
+        return CommandResult(
+            handled=True,
+            response=(
+                f"Invalid --dm_scope '{dm_scope}'. "
+                f"Valid: {', '.join(sorted(_VALID_DM_SCOPES))}."
+            ),
+        )
+
+    cfg, err = _create_agent_on_disk(
+        ctx.registry,
+        agent_id,
+        name=display_name,
+        model=model,
+        dm_scope=dm_scope,
+    )
     if err or cfg is None:
         return CommandResult(
             handled=True,
@@ -691,11 +772,15 @@ def _agent_create(ctx: CommandContext, tail: list[str]) -> CommandResult:
         )
     paths = ctx.registry.paths_for(cfg.id)
     loc = f" at {paths.cwd}" if paths is not None else ""
+    detail = f"  id={agent_id}  name={display_name}"
+    if model:
+        detail += f"  model={model}"
+    detail += f"  dm_scope={dm_scope}"
     return CommandResult(
         handled=True,
         response=(
-            f"Created agent '{agent_id}'{loc}.\n"
-            f"Use `/agent switch {agent_id}` to route this chat to it."
+            f"Created agent{loc}.\n{detail}\n"
+            f"Use `/bind {agent_id}` to route this chat to it."
         ),
     )
 
@@ -703,8 +788,8 @@ def _agent_create(ctx: CommandContext, tail: list[str]) -> CommandResult:
 _SUB_AGENT_IDENTITY_TEMPLATE = """\
 # Identity
 
-You are {agent_id}, a personal assistant sub-agent of Pip-Boy, powered by {{model_name}}.
-You are a coding agent working in {{workdir}} that helps the USER with software engineering tasks.
+You are {agent_name}, a personal assistant sub-agent of Pip-Boy, powered by {model_name}.
+You are a coding agent working in {workdir} that helps the USER with software engineering tasks.
 Your main goal is to follow the USER's instructions, which are wrapped in `<user_query>` tags.
 """
 
@@ -745,7 +830,12 @@ def _replace_identity_section(body: str, new_identity: str) -> str:
 
 
 def _create_agent_on_disk(
-    registry: AgentRegistry, agent_id: str,
+    registry: AgentRegistry,
+    agent_id: str,
+    *,
+    name: str = "",
+    model: str = "",
+    dm_scope: str = "",
 ) -> tuple[AgentConfig | None, str | None]:
     """Materialise a new sub-agent directory + registry entry.
 
@@ -755,8 +845,14 @@ def _create_agent_on_disk(
     it actually knows how to interpret the ``# User`` block that
     :meth:`MemoryStore.enrich_prompt` injects at prompt time.
 
-    Only the ``# Identity`` section is rewritten, to name the new
-    agent and flag the shared-owner relationship with Pip-Boy.
+    Only the ``# Identity`` section is rewritten, to flag the
+    shared-owner relationship with Pip-Boy. The identity body still
+    references ``{agent_name}`` / ``{model_name}`` / ``{workdir}``
+    as template variables — they are resolved at prompt-compose time
+    by :meth:`AgentConfig.system_prompt` from the YAML frontmatter,
+    so editing ``name:`` in ``persona.md`` is enough to change how
+    the agent refers to itself.
+
     Returns ``(cfg, None)`` on success or ``(None, error_msg)``.
     """
     import shutil
@@ -770,9 +866,17 @@ def _create_agent_on_disk(
 
     default = registry.default_agent()
     default_paths = registry.paths_for(default.id)
-    new_identity = _SUB_AGENT_IDENTITY_TEMPLATE.format(agent_id=agent_id)
-    body = _replace_identity_section(default.system_body or "", new_identity)
-    cfg = replace(default, id=agent_id, name=agent_id, system_body=body)
+    body = _replace_identity_section(
+        default.system_body or "", _SUB_AGENT_IDENTITY_TEMPLATE,
+    )
+    cfg = replace(
+        default,
+        id=agent_id,
+        name=name or agent_id,
+        system_body=body,
+        model=model,
+        dm_scope=dm_scope,
+    )
 
     registry.register_agent(cfg)
     new_paths = registry.paths_for(cfg.id)
@@ -799,7 +903,7 @@ def _create_agent_on_disk(
 def _agent_archive(ctx: CommandContext, tail: list[str]) -> CommandResult:
     if not tail:
         return CommandResult(
-            handled=True, response="Usage: /agent archive <id>",
+            handled=True, response="Usage: /subagent archive <id>",
         )
     agent_id = normalize_agent_id(tail[0])
     default_id = ctx.registry.default_agent().id
@@ -822,7 +926,7 @@ def _agent_archive(ctx: CommandContext, tail: list[str]) -> CommandResult:
     try:
         ctx.registry.save_registry()
     except Exception:
-        log.exception("save_registry failed after /agent archive")
+        log.exception("save_registry failed after /subagent archive")
 
     cc_note = (
         f"\nAlso purged CC project dir: {cc_removed}." if cc_removed else ""
@@ -830,7 +934,9 @@ def _agent_archive(ctx: CommandContext, tail: list[str]) -> CommandResult:
     if dest is None:
         return CommandResult(
             handled=True,
-            response=f"Archived agent '{agent_id}' (no .pip/ on disk).{cc_note}",
+            response=(
+                f"Archived agent '{agent_id}' (no .pip/ on disk).{cc_note}"
+            ),
         )
     return CommandResult(
         handled=True,
@@ -843,16 +949,16 @@ def _agent_archive(ctx: CommandContext, tail: list[str]) -> CommandResult:
 
 
 def _agent_delete(ctx: CommandContext, tail: list[str]) -> CommandResult:
-    """``/agent delete <id> --yes`` — purge identity surface only."""
+    """``/subagent delete <id> --yes`` — purge identity surface only."""
     if not tail:
         return CommandResult(
-            handled=True, response="Usage: /agent delete <id> --yes",
+            handled=True, response="Usage: /subagent delete <id> --yes",
         )
     confirmed = "--yes" in tail
     positional = [t for t in tail if not t.startswith("--")]
     if not positional:
         return CommandResult(
-            handled=True, response="Usage: /agent delete <id> --yes",
+            handled=True, response="Usage: /subagent delete <id> --yes",
         )
     agent_id = normalize_agent_id(positional[0])
     default_id = ctx.registry.default_agent().id
@@ -871,7 +977,7 @@ def _agent_delete(ctx: CommandContext, tail: list[str]) -> CommandResult:
                 f"Refusing to delete '{agent_id}' without --yes.\n"
                 "This wipes the agent's .pip/ (persona, memory, "
                 "observations). Project files in the directory are "
-                "kept. Use `/agent archive {id}` for a reversible move."
+                "kept. Use `/subagent archive {id}` for a reversible move."
             ),
         )
 
@@ -886,7 +992,7 @@ def _agent_delete(ctx: CommandContext, tail: list[str]) -> CommandResult:
     try:
         ctx.registry.save_registry()
     except Exception:
-        log.exception("save_registry failed after /agent delete")
+        log.exception("save_registry failed after /subagent delete")
 
     if not removed:
         return CommandResult(
@@ -905,16 +1011,21 @@ def _agent_delete(ctx: CommandContext, tail: list[str]) -> CommandResult:
     )
 
 
-def _agent_switch(ctx: CommandContext, tail: list[str]) -> CommandResult:
-    """``/agent switch <id>`` — route this chat to sub-agent ``<id>``.
+def _cmd_bind(ctx: CommandContext, args: str) -> CommandResult:
+    """``/bind <id>`` — route this chat to sub-agent ``<id>``.
 
-    Switching *back* to pip-boy is handled by the separate ``/home``
-    command, not here. ``/agent switch pip-boy`` is rejected with a
-    redirect, so there's exactly one idiom for each direction:
+    Works from anywhere — including from one sub-agent directly to
+    another, without round-tripping through pip-boy. It mutates this
+    chat's binding row only; sibling lifecycle (create/archive/
+    delete/reset) still lives under ``/subagent`` and stays pip-boy
+    only.
 
-        pip-boy → sub-agent : /agent switch <id>
-        sub-agent → pip-boy : /home
+    ``/bind pip-boy`` is rejected with a redirect to ``/unbind``, so
+    "on pip-boy" has exactly one canonical representation (no binding
+    row) rather than two (absent row vs explicit row pointing at
+    root).
     """
+    tail = args.split()
     if not tail:
         ids = [
             cfg.id
@@ -925,7 +1036,7 @@ def _agent_switch(ctx: CommandContext, tail: list[str]) -> CommandResult:
         return CommandResult(
             handled=True,
             response=(
-                "Usage: /agent switch <id>\n"
+                "Usage: /bind <id>\n"
                 f"Known sub-agents: {known}"
             ),
         )
@@ -936,9 +1047,9 @@ def _agent_switch(ctx: CommandContext, tail: list[str]) -> CommandResult:
         return CommandResult(
             handled=True,
             response=(
-                f"`/agent switch {default_id}` is not supported. "
-                "You are already on pip-boy; use `/home` from a "
-                "sub-agent to return here."
+                f"`/bind {default_id}` is not supported — "
+                "'on pip-boy' means 'no binding', not 'binding to root'. "
+                "Use `/unbind` to clear the current binding instead."
             ),
         )
     agent = ctx.registry.get_agent(agent_id)
@@ -955,7 +1066,8 @@ def _agent_switch(ctx: CommandContext, tail: list[str]) -> CommandResult:
             response=(
                 f"Unknown agent '{agent_id}'.\n"
                 f"Known sub-agents: {known}\n"
-                f"Use `/agent create {agent_id}` to make one first."
+                f"Use `/subagent create {agent_id}` to make one first "
+                "(from pip-boy)."
             ),
         )
 
@@ -964,7 +1076,7 @@ def _agent_switch(ctx: CommandContext, tail: list[str]) -> CommandResult:
         if not inbound.guild_id:
             return CommandResult(
                 handled=True,
-                response="Cannot switch in group: missing guild_id.",
+                response="Cannot /bind in group: missing guild_id.",
             )
         match_key, match_value = "guild_id", inbound.guild_id
     else:
@@ -986,39 +1098,26 @@ def _agent_switch(ctx: CommandContext, tail: list[str]) -> CommandResult:
     ctx.bindings.save(ctx.bindings_path)
     return CommandResult(
         handled=True,
-        response=f"Switched to {agent.name or agent.id} ({agent_id}).",
+        response=f"Bound to {agent.name or agent.id} ({agent_id}).",
     )
 
 
 # ---------------------------------------------------------------------------
-# /agent reset — backup · delete · rebuild · restore
+# /subagent reset — backup · delete · rebuild · restore
 # ---------------------------------------------------------------------------
 #
 # What counts as "identity" (always preserved, copied into the rebuilt
 # .pip/):
 _RESET_PRESERVE_FILES = ("persona.md", "HEARTBEAT.md")
 
-# What counts as "root-only workspace-shared state". For a sub-agent
-# reset these are no-ops (they don't live in the sub-agent's .pip/).
-# For pip-boy reset they're preserved so ACL, routing, channel
-# credentials, and the archive trail survive a reset.
-_RESET_PRESERVE_ROOT_FILES = (
-    "owner.md",
-    "bindings.json",
-    "agents_registry.json",
-)
-_RESET_PRESERVE_ROOT_DIRS = ("credentials", "archived")
-
 
 def _agent_reset(ctx: CommandContext, tail: list[str]) -> CommandResult:
-    """``/agent reset <id>`` — rebuild ``<id>``'s .pip/ from a minimal backup.
+    """``/subagent reset <id>`` — rebuild sub-agent ``<id>``'s .pip/ from a minimal backup.
 
     Algorithm (per the design note in the identity-redesign thread):
 
-        1. Stash the "identity" files (persona.md, HEARTBEAT.md) and,
-           for the root agent, the workspace-shared state
-           (owner.md, bindings.json, agents_registry.json,
-           credentials/, archived/) to a sibling temp directory.
+        1. Stash the "identity" files (persona.md, HEARTBEAT.md) to a
+           sibling temp directory.
         2. Delete the agent's entire .pip/ directory.
         3. Recreate an empty .pip/ and restore the stash into it.
         4. Remove the temp stash.
@@ -1028,6 +1127,20 @@ def _agent_reset(ctx: CommandContext, tail: list[str]) -> CommandResult:
     state.json, users/, incoming/, cron.json, sdk_sessions entries
     for this agent, .scaffold_manifest.json, ...) wiped and left to
     be lazily re-created by the running host.
+
+    Root (pip-boy) refusal
+    ----------------------
+    ``/subagent reset pip-boy`` is rejected outright. The root agent's
+    ``.pip/`` carries workspace-shared state (``owner.md``,
+    ``bindings.json``, ``agents_registry.json``, ``credentials/``,
+    ``archived/``) AND its ``MemoryStore`` / ``StreamingSession`` are
+    in active use by the very handler that would perform the reset.
+    Any in-process "self-surgery" leaves a window where the cached
+    store points at wiped paths, sessions hold file handles against
+    CC's project dir, and ``sdk_sessions.json`` / ``bindings.json``
+    can be resurrected by a concurrent write. If you really need to
+    reset pip-boy, stop the host (``/exit``) and rebuild the root
+    ``.pip/`` offline, then restart.
 
     Workspace ``sdk_sessions.json`` is shared across agents; only the
     entries keyed to the reset agent are removed.
@@ -1041,12 +1154,27 @@ def _agent_reset(ctx: CommandContext, tail: list[str]) -> CommandResult:
         return CommandResult(
             handled=True,
             response=(
-                "Usage: /agent reset <id>\n"
+                "Usage: /subagent reset <id>\n"
                 f"Known agents: {ids}"
             ),
         )
 
     agent_id = normalize_agent_id(tail[0])
+    default_id = ctx.registry.default_agent().id
+    if agent_id == default_id:
+        return CommandResult(
+            handled=True,
+            response=(
+                f"Cannot reset the root agent '{default_id}' from within "
+                "the running host. Its memory store and session are in "
+                "active use by this very command, and its .pip/ holds "
+                "workspace-shared state (owner.md, bindings.json, "
+                "agents_registry.json, credentials/, archived/) that "
+                "other agents rely on. Stop the host (/exit) and "
+                "rebuild the root .pip/ offline if you really need to."
+            ),
+        )
+
     agent = ctx.registry.get_agent(agent_id)
     if agent is None:
         return CommandResult(
@@ -1060,7 +1188,6 @@ def _agent_reset(ctx: CommandContext, tail: list[str]) -> CommandResult:
         )
 
     pip_dir = paths.pip_dir
-    is_root = agent_id == ctx.registry.default_agent().id
 
     if not pip_dir.is_dir():
         # Nothing to reset; treat as a no-op success rather than
@@ -1076,10 +1203,6 @@ def _agent_reset(ctx: CommandContext, tail: list[str]) -> CommandResult:
         )
 
     preserve_files = list(_RESET_PRESERVE_FILES)
-    preserve_dirs: list[str] = []
-    if is_root:
-        preserve_files.extend(_RESET_PRESERVE_ROOT_FILES)
-        preserve_dirs.extend(_RESET_PRESERVE_ROOT_DIRS)
 
     # --- 1. Stash ---------------------------------------------------
     stash = Path(
@@ -1090,10 +1213,6 @@ def _agent_reset(ctx: CommandContext, tail: list[str]) -> CommandResult:
             src = pip_dir / name
             if src.is_file():
                 shutil.copy2(src, stash / name)
-        for dname in preserve_dirs:
-            src = pip_dir / dname
-            if src.is_dir():
-                shutil.copytree(src, stash / dname)
 
         # --- 2. Delete --------------------------------------------
         shutil.rmtree(pip_dir)
@@ -1112,10 +1231,6 @@ def _agent_reset(ctx: CommandContext, tail: list[str]) -> CommandResult:
             staged = stash / name
             if staged.is_file():
                 shutil.copy2(staged, pip_dir / name)
-        for dname in preserve_dirs:
-            staged = stash / dname
-            if staged.is_dir():
-                shutil.copytree(staged, pip_dir / dname)
     finally:
         # --- 4. Drop the stash (even on failure) -----------------
         shutil.rmtree(stash, ignore_errors=True)
@@ -1160,19 +1275,13 @@ def _agent_reset(ctx: CommandContext, tail: list[str]) -> CommandResult:
     # no-op from the user's POV.
     cc_removed = _purge_cc_project_dir(paths.cwd)
 
-    preserved_desc = "persona.md, HEARTBEAT.md"
-    if is_root:
-        preserved_desc += (
-            ", owner.md, bindings.json, agents_registry.json, "
-            "credentials/, archived/"
-        )
     cc_note = (
         f"\nAlso purged CC project dir: {cc_removed}." if cc_removed else ""
     )
     return CommandResult(
         handled=True,
         response=(
-            f"Reset agent '{agent_id}'. Preserved: {preserved_desc}. "
+            f"Reset agent '{agent_id}'. Preserved: persona.md, HEARTBEAT.md. "
             "Memory (observations, memories, axioms, state) and "
             "per-agent bookkeeping were wiped."
             f"{cc_note}"
@@ -1180,29 +1289,29 @@ def _agent_reset(ctx: CommandContext, tail: list[str]) -> CommandResult:
     )
 
 
-_AGENT_SUBCOMMANDS: dict[str, Any] = {
+_SUBAGENT_SUBCOMMANDS: dict[str, Any] = {
     "list": _agent_list,
     "create": _agent_create,
     "archive": _agent_archive,
     "delete": _agent_delete,
-    "switch": _agent_switch,
     "reset": _agent_reset,
 }
 
 
 # ---------------------------------------------------------------------------
-# /home — the counterpart of ``/agent switch``, always returns to pip-boy
+# /unbind — the counterpart of /bind: clears this chat's binding so
+# routing falls back to pip-boy
 # ---------------------------------------------------------------------------
 
 
-def _cmd_home(ctx: CommandContext, _args: str) -> CommandResult:
-    """``/home`` — leave the current sub-agent and return to pip-boy.
+def _cmd_unbind(ctx: CommandContext, _args: str) -> CommandResult:
+    """``/unbind`` — clear this chat's binding and fall back to pip-boy.
 
-    Removes the binding row that is currently routing this chat to
-    a sub-agent. Routing falls back to the default agent (pip-boy)
-    via the normal resolver fallback. Running ``/home`` while
-    already on pip-boy is a friendly no-op so the command is safe
-    to hit repeatedly.
+    Works from any sub-agent. Removes the binding row that's
+    currently routing this chat; with no row, routing falls back to
+    the default agent (pip-boy) via the normal resolver fallback.
+    Running ``/unbind`` while already on pip-boy is a friendly no-op
+    so the command is safe to hit repeatedly.
     """
     current_id = _resolved_agent_id(ctx)
     root_id = ctx.registry.default_agent().id
@@ -1217,7 +1326,7 @@ def _cmd_home(ctx: CommandContext, _args: str) -> CommandResult:
         if not inbound.guild_id:
             return CommandResult(
                 handled=True,
-                response="Cannot /home in group: missing guild_id.",
+                response="Cannot /unbind in group: missing guild_id.",
             )
         match_key, match_value = "guild_id", inbound.guild_id
     else:
@@ -1228,10 +1337,10 @@ def _cmd_home(ctx: CommandContext, _args: str) -> CommandResult:
         try:
             ctx.bindings.save(ctx.bindings_path)
         except Exception:
-            log.exception("Failed to persist bindings after /home")
+            log.exception("Failed to persist bindings after /unbind")
     return CommandResult(
         handled=True,
-        response=f"Back to {root_id}. Binding cleared.",
+        response=f"Unbound. Routing falls back to {root_id}.",
     )
 
 
@@ -1278,8 +1387,12 @@ def _cmd_admin(ctx: CommandContext, args: str) -> CommandResult:
 
 # ---------------------------------------------------------------------------
 # (Legacy handlers /agents, /create-agent, /archive-agent, /delete-agent,
-# /switch, /bind, /unbind, /reset removed — functionality consolidated
-# into `/agent <subcommand>` above.)
+# /switch, /reset removed — functionality consolidated into
+# `/subagent <subcommand>`, `/bind`, `/unbind` above. The earlier
+# ``/agent`` umbrella was renamed to ``/subagent`` so the verb matches
+# what it actually does (manage siblings), and the asymmetric
+# ``/agent switch`` + ``/home`` pair was replaced by the symmetric
+# ``/bind`` / ``/unbind`` pair that works from any agent.)
 # ---------------------------------------------------------------------------
 
 
@@ -1313,15 +1426,16 @@ _HANDLERS: dict[
     "/recall": _cmd_recall,
     "/cron": _cmd_cron,
     "/admin": _cmd_admin,
-    "/agent": _cmd_agent,
-    "/home": _cmd_home,
+    "/subagent": _cmd_subagent,
+    "/bind": _cmd_bind,
+    "/unbind": _cmd_unbind,
     "/exit": _cmd_exit,
 }
 
 _OPEN_COMMANDS = {"/help", "/status"}
-# ``/agent create`` / ``archive`` / ``delete`` / ``reset`` are owner-only,
-# but since they're all subcommands of a single top-level ``/agent``,
-# we gate per-subcommand inside the dispatcher rather than at this
-# top-level ACL table. Pure-read ``/agent`` and ``/agent list`` /
-# ``/agent switch`` remain owner-or-admin (the default).
+# ``/subagent create`` / ``archive`` / ``delete`` / ``reset`` are
+# owner-only, but since they're all subcommands of a single top-level
+# ``/subagent``, we gate per-subcommand inside the dispatcher rather
+# than at this top-level ACL table. Pure-read ``/subagent [list]``
+# and ``/bind`` / ``/unbind`` remain owner-or-admin (the default).
 _OWNER_ONLY_COMMANDS = {"/admin"}

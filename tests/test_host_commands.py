@@ -3,8 +3,8 @@
 Phase 6 scope: the dispatcher itself — recognition rules, ACL gate,
 @mention handling, and a representative handful of handler happy-paths
 to prove the wiring is live. Per-handler deep coverage (every edge case
-of /agent, /admin subcommand matrix, etc.) is explicitly deferred to
-Phase 11 so this file stays readable.
+of /subagent, /admin subcommand matrix, etc.) is explicitly deferred
+to Phase 11 so this file stays readable.
 
 What we DO cover here:
   * A non-slash inbound is not handled.
@@ -158,12 +158,12 @@ class TestDispatchRecognition:
         assert "/help" in body
 
     def test_typo_suggests_close_command(self, tmp_path: Path):
-        # ``/agnet`` is one transposition away from ``/agent`` — we want
-        # the hint surfaced so the user doesn't have to guess.
-        ctx = _build_ctx(_cli_inbound("/agnet list"), tmp_path)
+        # ``/subagnet`` is one transposition away from ``/subagent`` —
+        # we want the hint surfaced so the user doesn't have to guess.
+        ctx = _build_ctx(_cli_inbound("/subagnet list"), tmp_path)
         result = dispatch_command(ctx)
         assert result.handled is True
-        assert "/agent" in (result.response or "")
+        assert "/subagent" in (result.response or "")
 
     def test_leading_at_mention_is_stripped(self, tmp_path: Path):
         # WeCom @-prefix should not block slash detection. CLI gets
@@ -288,9 +288,9 @@ class TestHandlerOutputs:
         assert result.handled
         for cmd in (
             "/help", "/status", "/memory", "/axioms", "/cron",
-            "/home",
-            "/agent", "/agent list", "/agent create",
-            "/agent switch", "/agent reset <id>",
+            "/bind <id>", "/unbind",
+            "/subagent", "/subagent create",
+            "/subagent reset <id>",
         ):
             assert cmd in (result.response or "")
 
@@ -433,34 +433,34 @@ class TestHandlerOutputs:
 
 
 # ---------------------------------------------------------------------------
-# /agent <subcommand> — dispatcher + happy paths for the consolidated
-# command surface (replaces the old /bind, /unbind, /switch, /reset,
-# /agents, /create-agent, /archive-agent, /delete-agent).
+# /subagent <subcommand> — dispatcher + happy paths for the sibling
+# lifecycle surface. Routing (/bind, /unbind) is covered in separate
+# test classes below.
 # ---------------------------------------------------------------------------
 
 
-class TestAgentCommand:
-    def test_no_args_shows_current_agent(self, tmp_path: Path):
-        # Bare /agent should fall into the "show detail" branch, not
-        # the list/usage branch.
-        ctx = _build_ctx(_cli_inbound("/agent"), tmp_path)
+class TestSubagentCommand:
+    def test_no_args_lists_sub_agents(self, tmp_path: Path):
+        # Bare /subagent is an alias for /subagent list. (The old
+        # "show current agent detail" behavior was always echoing
+        # pip-boy's own info anyway, since the family is pip-boy
+        # only — /status + /memory already cover that.)
+        ctx = _build_ctx(_cli_inbound("/subagent"), tmp_path)
         result = dispatch_command(ctx)
         assert result.handled
         body = result.response or ""
-        assert "Agent:" in body
-        # Default agent is pip-boy — sub-agent kind should be 'root'.
-        assert "Kind:" in body
-        assert "Cwd:" in body
+        assert "Agents:" in body
+        assert "pip-boy" in body
 
     def test_list_shows_agents(self, tmp_path: Path):
-        ctx = _build_ctx(_cli_inbound("/agent list"), tmp_path)
+        ctx = _build_ctx(_cli_inbound("/subagent list"), tmp_path)
         result = dispatch_command(ctx)
         assert result.handled
         body = result.response or ""
         assert "pip-boy" in body
 
     def test_unknown_subcommand_suggests(self, tmp_path: Path):
-        ctx = _build_ctx(_cli_inbound("/agent lst"), tmp_path)
+        ctx = _build_ctx(_cli_inbound("/subagent lst"), tmp_path)
         result = dispatch_command(ctx)
         assert result.handled
         body = result.response or ""
@@ -473,7 +473,7 @@ class TestAgentCommand:
         # must be blocked at the per-subcommand owner check.
         ms = _FakeMemoryStore(admins={("wecom", "u1")})
         ctx = _build_ctx(
-            _wecom_inbound("/agent create helper"),
+            _wecom_inbound("/subagent create helper"),
             tmp_path,
             memory_store=ms,
         )
@@ -511,6 +511,114 @@ class TestAgentCommand:
         )
         return workspace
 
+    def test_create_positional_label_normalises_to_lowercase_id(
+        self, tmp_path: Path,
+    ):
+        """Mixed-case input folds to a lowercase id; display name
+        defaults to the id."""
+        ctx = _build_ctx(
+            _cli_inbound("/subagent create HelperBot"), tmp_path,
+        )
+        result = dispatch_command(ctx)
+        assert result.handled, result.response
+
+        cfg = ctx.registry.get_agent("helperbot")
+        assert cfg is not None
+        assert cfg.id == "helperbot"
+        assert cfg.name == "helperbot"
+
+    def test_create_honours_explicit_flags(self, tmp_path: Path):
+        """``--id`` / ``--name`` / ``--model`` / ``--dm_scope`` all
+        take precedence over the defaults derived from the positional
+        label."""
+        ctx = _build_ctx(
+            _cli_inbound(
+                '/subagent create stella --id main-helper '
+                '--name "Stella Chen" --model claude-sonnet-4-5 '
+                '--dm_scope main',
+            ),
+            tmp_path,
+        )
+        result = dispatch_command(ctx)
+        assert result.handled, result.response
+
+        cfg = ctx.registry.get_agent("main-helper")
+        assert cfg is not None
+        assert cfg.id == "main-helper"
+        assert cfg.name == "Stella Chen"
+        assert cfg.model == "claude-sonnet-4-5"
+        assert cfg.dm_scope == "main"
+
+        # YAML frontmatter was persisted verbatim — editing it by hand
+        # is the documented post-create workflow.
+        paths = ctx.registry.paths_for("main-helper")
+        persona = (paths.pip_dir / "persona.md").read_text(encoding="utf-8")
+        assert "name: Stella Chen" in persona
+        assert "model: claude-sonnet-4-5" in persona
+        assert "dm_scope: main" in persona
+
+    def test_create_inherits_root_model_when_flag_missing(
+        self, tmp_path: Path,
+    ):
+        """Default for ``--model`` is the root agent's model, not the
+        ambient ``DEFAULT_MODEL`` constant — so renaming pip-boy's
+        model propagates to freshly-created sub-agents."""
+        workspace = tmp_path / "workspace"
+        (workspace / ".pip").mkdir(parents=True, exist_ok=True)
+        # Force pip-boy's persisted model to something distinct before
+        # ``_build_ctx`` loads the registry from disk.
+        (workspace / ".pip" / "persona.md").write_text(
+            "---\nname: Pip-Boy\nmodel: claude-haiku-4-0\n---\n"
+            "# Identity\n\nYou are {agent_name}, a personal assistant.\n",
+            encoding="utf-8",
+        )
+        ctx = _build_ctx(_cli_inbound("/subagent create helper"), tmp_path)
+        result = dispatch_command(ctx)
+        assert result.handled, result.response
+
+        cfg = ctx.registry.get_agent("helper")
+        assert cfg is not None
+        assert cfg.model == "claude-haiku-4-0"
+
+    def test_create_rejects_invalid_dm_scope(self, tmp_path: Path):
+        ctx = _build_ctx(
+            _cli_inbound("/subagent create helper --dm_scope bogus"),
+            tmp_path,
+        )
+        result = dispatch_command(ctx)
+        assert result.handled
+        assert "dm_scope" in (result.response or "").lower()
+        assert ctx.registry.get_agent("helper") is None
+
+    def test_create_rejects_unknown_flag(self, tmp_path: Path):
+        ctx = _build_ctx(
+            _cli_inbound("/subagent create helper --desc foo"), tmp_path,
+        )
+        result = dispatch_command(ctx)
+        assert result.handled
+        assert "unknown flag" in (result.response or "").lower()
+        assert ctx.registry.get_agent("helper") is None
+
+    def test_create_rejects_root_id(self, tmp_path: Path):
+        ctx = _build_ctx(
+            _cli_inbound("/subagent create pip-boy"), tmp_path,
+        )
+        result = dispatch_command(ctx)
+        assert result.handled
+        assert "reserved" in (result.response or "").lower()
+
+    def test_create_id_only_no_positional(self, tmp_path: Path):
+        """Fully flag-based invocation is fine too."""
+        ctx = _build_ctx(
+            _cli_inbound("/subagent create --id helper --name Emma"),
+            tmp_path,
+        )
+        result = dispatch_command(ctx)
+        assert result.handled, result.response
+        cfg = ctx.registry.get_agent("helper")
+        assert cfg is not None
+        assert cfg.name == "Emma"
+
     def test_create_inherits_pip_boy_guidance(self, tmp_path: Path):
         """New sub-agents must ship with the full operational persona
         (Identity Recognition, Tool Calling, Memory, etc.), not just
@@ -519,7 +627,7 @@ class TestAgentCommand:
         interpret it — exactly the "sub-agent doesn't know the owner"
         bug from the identity-redesign thread."""
         self._seed_rich_pip_boy_persona(tmp_path)
-        ctx = _build_ctx(_cli_inbound("/agent create helper"), tmp_path)
+        ctx = _build_ctx(_cli_inbound("/subagent create helper"), tmp_path)
         result = dispatch_command(ctx)
         assert result.handled, result.response
 
@@ -527,9 +635,11 @@ class TestAgentCommand:
         assert paths is not None
         persona = (paths.pip_dir / "persona.md").read_text(encoding="utf-8")
 
-        # Identity section names the new agent + references Pip-Boy
-        # as the parent so the model knows the owner is shared.
-        assert "You are helper" in persona
+        # Identity section references Pip-Boy as parent and is written
+        # as a template: ``{agent_name}`` stays literal in the file and
+        # is resolved from YAML ``name:`` at prompt-compose time.
+        assert "You are {agent_name}" in persona
+        assert "name: helper" in persona
         assert "Pip-Boy" in persona
         assert "owner" in persona.lower()
 
@@ -537,93 +647,42 @@ class TestAgentCommand:
         for heading in ("# Identity Recognition", "# Tool Calling", "# Memory"):
             assert heading in persona, persona
 
+        # Loading the config back and composing a system prompt must
+        # produce the resolved ``You are helper`` — this is the real
+        # contract with the model.
+        prompt = ctx.registry.get_agent("helper").system_prompt(
+            workdir=str(paths.cwd),
+        )
+        assert "You are helper," in prompt
+
     def test_create_identity_section_names_sub_agent_not_pip_boy(
         self, tmp_path: Path,
     ):
-        """Only the Identity section is rewritten. The ``You are …``
-        line there must name the new agent — not ``Pip-Boy``."""
+        """Only the Identity section is rewritten. After substitution
+        the ``You are …`` line must name the new agent — not
+        ``Pip-Boy``."""
         self._seed_rich_pip_boy_persona(tmp_path)
-        ctx = _build_ctx(_cli_inbound("/agent create helper"), tmp_path)
+        ctx = _build_ctx(_cli_inbound("/subagent create helper"), tmp_path)
         dispatch_command(ctx)
 
         paths = ctx.registry.paths_for("helper")
         assert paths is not None
-        persona = (paths.pip_dir / "persona.md").read_text(encoding="utf-8")
 
+        prompt = ctx.registry.get_agent("helper").system_prompt(
+            workdir=str(paths.cwd),
+        )
         first_you_are = next(
-            (line.strip() for line in persona.splitlines()
+            (line.strip() for line in prompt.splitlines()
              if line.strip().startswith("You are ")),
             "",
         )
-        assert first_you_are.startswith("You are helper"), first_you_are
-
-    def test_create_and_switch_roundtrip(self, tmp_path: Path):
-        # CLI → owner → /agent create succeeds, then /agent switch
-        # binds the chat.
-        ctx = _build_ctx(_cli_inbound("/agent create helper"), tmp_path)
-        result = dispatch_command(ctx)
-        assert result.handled
-        assert "Created agent 'helper'" in (result.response or "")
-
-        switch_ctx = CommandContext(
-            inbound=_cli_inbound("/agent switch helper"),
-            registry=ctx.registry,
-            bindings=ctx.bindings,
-            bindings_path=ctx.bindings_path,
-            memory_store=None,
-            scheduler=None,
-        )
-        result = dispatch_command(switch_ctx)
-        assert result.handled
-        assert "Switched to" in (result.response or "")
-        bindings = switch_ctx.bindings.list_all()
-        assert len(bindings) == 1
-        assert bindings[0].agent_id == "helper"
-        assert switch_ctx.bindings_path.is_file()
-
-    def test_switch_to_default_is_redirected_to_home(self, tmp_path: Path):
-        # /agent switch pip-boy is no longer the way to drop a binding;
-        # it must tell the operator to use /home instead so there is
-        # exactly one idiom per direction.
-        ctx = _build_ctx(
-            _cli_inbound("/agent switch pip-boy"), tmp_path,
-        )
-        result = dispatch_command(ctx)
-        assert result.handled
-        body = (result.response or "").lower()
-        assert "/home" in body
-        assert "not supported" in body or "is not supported" in body
-        assert ctx.bindings.list_all() == []
-
-    def test_switch_empty_lists_sub_agents_only(self, tmp_path: Path):
-        # Usage hint should list *sub-agents*, not pip-boy itself.
-        ctx = _build_ctx(_cli_inbound("/agent switch"), tmp_path)
-        result = dispatch_command(ctx)
-        assert result.handled
-        body = result.response or ""
-        assert "Usage:" in body
-        assert "Known sub-agents:" in body
-        # pip-boy is the root; it should never appear in the
-        # switchable-targets list.
-        known_line = next(
-            line for line in body.splitlines()
-            if line.startswith("Known sub-agents:")
-        )
-        assert "pip-boy" not in known_line
-
-    def test_switch_unknown_agent_includes_hint(self, tmp_path: Path):
-        ctx = _build_ctx(_cli_inbound("/agent switch nosuch"), tmp_path)
-        result = dispatch_command(ctx)
-        assert result.handled
-        body = result.response or ""
-        assert "Unknown agent" in body
-        assert "/agent create" in body
+        assert first_you_are.startswith("You are helper,"), first_you_are
 
     def test_delete_requires_yes_flag(self, tmp_path: Path):
-        ctx = _build_ctx(_cli_inbound("/agent create helper"), tmp_path)
+        ctx = _build_ctx(_cli_inbound("/subagent create helper"), tmp_path)
         dispatch_command(ctx)
         ctx2 = CommandContext(
-            inbound=_cli_inbound("/agent delete helper"),
+            inbound=_cli_inbound("/subagent delete helper"),
             registry=ctx.registry,
             bindings=ctx.bindings,
             bindings_path=ctx.bindings_path,
@@ -636,35 +695,35 @@ class TestAgentCommand:
 
     def test_delete_refuses_root(self, tmp_path: Path):
         ctx = _build_ctx(
-            _cli_inbound("/agent delete pip-boy --yes"), tmp_path,
+            _cli_inbound("/subagent delete pip-boy --yes"), tmp_path,
         )
         result = dispatch_command(ctx)
         assert result.handled
         assert "root" in (result.response or "").lower()
 
     def test_archive_refuses_root(self, tmp_path: Path):
-        ctx = _build_ctx(_cli_inbound("/agent archive pip-boy"), tmp_path)
+        ctx = _build_ctx(_cli_inbound("/subagent archive pip-boy"), tmp_path)
         result = dispatch_command(ctx)
         assert result.handled
         assert "root" in (result.response or "").lower()
 
     def test_delete_invalidates_host_cache(self, tmp_path: Path):
-        """Regression: after ``/agent delete``, the host must drop its
-        cached per-agent service and its session rows — otherwise
+        """Regression: after ``/subagent delete``, the host must drop
+        its cached per-agent service and its session rows — otherwise
         ``flush_and_rotate`` on ``/exit`` reflects via the stale
         ``MemoryStore``, whose first ``save_state`` re-creates the
         wiped ``.pip/`` with a zombie ``state.json``.
         """
         called: list[str] = []
         create_ctx = _build_ctx(
-            _cli_inbound("/agent create helper"),
+            _cli_inbound("/subagent create helper"),
             tmp_path,
             invalidate_agent=lambda aid: called.append(aid),
         )
         dispatch_command(create_ctx)
 
         delete_ctx = CommandContext(
-            inbound=_cli_inbound("/agent delete helper --yes"),
+            inbound=_cli_inbound("/subagent delete helper --yes"),
             registry=create_ctx.registry,
             bindings=create_ctx.bindings,
             bindings_path=create_ctx.bindings_path,
@@ -679,14 +738,14 @@ class TestAgentCommand:
     def test_archive_invalidates_host_cache(self, tmp_path: Path):
         called: list[str] = []
         create_ctx = _build_ctx(
-            _cli_inbound("/agent create helper"),
+            _cli_inbound("/subagent create helper"),
             tmp_path,
             invalidate_agent=lambda aid: called.append(aid),
         )
         dispatch_command(create_ctx)
 
         archive_ctx = CommandContext(
-            inbound=_cli_inbound("/agent archive helper"),
+            inbound=_cli_inbound("/subagent archive helper"),
             registry=create_ctx.registry,
             bindings=create_ctx.bindings,
             bindings_path=create_ctx.bindings_path,
@@ -701,13 +760,13 @@ class TestAgentCommand:
     def test_delete_purges_claude_code_project_dir(
         self, tmp_path: Path, monkeypatch,
     ):
-        """Regression: ``/agent delete`` must also wipe CC's per-project
-        cache at ``~/.claude/projects/<enc-cwd>/`` — that folder holds
-        both session JSONL transcripts and CC's own ``memory/`` (the
-        ``MEMORY.md`` + ``user_*.md`` cards). Without this cleanup, a
-        freshly recreated agent at the same cwd rehydrates the previous
-        identity's "who is my user" memory via CC's native recall,
-        defeating delete.
+        """Regression: ``/subagent delete`` must also wipe CC's
+        per-project cache at ``~/.claude/projects/<enc-cwd>/`` — that
+        folder holds both session JSONL transcripts and CC's own
+        ``memory/`` (the ``MEMORY.md`` + ``user_*.md`` cards). Without
+        this cleanup, a freshly recreated agent at the same cwd
+        rehydrates the previous identity's "who is my user" memory
+        via CC's native recall, defeating delete.
         """
         from pip_agent.memory import transcript_source
 
@@ -717,7 +776,7 @@ class TestAgentCommand:
         )
 
         create_ctx = _build_ctx(
-            _cli_inbound("/agent create helper"), tmp_path,
+            _cli_inbound("/subagent create helper"), tmp_path,
         )
         dispatch_command(create_ctx)
 
@@ -735,7 +794,7 @@ class TestAgentCommand:
         assert cc_dir.is_dir()
 
         delete_ctx = CommandContext(
-            inbound=_cli_inbound("/agent delete helper --yes"),
+            inbound=_cli_inbound("/subagent delete helper --yes"),
             registry=create_ctx.registry,
             bindings=create_ctx.bindings,
             bindings_path=create_ctx.bindings_path,
@@ -758,7 +817,7 @@ class TestAgentCommand:
         )
 
         create_ctx = _build_ctx(
-            _cli_inbound("/agent create helper"), tmp_path,
+            _cli_inbound("/subagent create helper"), tmp_path,
         )
         dispatch_command(create_ctx)
 
@@ -769,7 +828,7 @@ class TestAgentCommand:
         (cc_dir / "memory" / "MEMORY.md").write_text("stale", encoding="utf-8")
 
         archive_ctx = CommandContext(
-            inbound=_cli_inbound("/agent archive helper"),
+            inbound=_cli_inbound("/subagent archive helper"),
             registry=create_ctx.registry,
             bindings=create_ctx.bindings,
             bindings_path=create_ctx.bindings_path,
@@ -780,25 +839,26 @@ class TestAgentCommand:
         assert result.handled, result.response
         assert not cc_dir.exists()
 
-    def test_agent_gated_when_on_sub_agent(self, tmp_path: Path):
+    def test_subagent_gated_when_on_sub_agent(self, tmp_path: Path):
         # Create a sub-agent, bind this chat to it, then verify that
-        # any further /agent call (including the bare one) bounces
-        # with a /home redirect — sub-agents don't manage siblings.
+        # any further /subagent call (including the bare one) bounces
+        # with an /unbind redirect — sub-agents don't manage siblings.
+        # Note: /bind itself is NOT gated, only /subagent is.
         create_ctx = _build_ctx(
-            _cli_inbound("/agent create helper"), tmp_path,
+            _cli_inbound("/subagent create helper"), tmp_path,
         )
         dispatch_command(create_ctx)
-        switch_ctx = CommandContext(
-            inbound=_cli_inbound("/agent switch helper"),
+        bind_ctx = CommandContext(
+            inbound=_cli_inbound("/bind helper"),
             registry=create_ctx.registry,
             bindings=create_ctx.bindings,
             bindings_path=create_ctx.bindings_path,
             memory_store=None,
             scheduler=None,
         )
-        dispatch_command(switch_ctx)
+        dispatch_command(bind_ctx)
 
-        for bad in ("/agent", "/agent list", "/agent create other"):
+        for bad in ("/subagent", "/subagent list", "/subagent create other"):
             ctx = CommandContext(
                 inbound=_cli_inbound(bad),
                 registry=create_ctx.registry,
@@ -810,70 +870,176 @@ class TestAgentCommand:
             result = dispatch_command(ctx)
             assert result.handled, bad
             body = (result.response or "").lower()
-            assert "/home" in body, bad
+            assert "/unbind" in body, bad
             assert "pip-boy" in body, bad
 
 
 # ---------------------------------------------------------------------------
-# /home — leave a sub-agent and return to pip-boy
+# /bind + /unbind — symmetric routing pair, works from any agent
 # ---------------------------------------------------------------------------
 
 
-class TestHomeCommand:
-    def test_home_on_pip_boy_is_noop(self, tmp_path: Path):
-        ctx = _build_ctx(_cli_inbound("/home"), tmp_path)
+class TestBindCommand:
+    def test_bind_no_args_lists_sub_agents(self, tmp_path: Path):
+        # Usage hint should list *sub-agents*, not pip-boy itself —
+        # "on pip-boy" has no binding row by construction.
+        ctx = _build_ctx(_cli_inbound("/bind"), tmp_path)
+        result = dispatch_command(ctx)
+        assert result.handled
+        body = result.response or ""
+        assert "Usage:" in body
+        assert "Known sub-agents:" in body
+        known_line = next(
+            line for line in body.splitlines()
+            if line.startswith("Known sub-agents:")
+        )
+        assert "pip-boy" not in known_line
+
+    def test_bind_unknown_agent_hints_create(self, tmp_path: Path):
+        ctx = _build_ctx(_cli_inbound("/bind nosuch"), tmp_path)
+        result = dispatch_command(ctx)
+        assert result.handled
+        body = result.response or ""
+        assert "Unknown agent" in body
+        assert "/subagent create" in body
+
+    def test_bind_to_root_redirects_to_unbind(self, tmp_path: Path):
+        # /bind pip-boy is not a way to "bind to root"; it would create
+        # a second canonical representation of "on pip-boy" (explicit
+        # binding row vs no row). Reject with a redirect to /unbind so
+        # there's exactly one way to be home.
+        ctx = _build_ctx(_cli_inbound("/bind pip-boy"), tmp_path)
+        result = dispatch_command(ctx)
+        assert result.handled
+        body = (result.response or "").lower()
+        assert "/unbind" in body
+        assert "not supported" in body
+        assert ctx.bindings.list_all() == []
+
+    def test_bind_creates_binding_row(self, tmp_path: Path):
+        # /subagent create helper → /bind helper → check the binding
+        # row lands in the table and on disk.
+        ctx = _build_ctx(_cli_inbound("/subagent create helper"), tmp_path)
+        dispatch_command(ctx)
+
+        bind_ctx = CommandContext(
+            inbound=_cli_inbound("/bind helper"),
+            registry=ctx.registry,
+            bindings=ctx.bindings,
+            bindings_path=ctx.bindings_path,
+            memory_store=None,
+            scheduler=None,
+        )
+        result = dispatch_command(bind_ctx)
+        assert result.handled
+        assert "Bound to" in (result.response or "")
+        bindings = bind_ctx.bindings.list_all()
+        assert len(bindings) == 1
+        assert bindings[0].agent_id == "helper"
+        assert bind_ctx.bindings_path.is_file()
+
+    def test_bind_works_from_sub_agent_direct_sibling_hop(
+        self, tmp_path: Path,
+    ):
+        # This is the key asymmetry we fixed: under the old
+        # /agent switch, you'd have to /home then /agent switch X to
+        # hop from sub-agent A to sub-agent B. /bind works from
+        # anywhere, so A → B is a single command.
+        build_ctx = _build_ctx(
+            _cli_inbound("/subagent create alpha"), tmp_path,
+        )
+        dispatch_command(build_ctx)
+        dispatch_command(CommandContext(
+            inbound=_cli_inbound("/subagent create beta"),
+            registry=build_ctx.registry,
+            bindings=build_ctx.bindings,
+            bindings_path=build_ctx.bindings_path,
+            memory_store=None,
+            scheduler=None,
+        ))
+
+        # Bind to alpha.
+        dispatch_command(CommandContext(
+            inbound=_cli_inbound("/bind alpha"),
+            registry=build_ctx.registry,
+            bindings=build_ctx.bindings,
+            bindings_path=build_ctx.bindings_path,
+            memory_store=None,
+            scheduler=None,
+        ))
+        assert [b.agent_id for b in build_ctx.bindings.list_all()] == ["alpha"]
+
+        # Direct hop alpha → beta without going via pip-boy. Under the
+        # old design this would have been rejected because /agent was
+        # pip-boy-only.
+        result = dispatch_command(CommandContext(
+            inbound=_cli_inbound("/bind beta"),
+            registry=build_ctx.registry,
+            bindings=build_ctx.bindings,
+            bindings_path=build_ctx.bindings_path,
+            memory_store=None,
+            scheduler=None,
+        ))
+        assert result.handled, result.response
+        assert "Bound to" in (result.response or "")
+        assert [b.agent_id for b in build_ctx.bindings.list_all()] == ["beta"]
+
+
+class TestUnbindCommand:
+    def test_unbind_on_pip_boy_is_noop(self, tmp_path: Path):
+        ctx = _build_ctx(_cli_inbound("/unbind"), tmp_path)
         result = dispatch_command(ctx)
         assert result.handled
         body = (result.response or "").lower()
         assert "already on pip-boy" in body
         assert ctx.bindings.list_all() == []
 
-    def test_home_from_sub_agent_clears_binding(self, tmp_path: Path):
+    def test_unbind_from_sub_agent_clears_binding(self, tmp_path: Path):
         create_ctx = _build_ctx(
-            _cli_inbound("/agent create helper"), tmp_path,
+            _cli_inbound("/subagent create helper"), tmp_path,
         )
         dispatch_command(create_ctx)
-        switch_ctx = CommandContext(
-            inbound=_cli_inbound("/agent switch helper"),
+        bind_ctx = CommandContext(
+            inbound=_cli_inbound("/bind helper"),
             registry=create_ctx.registry,
             bindings=create_ctx.bindings,
             bindings_path=create_ctx.bindings_path,
             memory_store=None,
             scheduler=None,
         )
-        dispatch_command(switch_ctx)
+        dispatch_command(bind_ctx)
         assert len(create_ctx.bindings.list_all()) == 1
 
-        home_ctx = CommandContext(
-            inbound=_cli_inbound("/home"),
+        unbind_ctx = CommandContext(
+            inbound=_cli_inbound("/unbind"),
             registry=create_ctx.registry,
             bindings=create_ctx.bindings,
             bindings_path=create_ctx.bindings_path,
             memory_store=None,
             scheduler=None,
         )
-        result = dispatch_command(home_ctx)
+        result = dispatch_command(unbind_ctx)
         assert result.handled
         body = (result.response or "").lower()
-        assert "back to pip-boy" in body
-        assert "binding cleared" in body
+        assert "unbound" in body
+        assert "pip-boy" in body
         assert create_ctx.bindings.list_all() == []
 
 
 # ---------------------------------------------------------------------------
-# /agent reset <id> — backup · delete · rebuild · restore
+# /subagent reset <id> — backup · delete · rebuild · restore
 # ---------------------------------------------------------------------------
 
 
-class TestAgentReset:
+class TestSubagentReset:
     def test_reset_requires_id(self, tmp_path: Path):
-        ctx = _build_ctx(_cli_inbound("/agent reset"), tmp_path)
+        ctx = _build_ctx(_cli_inbound("/subagent reset"), tmp_path)
         result = dispatch_command(ctx)
         assert result.handled
         assert "Usage:" in (result.response or "")
 
     def test_reset_unknown_agent(self, tmp_path: Path):
-        ctx = _build_ctx(_cli_inbound("/agent reset nosuch"), tmp_path)
+        ctx = _build_ctx(_cli_inbound("/subagent reset nosuch"), tmp_path)
         result = dispatch_command(ctx)
         assert result.handled
         assert "Unknown agent" in (result.response or "")
@@ -882,8 +1048,8 @@ class TestAgentReset:
         self, tmp_path: Path,
     ):
         # Create a sub-agent and seed its .pip/ with both an identity
-        # file and a memory-layer artefact, then /agent reset.
-        ctx = _build_ctx(_cli_inbound("/agent create helper"), tmp_path)
+        # file and a memory-layer artefact, then /subagent reset.
+        ctx = _build_ctx(_cli_inbound("/subagent create helper"), tmp_path)
         dispatch_command(ctx)
 
         paths = ctx.registry.paths_for("helper")
@@ -902,7 +1068,7 @@ class TestAgentReset:
         (pip_dir / "HEARTBEAT.md").write_text("keep-me", encoding="utf-8")
 
         reset_ctx = CommandContext(
-            inbound=_cli_inbound("/agent reset helper"),
+            inbound=_cli_inbound("/subagent reset helper"),
             registry=ctx.registry,
             bindings=ctx.bindings,
             bindings_path=ctx.bindings_path,
@@ -927,70 +1093,42 @@ class TestAgentReset:
         users_after = pip_dir / "users"
         assert users_after.is_dir() and list(users_after.iterdir()) == []
 
-    def test_reset_pip_boy_preserves_workspace_shared_state(
-        self, tmp_path: Path,
-    ):
-        # Set up pip-boy with identity + workspace-shared files, plus
-        # memory-layer artefacts that should be wiped.
-        ctx = _build_ctx(_cli_inbound("/agent reset pip-boy"), tmp_path)
+    def test_reset_refuses_root_agent(self, tmp_path: Path):
+        """Root reset is rejected: the handler's own MemoryStore /
+        StreamingSession are in active use, and the root ``.pip/``
+        carries workspace-shared state that other agents rely on.
+        The only safe way out is stopping the host and rebuilding
+        offline — which the refusal message points at.
+        """
+        # Seed pip-boy's .pip/ with memory artefacts we want to verify
+        # the refusal preserves (i.e. the handler did NOT touch them).
+        ctx = _build_ctx(_cli_inbound("/subagent reset pip-boy"), tmp_path)
         paths = ctx.registry.paths_for("pip-boy")
         assert paths is not None
         pip_dir = paths.pip_dir
         pip_dir.mkdir(parents=True, exist_ok=True)
-
-        # Identity.
-        persona = pip_dir / "persona.md"
-        persona.write_text("persona-body", encoding="utf-8")
-        (pip_dir / "HEARTBEAT.md").write_text("hb-body", encoding="utf-8")
-
-        # Workspace-shared (root-only).
+        (pip_dir / "memories.json").write_text("[\"keep\"]", encoding="utf-8")
+        (pip_dir / "state.json").write_text("{\"keep\": true}", encoding="utf-8")
         (pip_dir / "owner.md").write_text("owner", encoding="utf-8")
-        (pip_dir / "bindings.json").write_text("{}", encoding="utf-8")
-        (pip_dir / "agents_registry.json").write_text(
-            "{\"pip-boy\": {}}", encoding="utf-8",
-        )
-        creds = pip_dir / "credentials"
-        creds.mkdir(exist_ok=True)
-        (creds / "wecom.json").write_text("{}", encoding="utf-8")
-        archived = pip_dir / "archived"
-        archived.mkdir(exist_ok=True)
-        (archived / "dummy").write_text("keep", encoding="utf-8")
-
-        # Memory layer.
-        (pip_dir / "memories.json").write_text("[]", encoding="utf-8")
-        (pip_dir / "state.json").write_text("{}", encoding="utf-8")
-        users = pip_dir / "users"
-        users.mkdir(exist_ok=True)
-        (users / "u.md").write_text("u", encoding="utf-8")
 
         result = dispatch_command(ctx)
         assert result.handled, result.response
-        assert "Reset agent 'pip-boy'" in (result.response or "")
+        response = result.response or ""
+        assert "Cannot reset the root agent" in response
+        assert "/exit" in response
 
-        # Identity + workspace-shared preserved.
-        assert persona.read_text(encoding="utf-8") == "persona-body"
-        assert (pip_dir / "HEARTBEAT.md").read_text(encoding="utf-8") == "hb-body"
+        # Nothing was wiped — the refusal happens before any filesystem
+        # mutation, which is the whole point.
+        assert (pip_dir / "memories.json").read_text(encoding="utf-8") == "[\"keep\"]"
+        assert (pip_dir / "state.json").read_text(encoding="utf-8") == "{\"keep\": true}"
         assert (pip_dir / "owner.md").read_text(encoding="utf-8") == "owner"
-        assert (pip_dir / "bindings.json").read_text(encoding="utf-8") == "{}"
-        assert (pip_dir / "agents_registry.json").is_file()
-        assert (creds / "wecom.json").is_file()
-        assert (archived / "dummy").is_file()
-
-        # Memory-layer wiped. ``users/`` is re-seeded empty (mirroring
-        # ``MemoryStore.__init__``) so per-user writes after the reset
-        # don't trip on a missing parent directory.
-        assert not (pip_dir / "memories.json").exists()
-        assert not (pip_dir / "state.json").exists()
-        assert users.is_dir() and list(users.iterdir()) == []
-        obs_after = pip_dir / "observations"
-        assert obs_after.is_dir() and list(obs_after.iterdir()) == []
 
     def test_reset_strips_sdk_session_entries_for_agent(
         self, tmp_path: Path,
     ):
         import json
 
-        ctx = _build_ctx(_cli_inbound("/agent create helper"), tmp_path)
+        ctx = _build_ctx(_cli_inbound("/subagent create helper"), tmp_path)
         dispatch_command(ctx)
 
         paths = ctx.registry.paths_for("helper")
@@ -1008,7 +1146,7 @@ class TestAgentReset:
         )
 
         reset_ctx = CommandContext(
-            inbound=_cli_inbound("/agent reset helper"),
+            inbound=_cli_inbound("/subagent reset helper"),
             registry=ctx.registry,
             bindings=ctx.bindings,
             bindings_path=ctx.bindings_path,
@@ -1036,7 +1174,7 @@ class TestAgentReset:
             transcript_source, "DEFAULT_PROJECTS_ROOT", fake_projects_root,
         )
 
-        ctx = _build_ctx(_cli_inbound("/agent create helper"), tmp_path)
+        ctx = _build_ctx(_cli_inbound("/subagent create helper"), tmp_path)
         dispatch_command(ctx)
 
         paths = ctx.registry.paths_for("helper")
@@ -1048,7 +1186,7 @@ class TestAgentReset:
         )
 
         reset_ctx = CommandContext(
-            inbound=_cli_inbound("/agent reset helper"),
+            inbound=_cli_inbound("/subagent reset helper"),
             registry=ctx.registry,
             bindings=ctx.bindings,
             bindings_path=ctx.bindings_path,
@@ -1069,14 +1207,14 @@ class TestAgentReset:
         """
         called: list[str] = []
         ctx = _build_ctx(
-            _cli_inbound("/agent create helper"),
+            _cli_inbound("/subagent create helper"),
             tmp_path,
             invalidate_agent=lambda aid: called.append(aid),
         )
         dispatch_command(ctx)
 
         reset_ctx = CommandContext(
-            inbound=_cli_inbound("/agent reset helper"),
+            inbound=_cli_inbound("/subagent reset helper"),
             registry=ctx.registry,
             bindings=ctx.bindings,
             bindings_path=ctx.bindings_path,
