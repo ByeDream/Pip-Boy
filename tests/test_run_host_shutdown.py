@@ -53,8 +53,11 @@ class TestRunHostFlushesOnCtrlC:
         class _StubBindingTable:
             def load(self, _p: Path) -> None: ...
             def save(self, _p: Path) -> None: ...
-            def remove(self, *a: Any, **kw: Any) -> None: ...
+            def remove(self, *a: Any, **kw: Any) -> bool:
+                return False
             def add(self, *a: Any, **kw: Any) -> None: ...
+            def list_all(self) -> list[Any]:
+                return []
 
         class _StubChannelManager:
             def __init__(self) -> None:
@@ -94,7 +97,7 @@ class TestRunHostFlushesOnCtrlC:
 
         monkeypatch.setattr(mod.asyncio, "run", _fake_asyncio_run)
 
-        mod.run_host(mode="cli", bind_agent=None)
+        mod.run_host()
 
         assert flush_calls == [1], (
             "run_host must call flush_and_rotate in its finally block "
@@ -142,6 +145,11 @@ class TestRunHostFlushesOnCtrlC:
 
         class _StubBindingTable:
             def load(self, _p: Path) -> None: ...
+            def save(self, _p: Path) -> None: ...
+            def remove(self, *a: Any, **kw: Any) -> bool:
+                return False
+            def list_all(self) -> list[Any]:
+                return []
 
         class _StubChannelManager:
             def register(self, _ch: Any) -> None: ...
@@ -174,7 +182,7 @@ class TestRunHostFlushesOnCtrlC:
 
         monkeypatch.setattr(mod.asyncio, "run", _fake_asyncio_run)
 
-        mod.run_host(mode="cli", bind_agent=None)
+        mod.run_host()
 
         assert stop_calls == [1], "scheduler.stop never fired — finally wedged"
         assert close_calls == [1], "channel_mgr.close_all never fired — finally wedged"

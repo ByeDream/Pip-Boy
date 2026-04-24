@@ -60,6 +60,10 @@ class McpContext:
     peer_id: str = ""
     sender_id: str = ""
     user_id: str = ""
+    # WeChat multi-account: picks which bot identity originates outbound
+    # sends through ``send_image`` / ``send_file``. Empty for single-
+    # identity channels (CLI, WeCom).
+    account_id: str = ""
 
 
 def build_mcp_server(ctx: McpContext) -> McpSdkServerConfig:
@@ -596,15 +600,24 @@ def _channel_tools(ctx: McpContext) -> list[SdkMcpTool]:
         # to a thread so the MCP handler does not stall the SDK event
         # loop (which is also processing streaming assistant output for
         # the same turn).
+        # Snapshot ``ctx.account_id`` at call time so the same bot identity
+        # that received this turn's inbound is the one that sends. Rebinding
+        # ``ctx.account_id`` mid-turn (across concurrent turns in a streaming
+        # session) could otherwise race the closure.
+        account_id = ctx.account_id
+
         def _blocking_send_image() -> bool:
             with ch.send_lock:
-                return ch.send_image(peer, file_data, caption=caption)
+                return ch.send_image(
+                    peer, file_data, caption=caption, account_id=account_id,
+                )
 
         def _blocking_send_file() -> bool:
             with ch.send_lock:
                 return ch.send_file(
                     peer, file_data,
                     filename=path.name, caption=caption,
+                    account_id=account_id,
                 )
 
         sent_as = "image" if is_image else "file"

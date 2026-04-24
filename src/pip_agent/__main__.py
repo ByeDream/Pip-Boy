@@ -81,13 +81,17 @@ def _configure_logging() -> None:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="pip-boy")
-    parser.add_argument("--version", action="store_true", help="Show version and exit")
     parser.add_argument(
-        "--mode", choices=["auto", "cli", "scan"],
-        default="auto",
-        help="Channel mode: auto (connect all available), cli (CLI only), scan (force WeChat QR)",
+        "--version", action="store_true", help="Show version and exit",
     )
-    parser.add_argument("--bind", default=None, help="Bind WeChat channel to a specific agent ID")
+    parser.add_argument(
+        "--wechat", metavar="AGENT_ID", default=None,
+        help=(
+            "Log a new WeChat account in via QR and bind it to AGENT_ID. "
+            "The scan runs in the background so the CLI stays usable "
+            "(/wechat cancel aborts the scan, /exit aborts everything)."
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.version:
@@ -110,11 +114,11 @@ def main(argv: list[str] | None = None) -> None:
     from pip_agent import _profile
 
     _profile.bootstrap()
-    _profile.cold_start("logging_ready", mode=args.mode)
+    _profile.cold_start("logging_ready", wechat=bool(args.wechat))
 
     from pip_agent.agent_host import run_host
     _profile.cold_start("run_host_imported")
-    run_host(mode=args.mode, bind_agent=args.bind)
+    run_host(wechat_login_for=args.wechat)
 
 
 if __name__ == "__main__":

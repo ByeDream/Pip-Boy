@@ -60,10 +60,12 @@ class _StubStop:
         return self._is_set
 
 
+class _StubAccount:
+    is_logged_in = True
+
+
 class _StubChannel:
     """Minimal ``WeChatChannel`` surface the poll loop touches."""
-
-    is_logged_in = True
 
     def __init__(
         self,
@@ -74,8 +76,12 @@ class _StubChannel:
         self._stop = stop
         self._poll_results = poll_results
         self._call_ix = 0
+        self._account = _StubAccount()
 
-    def poll(self) -> list[InboundMessage]:
+    def get_account(self, _account_id: str) -> _StubAccount:
+        return self._account
+
+    def poll(self, _account_id: str) -> list[InboundMessage]:
         msgs = self._poll_results(self._call_ix)
         self._call_ix += 1
         # Tell stop how many polls we've done so it can raise its flag
@@ -110,7 +116,9 @@ def _drive(
     # No Polling print in tests — it's harmless but avoids stdout noise
     # with ``pytest -s``.
     with patch("builtins.print"):
-        wechat_poll_loop(channel, queue, lock, stop)  # type: ignore[arg-type]
+        wechat_poll_loop(
+            channel, "bot-a", queue, lock, stop,  # type: ignore[arg-type]
+        )
     return stop, queue
 
 

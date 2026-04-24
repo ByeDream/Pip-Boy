@@ -79,6 +79,7 @@ from pip_agent.routing import (
 if TYPE_CHECKING:
     from pip_agent.host_scheduler import HostScheduler
     from pip_agent.memory import MemoryStore
+    from pip_agent.wechat_controller import WeChatController
 
 log = logging.getLogger(__name__)
 
@@ -104,6 +105,15 @@ class CommandContext:
     bindings_path: Path
     memory_store: "MemoryStore | None" = None
     scheduler: "HostScheduler | None" = None
+    wechat_controller: "WeChatController | None" = None
+    """Host hook into the multi-account WeChat lifecycle.
+
+    Set to ``None`` when the current run doesn't have the WeChat
+    channel enabled (``/wechat *`` commands then respond with a hint).
+    See :class:`pip_agent.wechat_controller.WeChatController` for the
+    actual surface; slash handlers never touch :class:`WeChatChannel`
+    directly.
+    """
     invalidate_agent: Callable[[str], None] | None = None
     """Host hook to drop an agent's cached services + session rows.
 
@@ -233,6 +243,11 @@ _HELP_CLI_EXTRA = """\
 CLI-only commands (unavailable on remote channels):
 
   /exit                         Quit Pip-Boy
+
+  /wechat list                  List registered WeChat accounts + bindings
+  /wechat add <agent_id>        Start QR login; bind new account to <agent_id>
+  /wechat cancel                Abort an in-progress QR login
+  /wechat remove <account_id>   Stop polling, delete credential + binding
 
   /subagent                     pip-boy only: list known sub-agents
   /subagent create <label>      pip-boy only: create a new sub-agent.
@@ -1406,6 +1421,105 @@ def _cmd_unbind(ctx: CommandContext, _args: str) -> CommandResult:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# /wechat — multi-account lifecycle (CLI-only)
+# ---------------------------------------------------------------------------
+
+
+_WECHAT_USAGE = (
+    "Usage:\n"
+    "  /wechat list                   — show registered accounts + bindings\n"
+    "  /wechat add <agent_id>         — start QR login, bind new account to <agent_id>\n"
+    "  /wechat cancel                 — abort an in-progress QR login\n"
+    "  /wechat remove <account_id>    — stop polling, delete credential + binding"
+)
+
+
+def _cmd_wechat(ctx: CommandContext, args: str) -> CommandResult:
+    """``/wechat`` command family.
+
+    CLI-only (the ACL in :func:`dispatch_command` already enforces
+    that). When WeChat isn't configured for this run, ``ctx
+    .wechat_controller`` is ``None`` and every sub-command responds
+    with a one-line hint instead of silently failing.
+    """
+    controller = ctx.wechat_controller
+    tail = shlex.split(args) if args else []
+    sub = tail[0].lower() if tail else ""
+    rest = tail[1:]
+
+    if controller is None:
+        return CommandResult(
+            handled=True,
+            response=(
+                "WeChat channel is not active for this run. Launch with "
+                "`pip-boy --wechat <agent_id>` to initialise it, or drop "
+                "a credential file under `.pip/credentials/wechat/` and "
+                "restart."
+            ),
+        )
+
+    if sub == "list":
+        rows = controller.list_accounts()
+        if not rows:
+            return CommandResult(
+                handled=True,
+                response=(
+                    "No WeChat accounts registered yet. Use "
+                    "`/wechat add <agent_id>` to scan one in."
+                ),
+            )
+        lines = ["account_id -> agent_id  (logged_in)"]
+        for row in rows:
+            agent = row["agent_id"] or "(unbound)"
+            lines.append(
+                f"  {row['account_id']} -> {agent}  "
+                f"({row['logged_in']})"
+            )
+        current = controller.current_qr_agent()
+        if current:
+            lines.append(f"QR scan in progress for agent: {current}")
+        return CommandResult(handled=True, response="\n".join(lines))
+
+    if sub == "add":
+        if not rest:
+            return CommandResult(
+                handled=True,
+                response="Usage: /wechat add <agent_id>",
+            )
+        accepted, message = controller.start_qr_login(rest[0])
+        return CommandResult(handled=True, response=message)
+
+    if sub == "cancel":
+        did = controller.cancel_qr()
+        return CommandResult(
+            handled=True,
+            response=(
+                "QR login cancelled."
+                if did else "No QR login in progress."
+            ),
+        )
+
+    if sub == "remove":
+        if not rest:
+            return CommandResult(
+                handled=True,
+                response="Usage: /wechat remove <account_id>",
+            )
+        account_id = rest[0]
+        removed = controller.remove_account(account_id)
+        return CommandResult(
+            handled=True,
+            response=(
+                f"Removed account {account_id} (credential + binding)."
+                if removed else
+                f"No account or binding found for {account_id!r}."
+            ),
+        )
+
+    return CommandResult(handled=True, response=_WECHAT_USAGE)
+
+
 def _cmd_exit(ctx: CommandContext, _args: str) -> CommandResult:
     if ctx.inbound.channel == "cli":
         # Belt-and-braces: the CLI loop intercepts /exit before dispatch,
@@ -1438,6 +1552,7 @@ _HANDLERS: dict[
     "/subagent": _cmd_subagent,
     "/bind": _cmd_bind,
     "/unbind": _cmd_unbind,
+    "/wechat": _cmd_wechat,
     "/exit": _cmd_exit,
 }
 
@@ -1445,4 +1560,9 @@ _HANDLERS: dict[
 # (WeCom / WeChat / ...) get a terse refusal AND the ``/help`` text
 # they see simply doesn't advertise these — remote peers never even
 # learn the commands exist.
-_CLI_ONLY_COMMANDS = {"/subagent", "/exit"}
+#
+# ``/wechat`` is CLI-only on purpose: scanning a QR code from a WeCom
+# or WeChat peer is neither possible nor desirable (you'd be handing
+# the scan URL to whoever said ``/wechat add``). The same peer can
+# still use ``/bind`` and ``/unbind`` for routing-only changes.
+_CLI_ONLY_COMMANDS = {"/subagent", "/exit", "/wechat"}

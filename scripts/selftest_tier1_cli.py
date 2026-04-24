@@ -65,11 +65,17 @@ def main() -> int:
         "Please answer 'ack3' and nothing else.",
     ]
 
+    # Keep this self-test CLI-only: the new host picks channels on
+    # demand (see README "Channel enablement rules"), so we scrub the
+    # messaging envs to prevent an ambient .env from firing up WeCom
+    # / WeChat during what's supposed to be a CLI latency probe.
+    env.pop("WECOM_BOT_ID", None)
+    env.pop("WECOM_BOT_SECRET", None)
+
     proc = subprocess.Popen(
         [
             str(PYTHON_EXE),
             "-m", "pip_agent",
-            "--mode", "cli",
         ],
         cwd=str(TEST_WORKDIR),
         env=env,

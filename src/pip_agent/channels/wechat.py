@@ -1,10 +1,35 @@
-"""WeChat iLink-Bot channel.
+"""WeChat iLink-Bot channel (multi-account).
 
-QR-code login, long-poll ``getupdates`` loop, and media decryption for
-WeChat personal accounts exposed through the iLink gateway. The crypto
-helpers (``_parse_ilink_aes_key`` / ``_aes_ecb_decrypt``) live here
-because the only caller that needs them is
-:meth:`WeChatChannel._download_cdn_media`.
+One ``WeChatChannel`` instance wraps *N* scanned iLink bot accounts.
+Each account has its own bot token, its own ``get_updates_buf`` cursor,
+its own per-peer ``context_token`` map, and its own credential file on
+disk. All accounts share the one outbound ``httpx.Client`` pool and the
+one send-lock.
+
+Why one channel, many accounts
+------------------------------
+``ChannelManager`` keys channels by ``channel.name`` — we can't register
+two ``"wechat"`` channels. Equally important, the host's reply logic
+routes by :attr:`InboundMessage.channel` + ``account_id`` (tier-3), so
+keeping a single ``Channel`` façade and fan-out by ``account_id``
+internally maps 1:1 onto the binding table without any new abstraction.
+
+Files on disk
+-------------
+Credentials live under ``<workspace>/.pip/credentials/wechat/<account_id>.json``.
+Each file is a JSON object with ``token`` / ``baseUrl`` / ``accountId``
+/ ``userId`` / ``get_updates_buf`` / ``savedAt``. The legacy
+``<workspace>/.pip/wechat_session.json`` is **not** read here — the
+host ``run_host`` does a one-time sweep at startup to delete that file
+so operators aren't surprised by a ghost session after upgrading.
+
+QR login
+--------
+:meth:`WeChatChannel.login` is **cancellable**. It takes a ``stop`` event
+and a ``cancel`` event and polls the QR status with a short (10 s)
+HTTP timeout + ``stop.wait(1.0)`` between iterations, so ``/exit`` or
+``/wechat cancel`` aborts within 1-10 seconds instead of being wedged
+behind a 40 s long-poll.
 """
 from __future__ import annotations
 
@@ -15,6 +40,7 @@ import random
 import threading
 import time
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -71,8 +97,92 @@ def _random_wechat_uin() -> str:
     return base64.b64encode(str(val).encode()).decode()
 
 
+# ---------------------------------------------------------------------------
+# _WeChatAccount — per-account state container
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _WeChatAccount:
+    """One scanned iLink bot identity.
+
+    Isolated from :class:`WeChatChannel` so multiple accounts can co-exist
+    inside a single channel instance. Every field that used to be a
+    ``self._*`` attribute on the old singleton channel lives here now.
+    """
+
+    account_id: str
+    bot_token: str
+    base_url: str
+    user_id: str = ""
+    get_updates_buf: str = ""
+    cred_path: Path | None = None
+    context_tokens: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def is_logged_in(self) -> bool:
+        return bool(self.bot_token)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "token": self.bot_token,
+            "baseUrl": self.base_url,
+            "accountId": self.account_id,
+            "userId": self.user_id,
+            "get_updates_buf": self.get_updates_buf,
+            "savedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+
+    @classmethod
+    def from_file(cls, path: Path) -> _WeChatAccount | None:
+        """Load one account from its JSON file.
+
+        Returns ``None`` if the file is unparseable or missing the
+        ``accountId`` field — corrupt files are logged and skipped, not
+        raised, so a single bad file doesn't prevent other accounts from
+        loading.
+        """
+        try:
+            data = json.loads(path.read_text("utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            log.warning("wechat: failed to load %s: %s", path, exc)
+            return None
+        account_id = str(data.get("accountId") or "")
+        if not account_id:
+            log.warning("wechat: credential %s missing accountId, skipped", path)
+            return None
+        return cls(
+            account_id=account_id,
+            bot_token=str(data.get("token") or ""),
+            base_url=str(data.get("baseUrl") or WeChatChannel.ILINK_BASE),
+            user_id=str(data.get("userId") or ""),
+            get_updates_buf=str(data.get("get_updates_buf") or ""),
+            cred_path=path,
+        )
+
+    def save(self) -> None:
+        """Persist this account's state to its credential file."""
+        if self.cred_path is None:
+            return
+        self.cred_path.parent.mkdir(parents=True, exist_ok=True)
+        self.cred_path.write_text(
+            json.dumps(self.to_dict(), indent=2), "utf-8",
+        )
+
+
+# ---------------------------------------------------------------------------
+# WeChatChannel
+# ---------------------------------------------------------------------------
+
+
 class WeChatChannel(Channel):
-    """WeChat iLink Bot protocol — QR login + getupdates long-poll."""
+    """WeChat iLink Bot protocol — multi-account QR login + getupdates.
+
+    One instance holds N accounts. ``poll`` / ``send`` / ``send_typing``
+    all take an ``account_id`` to select which bot identity to operate
+    on; ``InboundMessage.account_id`` is populated from the same key so
+    the host can route a reply back through the same bot.
+    """
 
     name = "wechat"
     ILINK_BASE = "https://ilinkai.weixin.qq.com"
@@ -83,136 +193,209 @@ class WeChatChannel(Channel):
 
         self._httpx = httpx
         self._state_dir = state_dir
-        self._state_dir.mkdir(parents=True, exist_ok=True)
-        self._cred_path = state_dir / "wechat_session.json"
+        self._cred_dir = state_dir / "credentials" / "wechat"
+        self._cred_dir.mkdir(parents=True, exist_ok=True)
 
         self._http = httpx.Client(timeout=40.0)
-        self._bot_token: str = ""
-        self._base_url: str = self.ILINK_BASE
-        self._account_id: str = ""
-        self._user_id: str = ""
-        self._get_updates_buf: str = ""
         self._closing = False
 
-        self._context_tokens: dict[str, str] = {}
+        self._accounts: dict[str, _WeChatAccount] = {}
+        self._accounts_lock = threading.Lock()
+        self._load_all_accounts()
 
-        self._load_creds()
+    # -- account registry --
 
-    # -- credential persistence --
+    def _load_all_accounts(self) -> None:
+        """Populate ``self._accounts`` from ``credentials/wechat/*.json``."""
+        for path in sorted(self._cred_dir.glob("*.json")):
+            acc = _WeChatAccount.from_file(path)
+            if acc is None:
+                continue
+            self._accounts[acc.account_id] = acc
+            log.info(
+                "wechat: loaded account %s (logged_in=%s)",
+                acc.account_id, acc.is_logged_in,
+            )
 
-    def _load_creds(self) -> None:
-        if not self._cred_path.exists():
-            return
-        try:
-            data = json.loads(self._cred_path.read_text("utf-8"))
-            self._bot_token = data.get("token", "")
-            self._base_url = data.get("baseUrl", self.ILINK_BASE)
-            self._account_id = data.get("accountId", "")
-            self._user_id = data.get("userId", "")
-            self._get_updates_buf = data.get("get_updates_buf", "")
-        except (json.JSONDecodeError, OSError, KeyError) as exc:
-            log.debug("wechat: failed to load credentials: %s", exc)
+    def account_ids(self) -> list[str]:
+        """Snapshot of currently-registered account ids."""
+        with self._accounts_lock:
+            return sorted(self._accounts.keys())
 
-    def _save_creds(self) -> None:
-        data = {
-            "token": self._bot_token,
-            "baseUrl": self._base_url,
-            "accountId": self._account_id,
-            "userId": self._user_id,
-            "get_updates_buf": self._get_updates_buf,
-            "savedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        }
-        self._cred_path.write_text(json.dumps(data, indent=2), "utf-8")
+    def get_account(self, account_id: str) -> _WeChatAccount | None:
+        with self._accounts_lock:
+            return self._accounts.get(account_id)
 
-    def _clear_creds(self) -> None:
-        self._bot_token = ""
-        self._get_updates_buf = ""
-        if self._cred_path.exists():
-            self._cred_path.unlink()
+    def add_account(self, acc: _WeChatAccount) -> None:
+        """Register a freshly-scanned account + persist its credential file.
+
+        ``acc.cred_path`` is assigned if the caller didn't set one, so
+        the standard on-disk layout is used by default.
+        """
+        if acc.cred_path is None:
+            acc.cred_path = self._cred_dir / f"{acc.account_id}.json"
+        acc.save()
+        with self._accounts_lock:
+            self._accounts[acc.account_id] = acc
+        log.info("wechat: added account %s", acc.account_id)
+
+    def remove_account(self, account_id: str) -> bool:
+        """Unregister an account and delete its credential file.
+
+        Returns ``True`` if an account was removed. Callers that also
+        want to stop a running poll thread should signal that thread's
+        ``stop_event`` **before** calling this, otherwise the thread
+        will see ``get_account`` return ``None`` and log spurious
+        warnings until it notices stop.
+        """
+        with self._accounts_lock:
+            acc = self._accounts.pop(account_id, None)
+        if acc is None:
+            return False
+        if acc.cred_path is not None and acc.cred_path.exists():
+            try:
+                acc.cred_path.unlink()
+            except OSError as exc:
+                log.warning(
+                    "wechat: failed to delete %s: %s", acc.cred_path, exc,
+                )
+        log.info("wechat: removed account %s", account_id)
+        return True
+
+    @property
+    def has_any_logged_in(self) -> bool:
+        with self._accounts_lock:
+            return any(a.is_logged_in for a in self._accounts.values())
 
     # -- common headers --
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self, acc: _WeChatAccount) -> dict[str, str]:
         return {
             "Content-Type": "application/json",
             "AuthorizationType": "ilink_bot_token",
-            "Authorization": f"Bearer {self._bot_token}",
+            "Authorization": f"Bearer {acc.bot_token}",
             "X-WECHAT-UIN": _random_wechat_uin(),
         }
 
     # -- QR login flow --
 
-    @property
-    def is_logged_in(self) -> bool:
-        return bool(self._bot_token)
+    def login(
+        self,
+        stop: threading.Event,
+        cancel: threading.Event,
+        *,
+        deadline_sec: float = 300.0,
+    ) -> _WeChatAccount | None:
+        """Interactive QR-code login — cancellable.
 
-    def login(self) -> bool:
-        """Interactive QR-code login.  Returns True on success."""
+        Returns a fresh :class:`_WeChatAccount` on success, or ``None``
+        on timeout / QR expiry / transport error / cancel-by-event.
+        The caller is responsible for actually registering the returned
+        account via :meth:`add_account` — this method is a pure factory
+        and doesn't mutate channel state on success.
+
+        Cancellation contract
+        ---------------------
+        - ``stop`` set → global shutdown (``/exit``). Return ``None``.
+        - ``cancel`` set → user aborted just this login (``/wechat cancel``).
+          Return ``None``.
+
+        Both events are polled between short (~10 s) HTTP timeouts so the
+        operator sees a responsive abort instead of being wedged behind
+        a 40 s long-poll.
+        """
         print("  [wechat] Requesting QR code...")
         try:
             resp = self._http.get(
                 f"{self.ILINK_BASE}/ilink/bot/get_bot_qrcode",
                 params={"bot_type": "3"},
                 headers={"iLink-App-ClientVersion": "1"},
+                timeout=10.0,
             )
             data = resp.json()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             print(f"  [wechat] QR request failed: {exc}")
-            return False
+            return None
 
         qrcode_id = data.get("qrcode", "")
         qrcode_url = data.get("qrcode_img_content", "")
         if not qrcode_id:
             print(f"  [wechat] Unexpected QR response: {data}")
-            return False
+            return None
 
         print("  [wechat] Scan QR code with WeChat:")
         print(f"  {qrcode_url}")
 
         import qrcode as _qr
-        qr = _qr.QRCode(error_correction=_qr.constants.ERROR_CORRECT_L, box_size=1, border=1)
+        qr = _qr.QRCode(
+            error_correction=_qr.constants.ERROR_CORRECT_L,
+            box_size=1, border=1,
+        )
         qr.add_data(qrcode_url)
         qr.make(fit=True)
         qr.print_ascii(invert=True)
+        print(
+            "  [wechat] Waiting for scan "
+            "(type /wechat cancel to abort, /exit to quit)...",
+        )
 
-        deadline = time.time() + 300
+        deadline = time.time() + deadline_sec
         while time.time() < deadline:
+            if stop.is_set():
+                print("  [wechat] QR login aborted (host shutdown).")
+                return None
+            if cancel.is_set():
+                print("  [wechat] QR login cancelled.")
+                return None
             try:
                 resp = self._http.get(
                     f"{self.ILINK_BASE}/ilink/bot/get_qrcode_status",
                     params={"qrcode": qrcode_id},
                     headers={"iLink-App-ClientVersion": "1"},
-                    timeout=40.0,
+                    timeout=10.0,
                 )
                 status_data = resp.json()
             except self._httpx.TimeoutException:
+                # Short-timeout loop: swallow the timeout and check
+                # stop / cancel before the next poll.
+                stop.wait(1.0)
                 continue
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 print(f"  [wechat] QR poll error: {exc}")
-                return False
+                return None
 
             status = status_data.get("status", "wait")
             if status == "wait":
+                stop.wait(1.0)
                 continue
             if status == "scaned":
                 print("  [wechat] QR scanned, waiting for confirmation...")
+                stop.wait(1.0)
                 continue
             if status == "expired":
                 print("  [wechat] QR code expired.")
-                return False
+                return None
             if status == "confirmed":
-                self._bot_token = status_data.get("bot_token", "")
-                self._base_url = status_data.get("baseurl", self.ILINK_BASE)
-                self._account_id = status_data.get("ilink_bot_id", "")
-                self._user_id = status_data.get("ilink_user_id", "")
-                self._get_updates_buf = ""
-                self._save_creds()
-                print(f"  [wechat] Login successful (account={self._account_id})")
-                return True
+                account_id = str(status_data.get("ilink_bot_id") or "")
+                if not account_id:
+                    print("  [wechat] Login response missing ilink_bot_id.")
+                    return None
+                acc = _WeChatAccount(
+                    account_id=account_id,
+                    bot_token=str(status_data.get("bot_token") or ""),
+                    base_url=str(
+                        status_data.get("baseurl") or self.ILINK_BASE,
+                    ),
+                    user_id=str(status_data.get("ilink_user_id") or ""),
+                    get_updates_buf="",
+                )
+                print(f"  [wechat] Login successful (account={account_id})")
+                return acc
             log.warning("wechat QR unknown status: %s", status)
+            stop.wait(1.0)
 
-        print("  [wechat] QR login timed out (5 min).")
-        return False
+        print("  [wechat] QR login timed out.")
+        return None
 
     # -- CDN media download --
 
@@ -221,8 +404,9 @@ class WeChatChannel(Channel):
     ) -> bytes | None:
         """Download + AES-128-ECB decrypt a CDN media blob.
 
-        Mirrors hermes-agent: tries ``encrypt_query_param`` first, falls back
-        to ``full_url``, and only decrypts when an AES key is available.
+        Mirrors hermes-agent: tries ``encrypt_query_param`` first, falls
+        back to ``full_url``, and only decrypts when an AES key is
+        available.
         """
         eqp = media.get("encrypt_query_param", "")
         full_url = media.get("full_url", "")
@@ -260,7 +444,7 @@ class WeChatChannel(Channel):
                     decrypted=bool(raw_key),
                 )
                 return data
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 log.warning("wechat CDN download/decrypt failed: %s", exc)
                 return None
 
@@ -306,47 +490,70 @@ class WeChatChannel(Channel):
 
     # -- getupdates long-poll --
 
-    def poll(self) -> list[InboundMessage]:
-        """One round of getupdates.  Returns parsed messages."""
+    def poll(self, account_id: str) -> list[InboundMessage]:
+        """One round of getupdates for ``account_id``.
+
+        Returns parsed messages. Empty list on transport error,
+        unknown account, or no new traffic.
+        """
         # PROFILE
         from pip_agent import _profile
 
         with _profile.span_sync("wechat.poll", channel="wechat"):
-            return self._poll_inner()
+            return self._poll_inner(account_id)
 
-    def _poll_inner(self) -> list[InboundMessage]:  # PROFILE — split from poll()
-        from pip_agent import _profile  # PROFILE
+    def _poll_inner(self, account_id: str) -> list[InboundMessage]:
+        from pip_agent import _profile
+
+        acc = self.get_account(account_id)
+        if acc is None or not acc.is_logged_in:
+            return []
 
         try:
-            with _profile.span_sync("wechat.poll_http", channel="wechat"):  # PROFILE
+            with _profile.span_sync("wechat.poll_http", channel="wechat"):
                 resp = self._http.post(
-                    f"{self._base_url}/ilink/bot/getupdates",
-                    headers=self._headers(),
+                    f"{acc.base_url}/ilink/bot/getupdates",
+                    headers=self._headers(acc),
                     json={
-                        "get_updates_buf": self._get_updates_buf,
+                        "get_updates_buf": acc.get_updates_buf,
                         "base_info": {"channel_version": "1.0.0"},
                     },
                     timeout=40.0,
                 )
                 data = resp.json()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             if not self._closing:
-                log.warning("wechat getupdates error: %s", exc)
+                log.warning(
+                    "wechat getupdates error (account=%s): %s",
+                    account_id, exc,
+                )
             return []
 
         ret = data.get("ret", 0)
         if ret == -14:
-            print("  [wechat] Session expired (-14), need re-login.")
-            self._clear_creds()
+            print(
+                f"  [wechat] Session expired for {account_id} (-14), "
+                "need re-login.",
+            )
+            # Blank the token so the poll loop stops hammering and
+            # wait for operator action. We do NOT auto-delete the file
+            # — keep the account record around so /wechat list shows it
+            # as logged-out and /wechat add <agent> can re-scan.
+            acc.bot_token = ""
+            acc.get_updates_buf = ""
+            acc.save()
             return []
         if ret != 0:
-            log.warning("wechat getupdates ret=%s: %s", ret, data.get("errmsg", ""))
+            log.warning(
+                "wechat getupdates (account=%s) ret=%s: %s",
+                account_id, ret, data.get("errmsg", ""),
+            )
             return []
 
         new_buf = data.get("get_updates_buf", "")
         if new_buf:
-            self._get_updates_buf = new_buf
-            self._save_creds()
+            acc.get_updates_buf = new_buf
+            acc.save()
 
         results: list[InboundMessage] = []
         for msg in data.get("msgs", []):
@@ -358,7 +565,7 @@ class WeChatChannel(Channel):
             from_user = msg.get("from_user_id", "")
             ctx_token = msg.get("context_token", "")
             if ctx_token and from_user:
-                self._context_tokens[from_user] = ctx_token
+                acc.context_tokens[from_user] = ctx_token
 
             # PROFILE
             with _profile.span_sync("wechat.parse_item", channel="wechat"):
@@ -381,13 +588,14 @@ class WeChatChannel(Channel):
                     text_len=len(text),
                     atts=len(atts),
                     sender=from_user,
+                    account=account_id,
                 )
                 results.append(InboundMessage(
                     text=text,
                     sender_id=from_user,
                     channel="wechat",
                     peer_id=from_user,
-                    account_id=self._account_id,
+                    account_id=account_id,
                     raw=msg,
                     attachments=atts,
                 ))
@@ -396,18 +604,52 @@ class WeChatChannel(Channel):
 
     # -- send --
 
-    def has_context_token(self, peer_id: str) -> bool:
-        return bool(self._context_tokens.get(peer_id))
+    def has_context_token(self, peer_id: str, *, account_id: str = "") -> bool:
+        acc = self.get_account(account_id) if account_id else None
+        if acc is None:
+            return False
+        return bool(acc.context_tokens.get(peer_id))
 
-    def send(self, to: str, text: str, **kw: Any) -> bool:
+    def send(
+        self, to: str, text: str, *,
+        account_id: str = "", **kw: Any,
+    ) -> bool:
         from pip_agent.fileutil import chunk_message
 
         # PROFILE
         from pip_agent import _profile
 
-        ctx_token = self._context_tokens.get(to, "")
+        acc: _WeChatAccount | None
+        if account_id:
+            # Caller specified a concrete identity: require it to exist.
+            # Silent fallback to "the only account" would route messages
+            # out of the wrong bot on multi-account hosts the moment a
+            # caller passed a stale id, so we refuse instead.
+            acc = self.get_account(account_id)
+        else:
+            # Single-account convenience path: if only one account is
+            # registered and the caller didn't specify one, fall back to
+            # it. This keeps simple setups (exactly one bot) working with
+            # callers that predate the multi-account refactor. Multi-
+            # account hosts must always pass ``account_id``.
+            with self._accounts_lock:
+                acc = (
+                    next(iter(self._accounts.values()))
+                    if len(self._accounts) == 1 else None
+                )
+        if acc is None:
+            print(
+                f"  [wechat] Cannot send to {to}: unknown account_id "
+                f"{account_id!r}",
+            )
+            return False
+
+        ctx_token = acc.context_tokens.get(to, "")
         if not ctx_token:
-            print(f"  [wechat] Cannot reply to {to}: no context_token")
+            print(
+                f"  [wechat] Cannot reply to {to} on account {acc.account_id}: "
+                "no context_token",
+            )
             return False
 
         with _profile.span_sync(
@@ -436,26 +678,33 @@ class WeChatChannel(Channel):
                         bytes=len(chunk.encode("utf-8")),
                     ):
                         resp = self._http.post(
-                            f"{self._base_url}/ilink/bot/sendmessage",
-                            headers=self._headers(),
+                            f"{acc.base_url}/ilink/bot/sendmessage",
+                            headers=self._headers(acc),
                             json=body,
                         )
                     if resp.status_code != 200:
                         ok = False
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     log.warning("wechat sendmessage error: %s", exc)
                     ok = False
             return ok
 
-    def send_typing(self, to: str) -> None:
+    def send_typing(self, to: str, *, account_id: str = "") -> None:
         """Send typing indicator via sendtyping API (fire-and-forget)."""
-        ctx_token = self._context_tokens.get(to, "")
+        acc = self.get_account(account_id) if account_id else None
+        if acc is None:
+            with self._accounts_lock:
+                if len(self._accounts) == 1:
+                    acc = next(iter(self._accounts.values()))
+        if acc is None:
+            return
+        ctx_token = acc.context_tokens.get(to, "")
         if not ctx_token:
             return
         try:
             self._http.post(
-                f"{self._base_url}/ilink/bot/sendtyping",
-                headers=self._headers(),
+                f"{acc.base_url}/ilink/bot/sendtyping",
+                headers=self._headers(acc),
                 json={
                     "to_user_id": to,
                     "context_token": ctx_token,
@@ -463,7 +712,7 @@ class WeChatChannel(Channel):
                 },
                 timeout=5.0,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             log.debug("wechat: send_typing failed: %s", exc)
 
     def close(self) -> None:
@@ -472,17 +721,18 @@ class WeChatChannel(Channel):
 
 
 # ---------------------------------------------------------------------------
-# Background poll loop
+# Background poll loop — one thread per account
 # ---------------------------------------------------------------------------
 
 def wechat_poll_loop(
     wechat: WeChatChannel,
+    account_id: str,
     queue: list[InboundMessage],
     lock: threading.Lock,
     stop: threading.Event,
     pause: threading.Event | None = None,
 ) -> None:
-    """Long-poll loop for WeChat, runs in a daemon thread.
+    """Long-poll loop for one WeChat account, runs in a daemon thread.
 
     Cadence:
 
@@ -491,56 +741,59 @@ def wechat_poll_loop(
     * ``getupdates`` returned 0 messages → ``stop.wait(
       settings.wechat_poll_idle_sec)`` before the next call. Without
       this the loop hammers the iLink server at ~20 req/sec whenever
-      the user's chat is idle (the server fast-returns from long-poll
-      in <50 ms). Use ``stop.wait`` rather than ``time.sleep`` so
-      ``/exit`` interrupts promptly.
+      the user's chat is idle. Use ``stop.wait`` rather than
+      ``time.sleep`` so ``/exit`` interrupts promptly.
     * Transport error → exponential backoff, independent of the idle
       interval. Errors already drive a longer wait (``2s *
       consecutive_errors`` capped at 30 s) and should not be shortened
       by the idle setting.
+    * Account unknown (e.g. removed via ``/wechat remove`` while the
+      loop was running) → exit cleanly.
     """
     from pip_agent import _profile  # PROFILE
     from pip_agent.config import settings
 
-    print("  [wechat] Polling started")
+    print(f"  [wechat] Polling started for account {account_id}")
     consecutive_errors = 0
     idle_polls_streak = 0
     while not stop.is_set():
         if pause is not None and pause.is_set():
             stop.wait(0.5)
             continue
-        if not wechat.is_logged_in:
+        acc = wechat.get_account(account_id)
+        if acc is None:
+            log.info(
+                "wechat poll loop for %s exiting: account removed",
+                account_id,
+            )
+            return
+        if not acc.is_logged_in:
             stop.wait(5.0)
             continue
         try:
-            msgs = wechat.poll()
+            msgs = wechat.poll(account_id)
             consecutive_errors = 0
             if msgs:
                 with lock:
                     queue.extend(msgs)
-                # Drop any stale idle streak — the channel just woke up,
-                # next poll should fire immediately for a fast follow-up.
                 if idle_polls_streak:
                     _profile.event(
                         "wechat.poll_idle_streak_end",
                         channel="wechat",
                         streak=idle_polls_streak,
+                        account=account_id,
                     )
                     idle_polls_streak = 0
-                # Immediate loop — no sleep. Active-conversation path.
                 continue
-            # Idle path — throttle so we don't DOS the iLink server.
             idle_polls_streak += 1
             idle_wait = settings.wechat_poll_idle_sec
             if idle_wait > 0:
-                # Emit once per streak start (avoid per-poll event spam);
-                # streak-end event above carries the total count for
-                # post-hoc analysis.
                 if idle_polls_streak == 1:
                     _profile.event(
                         "wechat.poll_idle_backoff",
                         channel="wechat",
                         wait_sec=idle_wait,
+                        account=account_id,
                     )
                 stop.wait(idle_wait)
         except OSError:
@@ -548,12 +801,18 @@ def wechat_poll_loop(
                 break
             consecutive_errors += 1
             wait = min(30.0, 2.0 * consecutive_errors)
-            log.warning("wechat poll OSError (retry in %.0fs)", wait)
+            log.warning(
+                "wechat poll OSError account=%s (retry in %.0fs)",
+                account_id, wait,
+            )
             stop.wait(wait)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             if stop.is_set():
                 break
             consecutive_errors += 1
             wait = min(30.0, 2.0 * consecutive_errors)
-            log.warning("wechat poll error: %s (retry in %.0fs)", exc, wait)
+            log.warning(
+                "wechat poll error account=%s: %s (retry in %.0fs)",
+                account_id, exc, wait,
+            )
             stop.wait(wait)

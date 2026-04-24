@@ -50,9 +50,14 @@ def main() -> int:
     # Tier 2 is on by default, but be explicit so a stale .env
     # override doesn't silently skip the test.
     env["BATCH_TEXT_INBOUNDS"] = "true"
+    # Keep this self-test CLI-only: channel enablement is on-demand
+    # (README "Channel enablement rules"), so scrub messaging envs
+    # that a local .env might have injected.
+    env.pop("WECOM_BOT_ID", None)
+    env.pop("WECOM_BOT_SECRET", None)
 
     proc = subprocess.Popen(
-        [str(PYTHON_EXE), "-m", "pip_agent", "--mode", "cli"],
+        [str(PYTHON_EXE), "-m", "pip_agent"],
         cwd=str(TEST_WORKDIR),
         env=env,
         stdin=subprocess.PIPE,

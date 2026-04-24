@@ -14,7 +14,7 @@ from pip_agent.channels.base import Channel
 class CLIChannel(Channel):
     name = "cli"
 
-    def send(self, to: str, text: str, **kw: Any) -> bool:
+    def send(self, to: str, text: str, *, account_id: str = "", **kw: Any) -> bool:
         print()
         print("================================================")
         print(text)

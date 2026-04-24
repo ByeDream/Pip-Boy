@@ -78,56 +78,80 @@ class TestChannelManager:
 
 
 # ---------------------------------------------------------------------------
-# WeChatChannel — credential persistence
+# WeChatChannel — credential persistence (per-account)
 # ---------------------------------------------------------------------------
+
+def _make_account(ch, account_id, *, token="tok", ctx_peer=None):
+    """Test helper: register a fully-formed account on a WeChatChannel."""
+    from pip_agent.channels.wechat import _WeChatAccount
+
+    acc = _WeChatAccount(
+        account_id=account_id,
+        bot_token=token,
+        base_url="https://ilinkai.weixin.qq.com",
+        user_id="user@im.wechat",
+    )
+    ch.add_account(acc)
+    if ctx_peer is not None:
+        acc.context_tokens[ctx_peer] = f"ctx_{account_id}"
+    return acc
+
 
 class TestWeChatCredentials:
     @pytest.fixture
     def state_dir(self, tmp_path):
         return tmp_path / ".pip"
 
-    def test_save_and_load_creds(self, state_dir):
+    def test_add_account_persists_under_credentials_wechat_dir(self, state_dir):
         ch = WeChatChannel(state_dir)
-        ch._bot_token = "ilinkbot_test123"
-        ch._base_url = "https://ilinkai.weixin.qq.com"
-        ch._account_id = "bot@im.bot"
-        ch._user_id = "user@im.wechat"
-        ch._get_updates_buf = "eyJ0ZXN0IjoxfQ=="
-        ch._save_creds()
+        _make_account(ch, "bot-a", token="ilinkbot_aaa")
+        cred = state_dir / "credentials" / "wechat" / "bot-a.json"
+        assert cred.exists(), "add_account should write per-account JSON file"
+        data = json.loads(cred.read_text("utf-8"))
+        assert data["token"] == "ilinkbot_aaa"
+        assert data["accountId"] == "bot-a"
 
-        cred_path = state_dir / "wechat_session.json"
-        assert cred_path.exists()
-
-        data = json.loads(cred_path.read_text("utf-8"))
-        assert data["token"] == "ilinkbot_test123"
-        assert data["accountId"] == "bot@im.bot"
+    def test_reload_discovers_existing_credential_files(self, state_dir):
+        ch = WeChatChannel(state_dir)
+        _make_account(ch, "bot-a", token="t_a")
+        _make_account(ch, "bot-b", token="t_b")
 
         ch2 = WeChatChannel(state_dir)
-        assert ch2._bot_token == "ilinkbot_test123"
-        assert ch2._account_id == "bot@im.bot"
-        assert ch2._get_updates_buf == "eyJ0ZXN0IjoxfQ=="
-        assert ch2.is_logged_in is True
+        assert sorted(ch2.account_ids()) == ["bot-a", "bot-b"]
+        assert ch2.get_account("bot-a").bot_token == "t_a"
+        assert ch2.get_account("bot-b").bot_token == "t_b"
+        assert ch2.has_any_logged_in
 
-    def test_clear_creds(self, state_dir):
+    def test_remove_account_deletes_file(self, state_dir):
         ch = WeChatChannel(state_dir)
-        ch._bot_token = "token"
-        ch._save_creds()
-        assert ch.is_logged_in is True
+        _make_account(ch, "bot-a")
+        assert ch.remove_account("bot-a") is True
+        assert not (state_dir / "credentials" / "wechat" / "bot-a.json").exists()
+        assert ch.get_account("bot-a") is None
 
-        ch._clear_creds()
-        assert ch.is_logged_in is False
-        assert not (state_dir / "wechat_session.json").exists()
+    def test_legacy_single_session_file_is_ignored(self, state_dir):
+        # Pre-multi-account installs left behind ``wechat_session.json``.
+        # The new channel must NOT read it (the host does a one-time
+        # sweep to delete it; this test locks in that the channel itself
+        # doesn't interpret the old format as an account either).
+        state_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / "wechat_session.json").write_text(
+            json.dumps({"token": "old", "accountId": "legacy"}),
+            "utf-8",
+        )
+        ch = WeChatChannel(state_dir)
+        assert ch.account_ids() == []
 
 
 # ---------------------------------------------------------------------------
-# WeChatChannel — getupdates parsing
+# WeChatChannel — getupdates parsing (per-account)
 # ---------------------------------------------------------------------------
 
 class TestWeChatPoll:
     @pytest.fixture
     def wechat(self, tmp_path):
         ch = WeChatChannel(tmp_path / ".pip")
-        ch._bot_token = "token123"
+        _make_account(ch, "bot-a")
         return ch
 
     def test_parse_text_message(self, wechat):
@@ -143,15 +167,15 @@ class TestWeChatPoll:
                     "to_user_id": "bot@im.bot",
                     "context_token": "ctx_abc123",
                     "item_list": [
-                        {"type": 1, "text_item": {"text": "你好"}}
+                        {"type": 1, "text_item": {"text": "你好"}},
                     ],
-                }
+                },
             ],
             "get_updates_buf": "new_buf_value",
         }
 
         with patch.object(wechat._http, "post", return_value=mock_response):
-            results = wechat.poll()
+            results = wechat.poll("bot-a")
 
         assert len(results) == 1
         msg = results[0]
@@ -159,8 +183,13 @@ class TestWeChatPoll:
         assert msg.sender_id == "user@im.wechat"
         assert msg.channel == "wechat"
         assert msg.peer_id == "user@im.wechat"
-        assert wechat._context_tokens["user@im.wechat"] == "ctx_abc123"
-        assert wechat._get_updates_buf == "new_buf_value"
+        assert msg.account_id == "bot-a"
+        acc = wechat.get_account("bot-a")
+        assert acc.context_tokens["user@im.wechat"] == "ctx_abc123"
+        assert acc.get_updates_buf == "new_buf_value"
+
+    def test_poll_unknown_account_returns_empty(self, wechat):
+        assert wechat.poll("not-a-real-bot") == []
 
     def test_skip_bot_messages(self, wechat):
         mock_response = MagicMock()
@@ -172,64 +201,93 @@ class TestWeChatPoll:
                     "message_state": 2,
                     "from_user_id": "bot@im.bot",
                     "item_list": [{"type": 1, "text_item": {"text": "reply"}}],
-                }
+                },
             ],
             "get_updates_buf": "",
         }
-
         with patch.object(wechat._http, "post", return_value=mock_response):
-            results = wechat.poll()
+            results = wechat.poll("bot-a")
+        assert results == []
 
-        assert len(results) == 0
-
-    def test_session_expired(self, wechat):
+    def test_session_expired_clears_token(self, wechat):
         mock_response = MagicMock()
         mock_response.json.return_value = {
-            "ret": -14,
-            "errcode": -14,
-            "errmsg": "session timeout",
+            "ret": -14, "errcode": -14, "errmsg": "session timeout",
         }
-
         with patch.object(wechat._http, "post", return_value=mock_response):
-            results = wechat.poll()
+            results = wechat.poll("bot-a")
 
-        assert len(results) == 0
-        assert wechat._bot_token == ""
+        assert results == []
+        acc = wechat.get_account("bot-a")
+        assert acc.bot_token == ""
+        assert acc.is_logged_in is False
 
 
 # ---------------------------------------------------------------------------
-# WeChatChannel — send
+# WeChatChannel — send (per-account)
 # ---------------------------------------------------------------------------
 
 class TestWeChatSend:
     @pytest.fixture
     def wechat(self, tmp_path):
         ch = WeChatChannel(tmp_path / ".pip")
-        ch._bot_token = "token123"
-        ch._context_tokens["user@im.wechat"] = "ctx_token"
+        _make_account(ch, "bot-a", ctx_peer="user@im.wechat")
         return ch
 
     def test_send_with_context_token(self, wechat):
         mock_response = MagicMock()
         mock_response.status_code = 200
-
-        with patch.object(wechat._http, "post", return_value=mock_response) as mock_post:
-            ok = wechat.send("user@im.wechat", "Hello!")
+        with patch.object(
+            wechat._http, "post", return_value=mock_response,
+        ) as mock_post:
+            ok = wechat.send(
+                "user@im.wechat", "Hello!", account_id="bot-a",
+            )
 
         assert ok is True
-        call_args = mock_post.call_args
-        body = call_args.kwargs.get("json", call_args[1].get("json", {}))
-        assert body["msg"]["context_token"] == "ctx_token"
+        body = mock_post.call_args.kwargs["json"]
+        assert body["msg"]["context_token"] == "ctx_bot-a"
         assert body["msg"]["message_type"] == 2
         assert body["msg"]["item_list"][0]["text_item"]["text"] == "Hello!"
 
     def test_send_without_context_token(self, wechat):
-        ok = wechat.send("unknown_user", "Hello!")
+        ok = wechat.send("unknown_user", "Hello!", account_id="bot-a")
         assert ok is False
 
+    def test_send_unknown_account_returns_false(self, wechat):
+        ok = wechat.send(
+            "user@im.wechat", "Hello!", account_id="no-such-bot",
+        )
+        assert ok is False
+
+    def test_single_account_fallback_when_account_id_missing(self, tmp_path):
+        # Convenience: one-account hosts keep working if the caller
+        # doesn't pass account_id. Multi-account hosts must always
+        # pass it (see test_send_multi_account_requires_account_id).
+        ch = WeChatChannel(tmp_path / ".pip")
+        _make_account(ch, "solo", ctx_peer="user@im.wechat")
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        with patch.object(ch._http, "post", return_value=mock_response):
+            assert ch.send("user@im.wechat", "hi") is True
+
+    def test_send_multi_account_requires_account_id(self, tmp_path):
+        ch = WeChatChannel(tmp_path / ".pip")
+        _make_account(ch, "bot-a", ctx_peer="user@im.wechat")
+        _make_account(ch, "bot-b", ctx_peer="user@im.wechat")
+        # No account_id + multiple accounts → refuse (no guessing).
+        assert ch.send("user@im.wechat", "hi") is False
+
     def test_has_context_token(self, wechat):
-        assert wechat.has_context_token("user@im.wechat") is True
-        assert wechat.has_context_token("nobody") is False
+        assert wechat.has_context_token(
+            "user@im.wechat", account_id="bot-a",
+        ) is True
+        assert wechat.has_context_token(
+            "nobody", account_id="bot-a",
+        ) is False
+        assert wechat.has_context_token(
+            "user@im.wechat", account_id="no-such-bot",
+        ) is False
 
 
 # ---------------------------------------------------------------------------

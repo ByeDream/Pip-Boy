@@ -201,6 +201,7 @@ class StreamingSession:
         sender_id: str,
         peer_id: str,
         stream_text: bool = True,
+        account_id: str = "",
     ) -> QueryResult:
         """Send one user turn into the live subprocess and drain the response.
 
@@ -235,6 +236,7 @@ class StreamingSession:
             self._mcp_ctx.sender_id = sender_id
             self._mcp_ctx.peer_id = peer_id
             self._mcp_ctx.session_id = self.session_id
+            self._mcp_ctx.account_id = account_id
 
             _profile.event(
                 "stream.user_pushed",

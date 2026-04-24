@@ -94,16 +94,29 @@ class Channel(ABC):
         return lk
 
     @abstractmethod
-    def send(self, to: str, text: str, **kw: Any) -> bool:
+    def send(self, to: str, text: str, *, account_id: str = "", **kw: Any) -> bool:
+        """Deliver ``text`` to ``to`` through this channel.
+
+        ``account_id`` identifies *which bot identity* should originate
+        the reply, for channels that hold multiple sessions under a
+        single ``Channel`` instance (currently WeChat — one ``iLink_bot_id``
+        per scanned account). Single-identity channels (CLI, WeCom)
+        ignore the parameter. Callers that route replies for a specific
+        inbound should pass ``inbound.account_id`` so the same bot that
+        received the message is the one that replies.
+        """
         ...
 
-    def send_image(self, to: str, image_data: bytes, caption: str = "", **kw: Any) -> bool:
+    def send_image(
+        self, to: str, image_data: bytes, caption: str = "",
+        *, account_id: str = "", **kw: Any,
+    ) -> bool:
         """Send an image. Subclasses override; default is no-op."""
         return False
 
     def send_file(
         self, to: str, file_data: bytes, filename: str = "",
-        caption: str = "", **kw: Any,
+        caption: str = "", *, account_id: str = "", **kw: Any,
     ) -> bool:
         """Send a file. Subclasses override; default is no-op."""
         return False
@@ -136,6 +149,7 @@ def send_with_retry(
     text: str,
     *,
     inbound_id: str = "",
+    account_id: str = "",
 ) -> bool:
     """Chunk *text* per channel limits, then send each chunk with retries.
 
@@ -150,6 +164,12 @@ def send_with_retry(
     :meth:`pip_agent.channels.wecom.WecomChannel.send` for why keying
     pending frames by ``peer_id`` is unsafe under concurrency. Unused by
     CLI / WeChat.
+
+    ``account_id`` (optional) picks which bot identity should originate
+    the reply when the channel holds multiple. WeChat needs this because
+    one ``WeChatChannel`` instance wraps N scanned accounts and the
+    reply must go through the same bot that received the inbound.
+    Single-identity channels ignore the parameter.
     """
     # PROFILE
     from pip_agent import _profile
@@ -158,7 +178,7 @@ def send_with_retry(
         with _profile.span_sync(
             "channel.send_with_retry", channel=ch.name, chunks=1, text_len=len(text),
         ), ch.send_lock:
-            return ch.send(to, text)
+            return ch.send(to, text, account_id=account_id)
 
     from pip_agent.fileutil import chunk_message
 
@@ -172,14 +192,14 @@ def send_with_retry(
         text_len=len(text),
     ), ch.send_lock:
         for chunk in chunks:
-            ok = ch.send(to, chunk, inbound_id=inbound_id)
+            ok = ch.send(to, chunk, inbound_id=inbound_id, account_id=account_id)
             if ok:
                 continue
             for delay in BACKOFF_SCHEDULE:
                 retries += 1
                 jitter = delay * 0.2 * (random.random() - 0.5)
                 time.sleep(delay + jitter)
-                ok = ch.send(to, chunk, inbound_id=inbound_id)
+                ok = ch.send(to, chunk, inbound_id=inbound_id, account_id=account_id)
                 if ok:
                     break
             if not ok:

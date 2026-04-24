@@ -74,11 +74,32 @@ pip install -e ".[dev]"
 
 ```bash
 cd /path/to/your/project
-pip-boy                 # all available channels (CLI + WeChat/WeCom if configured)
-pip-boy --cli           # CLI only
-pip-boy --scan          # force WeChat QR login
+pip-boy                         # all configured channels (see rules below)
+pip-boy --wechat <agent_id>     # scan a new WeChat account and bind it to <agent_id>
 pip-boy --version
 ```
+
+### Channel enablement rules
+
+Pip-Boy picks which channels to start from what it sees on disk and in the
+environment — there is no `--mode` anymore:
+
+- **CLI** — always on.
+- **WeCom** — enabled iff both `WECOM_BOT_ID` and `WECOM_BOT_SECRET` are set
+  in `.env` (or the process env).
+- **WeChat** — enabled iff at least one logged-in account exists under
+  `<workspace>/.pip/credentials/wechat/*.json`, **or** `--wechat <agent_id>`
+  was passed on this run. Each account gets its own poll thread and an
+  isolated conversation context per peer, so one host can serve multiple
+  WeChat identities concurrently.
+
+`--wechat <agent_id>` is non-blocking: the QR handshake runs in a background
+daemon while the CLI stays responsive. Use `/wechat list`, `/wechat add
+<agent_id>`, `/wechat cancel`, and `/wechat remove <account_id>` at runtime
+to manage WeChat identities without restarting the host. On first run after
+upgrading from a pre-multi-account build, any legacy single-account
+`wechat_session.json` and tier-4 `channel=wechat` binding are dropped with a
+warning; re-scan with `--wechat <agent_id>` to rebuild bindings.
 
 On first launch Pip-Boy scaffolds `.pip/` with defaults, including `.env` from the template. Fill in `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_BASE_URL`) and run again. The agent uses `Path.cwd()` as its working directory.
 

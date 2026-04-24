@@ -42,13 +42,12 @@ from pip_agent.memory.transcript_source import locate_session_jsonl
 from pip_agent.routing import (
     AgentPaths,
     AgentRegistry,
-    Binding,
     BindingTable,
     build_session_key,
-    normalize_agent_id,
     resolve_effective_config,
 )
 from pip_agent.streaming_session import StaleSessionError, StreamingSession
+from pip_agent.wechat_controller import WeChatController
 
 log = logging.getLogger(__name__)
 
@@ -633,11 +632,16 @@ class AgentHost:
         binding_table: BindingTable,
         channel_mgr: ChannelManager,
         scheduler: HostScheduler | None = None,
+        wechat_controller: "WeChatController | None" = None,
     ) -> None:
         self._registry = registry
         self._binding_table = binding_table
         self._channel_mgr = channel_mgr
         self._scheduler = scheduler
+        # ``None`` unless WeChat is actually in use for this run — the
+        # slash-command surface degrades gracefully to "WeChat isn't
+        # configured" when absent.
+        self._wechat_controller = wechat_controller
 
         self._sessions = _load_sessions()
         self._agents: dict[str, _PerAgent] = {}
@@ -966,6 +970,7 @@ class AgentHost:
                 sender_id=inbound.sender_id,
                 peer_id=mcp_ctx.peer_id,
                 stream_text=True,
+                account_id=inbound.account_id,
             )
         except StaleSessionError as exc:
             log.warning(
@@ -999,6 +1004,7 @@ class AgentHost:
                 sender_id=inbound.sender_id,
                 peer_id=mcp_ctx.peer_id,
                 stream_text=True,
+                account_id=inbound.account_id,
             )
         return result
 
@@ -1340,6 +1346,7 @@ class AgentHost:
         channel: Channel | None = None,
         peer_id: str = "",
         session_id: str = "",
+        account_id: str = "",
     ) -> McpContext:
         # Resolve the caller's addressbook user_id so tools like
         # ``remember_user`` can enforce self-update-only ACLs. Mirrors
@@ -1362,6 +1369,7 @@ class AgentHost:
             peer_id=peer_id,
             user_id=user_id,
             scheduler=self._scheduler,
+            account_id=account_id,
         )
 
     async def process_inbound(self, inbound: InboundMessage) -> None:
@@ -1456,6 +1464,7 @@ class AgentHost:
                         memory_store=svc.memory_store,
                         scheduler=self._scheduler,
                         invalidate_agent=self.invalidate_agent_cache,
+                        wechat_controller=self._wechat_controller,
                     ),
                 )
             if cmd_result.handled:
@@ -1694,6 +1703,7 @@ class AgentHost:
                     svc, eff.effective_model, inbound.sender_id,
                     channel=ch, peer_id=reply_peer,
                     session_id=ctx_session_id,
+                    account_id=inbound.account_id,
                 )
                 _profile.event(  # PROFILE
                     "host.mcp_ctx_built",
@@ -1771,6 +1781,7 @@ class AgentHost:
                             inbound_id=str(
                                 inbound.raw.get("_pip_inbound_id") or ""
                             ),
+                            account_id=inbound.account_id,
                         )
                     return
 
@@ -1935,6 +1946,7 @@ class AgentHost:
             send_with_retry(
                 ch, reply_peer, response,
                 inbound_id=str(inbound.raw.get("_pip_inbound_id") or ""),
+                account_id=inbound.account_id,
             )
 
     @staticmethod
@@ -1986,6 +1998,7 @@ class AgentHost:
                 send_with_retry(
                     ch, reply_peer, f"[error] {result.error}",
                     inbound_id=inbound_id,
+                    account_id=inbound.account_id,
                 )
             return
 
@@ -2004,6 +2017,7 @@ class AgentHost:
             elif ch:
                 send_with_retry(
                     ch, reply_peer, result.text, inbound_id=inbound_id,
+                    account_id=inbound.account_id,
                 )
 
 
@@ -2012,11 +2026,108 @@ class AgentHost:
 # ---------------------------------------------------------------------------
 
 
-def run_host(mode: str = "auto", bind_agent: str | None = None) -> None:
+def _sweep_legacy_wechat(
+    state_dir: Path,
+    binding_table: BindingTable,
+    bindings_path: Path,
+) -> None:
+    """One-time cleanup of pre-multi-account WeChat artefacts.
+
+    The previous design stored one bot's session in
+    ``<state_dir>/wechat_session.json`` and routed with a tier-4
+    ``channel=wechat`` binding. Neither survives into the multi-account
+    model: credentials live per-account under
+    ``credentials/wechat/<account_id>.json``, and routing is tier-3
+    ``account_id=...``.
+
+    Rather than attempt an automatic migration (which would require
+    divining which agent the legacy bot belonged to and guessing a
+    synthetic account_id), the user explicitly chose a "fresh start":
+    the legacy session is dropped, the tier-4 binding is dropped, and
+    operators re-scan via ``--wechat <agent_id>``. This sweep is
+    idempotent and runs every boot; after the first launch post-upgrade
+    it's a no-op and can eventually be removed.
+    """
+    legacy_session = state_dir / "wechat_session.json"
+    if legacy_session.exists():
+        try:
+            legacy_session.unlink()
+            log.warning(
+                "Dropped legacy single-account WeChat session at %s — "
+                "use `pip-boy --wechat <agent_id>` to re-scan and bind.",
+                legacy_session,
+            )
+        except OSError as exc:
+            log.warning(
+                "Failed to delete legacy WeChat session %s: %s",
+                legacy_session, exc,
+            )
+
+    removed_tier4 = False
+    for b in binding_table.list_all():
+        if b.tier == 4 and b.match_key == "channel" and b.match_value == "wechat":
+            removed_tier4 = binding_table.remove(
+                b.match_key, b.match_value,
+            ) or removed_tier4
+    if removed_tier4:
+        try:
+            binding_table.save(bindings_path)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Failed to save bindings after legacy sweep: %s", exc)
+        log.warning(
+            "Dropped legacy tier-4 channel=wechat binding — re-bind via "
+            "`pip-boy --wechat <agent_id>` or `/wechat add <agent_id>`.",
+        )
+
+
+def _wechat_is_needed(
+    state_dir: Path,
+    binding_table: BindingTable,
+    wechat_login_for: str | None,
+) -> bool:
+    """Decide whether to construct / register the WeChat channel at all.
+
+    Rules (any one suffices):
+
+    1. ``--wechat <agent_id>`` was passed (new login coming).
+    2. Any credential file under ``credentials/wechat/*.json`` exists
+       (pre-existing accounts to resume).
+    3. Any tier-3 ``account_id=...`` binding exists (operator or
+       previous runtime persisted a routing rule).
+
+    Returning ``False`` skips the WeChat import entirely, preserving
+    cold-start speed for CLI-only workflows. The only per-boot cost
+    here is a directory scan.
+    """
+    if wechat_login_for:
+        return True
+    cred_dir = state_dir / "credentials" / "wechat"
+    if cred_dir.is_dir():
+        for _ in cred_dir.glob("*.json"):
+            return True
+    for b in binding_table.list_all():
+        if b.tier == 3 and b.match_key == "account_id":
+            return True
+    return False
+
+
+def run_host(wechat_login_for: str | None = None) -> None:
     """Blocking multi-channel entry point.
 
     Starts channel threads, then enters an asyncio event loop that processes
     inbound messages through the SDK agent.
+
+    Channel enablement rules
+    ------------------------
+    * **CLI** is always registered.
+    * **WeCom** is registered iff ``WECOM_BOT_ID`` + ``WECOM_BOT_SECRET``
+      env vars are set.
+    * **WeChat** is registered iff any of:
+      - at least one credential file exists in
+        ``<workspace>/.pip/credentials/wechat/*.json``,
+      - at least one tier-3 ``account_id=...`` binding exists, or
+      - ``--wechat <agent_id>`` was passed (triggers a background QR
+        login that stays out of the main CLI thread).
 
     UTF-8 console setup (for Windows CJK input) is not done here — it must
     happen *before* :mod:`logging` is configured, so
@@ -2027,7 +2138,10 @@ def run_host(mode: str = "auto", bind_agent: str | None = None) -> None:
     from pip_agent import _profile
     from pip_agent.scaffold import ensure_workspace
 
-    _profile.cold_start("run_host_entered", mode=mode)
+    _profile.cold_start(
+        "run_host_entered",
+        wechat_login=bool(wechat_login_for),
+    )
 
     ensure_workspace(WORKDIR)
     settings.check_required()
@@ -2039,6 +2153,12 @@ def run_host(mode: str = "auto", bind_agent: str | None = None) -> None:
         "registry_ready",
         agents=len(registry.list_agents()),
     )
+
+    state_dir = WORKDIR / ".pip"
+    # Before we decide whether to spin up WeChat, drop any artefacts
+    # from the old single-account model. Done AFTER ``binding_table.load``
+    # so the in-memory table matches what's on disk after the sweep.
+    _sweep_legacy_wechat(state_dir, binding_table, BINDINGS_PATH)
 
     channel_mgr = ChannelManager()
     cli_channel = CLIChannel()
@@ -2056,63 +2176,49 @@ def run_host(mode: str = "auto", bind_agent: str | None = None) -> None:
     q_lock = threading.Lock()
     bg_threads: list[threading.Thread] = []
 
-    state_dir = WORKDIR / ".pip"
-
-    wechat_channel = None
-    if mode != "cli":
+    wechat_controller: WeChatController | None = None
+    if _wechat_is_needed(state_dir, binding_table, wechat_login_for):
         try:
             # Deferred import: keeps CLI cold-start off the wechat
-            # (pywinauto / aiohttp) dependency graph.
-            from pip_agent.channels.wechat import (
-                WeChatChannel,
-                wechat_poll_loop,
-            )
+            # (qrcode / cryptography / httpx) dependency graph when
+            # nothing points at WeChat.
+            from pip_agent.channels.wechat import WeChatChannel
             _profile.cold_start("wechat_import_done")
 
             wechat_channel = WeChatChannel(state_dir)
             _profile.cold_start(
                 "wechat_instance_ready",
-                logged_in=bool(wechat_channel.is_logged_in),
-            )
-            if mode == "scan":
-                wechat_channel._clear_creds()
-                if not wechat_channel.login():
-                    print("  [wechat] Login failed, falling back to CLI-only.")
-                    wechat_channel = None
-            elif not wechat_channel.is_logged_in:
-                if not wechat_channel.login():
-                    print("  [wechat] Login failed, falling back to CLI-only.")
-                    wechat_channel = None
-            # Emit login-check marker AFTER any login attempt; the
-            # ``logged_in`` flag makes the "was the user already in?"
-            # vs "did we just log in?" distinction visible post-hoc.
-            _profile.cold_start(
-                "wechat_login_checked",
-                logged_in=bool(
-                    wechat_channel and wechat_channel.is_logged_in,
+                accounts=len(wechat_channel.account_ids()),
+                logged_in=sum(
+                    1 for aid in wechat_channel.account_ids()
+                    if (acc := wechat_channel.get_account(aid)) and acc.is_logged_in
                 ),
             )
-            if wechat_channel and wechat_channel.is_logged_in:
-                channel_mgr.register(wechat_channel)
-                t = threading.Thread(
-                    target=wechat_poll_loop, daemon=True,
-                    args=(wechat_channel, msg_queue, q_lock, stop_event),
-                )
-                t.start()
-                bg_threads.append(t)
-                _profile.cold_start("wechat_poll_spawned")
-                if bind_agent:
-                    aid = normalize_agent_id(bind_agent)
-                    if registry.get_agent(aid):
-                        binding_table.remove("channel", "wechat")
-                        binding_table.add(Binding(
-                            agent_id=aid, tier=4,
-                            match_key="channel", match_value="wechat",
-                        ))
-                        binding_table.save(BINDINGS_PATH)
-                        print(f"  [wechat] Bound to agent: {aid}")
-        except Exception as exc:
+            channel_mgr.register(wechat_channel)
+
+            wechat_controller = WeChatController(
+                channel=wechat_channel,
+                registry=registry,
+                bindings=binding_table,
+                bindings_path=BINDINGS_PATH,
+                msg_queue=msg_queue,
+                q_lock=q_lock,
+                stop_event=stop_event,
+            )
+
+            # Resume polling for every account that still has a live
+            # token. Accounts whose session expired (e.g. ret=-14 on
+            # last boot) will show up in ``/wechat list`` as logged_in=no
+            # and need ``/wechat add <agent_id>`` to re-scan.
+            started = wechat_controller.spawn_polls_for_all_logged_in()
+            _profile.cold_start(
+                "wechat_poll_spawned",
+                threads=started,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.exception("WeChat init failed")
             print(f"  [wechat] Init failed: {exc}")
+            wechat_controller = None
 
     if settings.wecom_bot_id and settings.wecom_bot_secret:
         try:
@@ -2159,8 +2265,25 @@ def run_host(mode: str = "auto", bind_agent: str | None = None) -> None:
         binding_table=binding_table,
         channel_mgr=channel_mgr,
         scheduler=scheduler,
+        wechat_controller=wechat_controller,
     )
     _profile.cold_start("host_ready")
+
+    # Kick off ``--wechat <agent_id>`` as a background QR worker AFTER
+    # the host is fully constructed. The worker is a daemon thread, so
+    # the main CLI loop can still accept input (including ``/wechat
+    # cancel`` and ``/exit``) while the user decides whether to scan.
+    # Unknown agent ids short-circuit with a one-line error here so the
+    # operator sees the mistake before the CLI prompt prints.
+    if wechat_login_for:
+        if wechat_controller is None:
+            print(
+                "  [wechat] --wechat was supplied but the WeChat channel "
+                "could not be initialised; ignoring.",
+            )
+        else:
+            accepted, msg = wechat_controller.start_qr_login(wechat_login_for)
+            print(f"  [wechat] {msg}")
 
     from pip_agent import __version__
 

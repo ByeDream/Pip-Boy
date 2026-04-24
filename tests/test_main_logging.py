@@ -309,7 +309,7 @@ class TestMainWiresLoggingBeforeRunHost:
         monkeypatch.setattr("pip_agent.agent_host.run_host", _fake_run_host)
         monkeypatch.setattr(main_mod.settings, "verbose", True)
 
-        main_mod.main(["--mode", "cli"])
+        main_mod.main([])
 
         assert observed.get("root_has_handler"), (
             "main() invoked run_host without configuring logging — "
@@ -341,7 +341,7 @@ class TestMainWiresLoggingBeforeRunHost:
         monkeypatch.setattr("pip_agent.agent_host.run_host", _fake_run_host)
         monkeypatch.setattr(main_mod.settings, "verbose", False)
 
-        main_mod.main(["--mode", "cli"])
+        main_mod.main([])
 
         assert observed.get("root_has_handler"), "quiet mode dropped the handler"
         assert observed["root_level"] == logging.WARNING
