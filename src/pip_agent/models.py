@@ -18,7 +18,9 @@ Empty env entries are skipped, so a partly-configured ``.env`` (e.g. only
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from collections.abc import Callable
 from typing import Literal, TypeVar
 
@@ -79,40 +81,102 @@ def primary_model(tier: Tier) -> str:
     return chain[0] if chain else ""
 
 
-# Substrings that indicate "this specific model name is not available on
-# the server we just called" — case-insensitive match against the
-# exception's string form. Anything outside this list (rate limit,
-# network, auth) does NOT trigger a downgrade because switching models
-# would not help.
-_MODEL_INVALID_MARKERS: tuple[str, ...] = (
-    "model not found",
-    "model_not_found",
-    "model does not exist",
-    "model_does_not_exist",
-    "invalid model",
-    "unknown model",
-    "model is not supported",
-    "no such model",
-    "not_found_error",
+# ``claude.exe`` wraps proxy errors as ``"API Error: <code> {json}"`` on
+# stderr; the SDK then surfaces the whole line as the exception text.
+# Capturing the status code lets us cheaply discard non-4xx and the
+# well-known non-model categories (auth/rate/billing) without parsing.
+_CLI_STATUS_RE = re.compile(r"\bAPI\s*Error:\s*(\d{3})\b", re.IGNORECASE)
+_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+# HTTP statuses where switching the model name CANNOT help, even if the
+# error happens to mention "model" in passing (e.g. a localised proxy
+# message like "Rate limit exceeded for model X"). 408 stays out: it's
+# bare-bones request-timeout territory, never a model-availability claim.
+_NON_MODEL_STATUSES: frozenset[int] = frozenset({401, 402, 403, 429})
+
+# Anthropic SDK typed-exception class-name fragments that pre-empt the
+# whole check. ``NotFoundError`` is the upstream signal for an unknown
+# model; the others are categorical wrong-call-site issues that no model
+# substitution would fix.
+_SDK_NEVER_MODEL: tuple[str, ...] = (
+    "ratelimit",
+    "authentication",
+    "permission",
+)
+_SDK_DEFINITELY_MODEL: tuple[str, ...] = (
+    "notfound",
 )
 
 
 def is_model_invalid_error(exc: BaseException) -> bool:
     """True when ``exc`` indicates the requested model name is unusable.
 
-    Conservative by design: anything we cannot positively recognise as a
-    model-availability issue stays a hard error so we don't silently mask
-    auth / network / quota problems by burning through tier candidates.
+    Three layers, cheapest first; later layers only run when earlier
+    ones can't decide:
+
+    1. **Typed SDK exception.** ``RateLimitError`` /
+       ``AuthenticationError`` / ``PermissionDeniedError`` mean
+       "swapping models won't help". ``NotFoundError`` is unambiguous.
+    2. **Structured envelope.** ``claude.exe`` surfaces proxy failures
+       as ``"API Error: <status> {json}"``. We pull the status code
+       and the upstream ``error.type`` / ``error.message`` to
+       discriminate cleanly — most domestic gateways still return a
+       JSON body even when their type/message strings are localised.
+    3. **Keyword floor.** For un-parseable wrappers (custom exception
+       text, no JSON envelope), require the message to literally
+       reference "model" or "模型". This is intentionally permissive
+       — proxies localise their bodies and we can't list every phrase.
+       A false positive merely walks the rest of the tier chain once
+       and surfaces the same upstream error; the cost is bounded.
     """
-    msg = str(exc).lower()
-    if any(marker in msg for marker in _MODEL_INVALID_MARKERS):
-        return True
-    # Typed 404 from the Anthropic SDK with "model" in the body — treat as
-    # model-invalid; the bare 404 with no model context is left alone.
     name = type(exc).__name__.lower()
-    if "notfound" in name and "model" in msg:
+    if any(marker in name for marker in _SDK_NEVER_MODEL):
+        return False
+    if any(marker in name for marker in _SDK_DEFINITELY_MODEL):
         return True
-    return False
+
+    raw = str(exc)
+    low = raw.lower()
+
+    status_match = _CLI_STATUS_RE.search(raw)
+    if status_match:
+        status = int(status_match.group(1))
+        if not (400 <= status < 500):
+            return False
+        if status in _NON_MODEL_STATUSES:
+            return False
+
+    json_match = _JSON_OBJECT_RE.search(raw)
+    if json_match:
+        try:
+            payload = json.loads(json_match.group(0))
+        except (ValueError, TypeError):
+            payload = None
+        if isinstance(payload, dict):
+            err = payload.get("error")
+            if isinstance(err, dict):
+                err_type = str(err.get("type") or "").lower()
+                err_msg = str(err.get("message") or "")
+                if err_type == "not_found_error":
+                    return True
+                if err_type == "invalid_request_error":
+                    return _mentions_model(err_msg)
+                # Any other typed upstream error is categorical and
+                # not a model-name issue — trust the upstream label.
+                if err_type:
+                    return False
+
+    return _mentions_model(raw)
+
+
+def _mentions_model(text: str) -> bool:
+    """Floor check used by :func:`is_model_invalid_error`.
+
+    Bilingual on purpose: domestic proxies overwhelmingly localise
+    error bodies but keep the keyword "模型" intact, just as upstream
+    keeps "model".
+    """
+    return "model" in text.lower() or "模型" in text
 
 
 T = TypeVar("T")

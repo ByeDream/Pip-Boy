@@ -264,6 +264,65 @@ class StreamingSession:
         AgentHost per-session lock would also serialise, but keeping a
         local one here means the StreamingSession is safe to use from
         anywhere (not only the AgentHost path).
+
+        Run-time fallback: ``claude.exe`` does not contact the API on
+        ``connect()`` — it only validates the model when the first user
+        message goes through. So a bad ``MODEL_T*`` always surfaces here,
+        not in :meth:`connect`. When the failure matches
+        :func:`pip_agent.models.is_model_invalid_error` and the tier
+        chain has remaining candidates, we tear down the dead client,
+        reconnect with the next candidate, and replay the same prompt.
+        Limited to one full sweep of the chain per turn — second-failure
+        modes (auth, network, quota) propagate via ``QueryResult.error``.
+        """
+        from pip_agent.models import is_model_invalid_error
+
+        if self._closed or not self._connected or self._client is None:
+            raise RuntimeError(
+                f"StreamingSession({self.session_key}) not connected",
+            )
+
+        async with self._turn_lock:
+            # Worst case the chain head + every fallback is bad; cap
+            # the loop at chain length so a misconfigured proxy can't
+            # spin us forever.
+            for _attempt in range(max(len(self._model_chain), 1)):
+                result = await self._attempt_turn(
+                    prompt,
+                    sender_id=sender_id,
+                    peer_id=peer_id,
+                    stream_text=stream_text,
+                    account_id=account_id,
+                )
+                if not result.error:
+                    return result
+                if not is_model_invalid_error(RuntimeError(result.error)):
+                    # Stale-session handling stays the same; non-model
+                    # errors bubble up via the QueryResult.
+                    if self._looks_stale(result.error):
+                        raise StaleSessionError(result.error)
+                    return result
+                # Model rejected at runtime. Try the next candidate
+                # if the chain has one; otherwise surface the error.
+                if not await self._reconnect_after_invalid_model(result.error):
+                    return result
+            return result
+
+    async def _attempt_turn(
+        self,
+        prompt: str | list[dict[str, Any]],
+        *,
+        sender_id: str,
+        peer_id: str,
+        stream_text: bool,
+        account_id: str,
+    ) -> QueryResult:
+        """One pass at sending the prompt and draining the response.
+
+        Extracted from :meth:`run_turn` so the model-invalid retry loop
+        can replay the same prompt against a freshly-reconnected client
+        without re-acquiring ``_turn_lock``. Lock semantics: the caller
+        already holds ``_turn_lock``; this body must not re-acquire it.
         """
         from claude_agent_sdk import (
             AssistantMessage,
@@ -276,198 +335,231 @@ class StreamingSession:
 
         from pip_agent import _profile
 
-        if self._closed or not self._connected or self._client is None:
-            raise RuntimeError(
-                f"StreamingSession({self.session_key}) not connected",
-            )
+        self.turn_count += 1
+        turn_idx = self.turn_count
+        # Mutate the shared McpContext so MCP tool closures see this
+        # turn's identity. Reads are lazy (attribute access at call
+        # time), so mutation is observed without any client rebuild.
+        self._mcp_ctx.sender_id = sender_id
+        self._mcp_ctx.peer_id = peer_id
+        self._mcp_ctx.session_id = self.session_id
+        self._mcp_ctx.account_id = account_id
 
-        async with self._turn_lock:
-            self.turn_count += 1
-            turn_idx = self.turn_count
-            # Mutate the shared McpContext so MCP tool closures see
-            # this turn's identity. Reads are lazy (attribute access at
-            # call time), so mutation is observed without any client
-            # rebuild.
-            self._mcp_ctx.sender_id = sender_id
-            self._mcp_ctx.peer_id = peer_id
-            self._mcp_ctx.session_id = self.session_id
-            self._mcp_ctx.account_id = account_id
+        _profile.event(
+            "stream.user_pushed",
+            session_key=self.session_key,
+            turn=turn_idx,
+            prompt_kind="str" if isinstance(prompt, str) else "blocks",
+        )
 
-            _profile.event(
-                "stream.user_pushed",
-                session_key=self.session_key,
-                turn=turn_idx,
-                prompt_kind="str" if isinstance(prompt, str) else "blocks",
-            )
+        result = QueryResult()
+        streaming_line_open = False
 
-            result = QueryResult()
-            streaming_line_open = False
+        # ClaudeSDKClient.query accepts str (simple) or AsyncIterable
+        # (for content-block prompts). Mirror agent_runner's branch.
+        if isinstance(prompt, str):
+            send_prompt: Any = prompt
+        else:
+            send_prompt = _single_user_blocks_stream(prompt)
 
-            # ClaudeSDKClient.query accepts str (simple) or AsyncIterable
-            # (for content-block prompts). Mirror agent_runner's branch.
-            if isinstance(prompt, str):
-                send_prompt: Any = prompt
-            else:
-                send_prompt = _single_user_blocks_stream(prompt)
+        stream_start_ns = time.perf_counter_ns()
+        first_text_seen = False
+        tool_count = 0
 
-            stream_start_ns = time.perf_counter_ns()
-            first_text_seen = False
-            tool_count = 0
+        async with _profile.span(
+            "stream.turn",
+            session_key=self.session_key,
+            turn=turn_idx,
+            prompt_kind="str" if isinstance(prompt, str) else "blocks",
+        ):
+            try:
+                await self._client.query(send_prompt)
 
-            async with _profile.span(
-                "stream.turn",
-                session_key=self.session_key,
-                turn=turn_idx,
-                prompt_kind="str" if isinstance(prompt, str) else "blocks",
-            ):
-                try:
-                    await self._client.query(send_prompt)
-
-                    async for message in self._client.receive_response():
-                        if isinstance(message, AssistantMessage):
-                            for block in message.content:
-                                if isinstance(block, TextBlock) and stream_text:
-                                    if not first_text_seen:
-                                        _profile.event(
-                                            "stream.first_text",
-                                            session_key=self.session_key,
-                                            turn=turn_idx,
-                                            since_stream_ms=round(
-                                                (time.perf_counter_ns() - stream_start_ns) / 1e6, 3,
-                                            ),
-                                            text_len=len(block.text),
-                                        )
-                                        first_text_seen = True
-                                    print(block.text, end="", flush=True)
-                                    streaming_line_open = True
-                                elif isinstance(block, ToolUseBlock):
-                                    tool_count += 1
+                async for message in self._client.receive_response():
+                    if isinstance(message, AssistantMessage):
+                        for block in message.content:
+                            if isinstance(block, TextBlock) and stream_text:
+                                if not first_text_seen:
                                     _profile.event(
-                                        "stream.tool_use",
+                                        "stream.first_text",
                                         session_key=self.session_key,
                                         turn=turn_idx,
-                                        name=block.name,
                                         since_stream_ms=round(
                                             (time.perf_counter_ns() - stream_start_ns) / 1e6, 3,
                                         ),
+                                        text_len=len(block.text),
                                     )
-                                    args_preview = str(block.input)[:80]
-                                    print(
-                                        f"\n  [tool: {block.name} {args_preview}]",
-                                        flush=True,
-                                    )
-                                    streaming_line_open = True
-
-                        elif isinstance(message, SystemMessage):
-                            if message.subtype == "init":
-                                sid = message.data.get("session_id")
-                                # A fresh sid on turn >=2 would indicate a
-                                # subprocess respawn we didn't expect —
-                                # log it so the regression is visible.
-                                if self.session_id and sid and sid != self.session_id:
-                                    log.warning(
-                                        "stream %s: SystemMessage(init) reports sid %s != cached %s",
-                                        self.session_key, sid, self.session_id,
-                                    )
-                                if sid:
-                                    self.session_id = sid
-                                # See :mod:`pip_agent.sdk_caps` — capture
-                                # the dispatchable slash list once so
-                                # ``/T`` and ``/help`` can reason about
-                                # which slashes the SDK will actually run.
-                                from pip_agent import sdk_caps
-                                sdk_caps.record(message.data.get("slash_commands"))
+                                    first_text_seen = True
+                                print(block.text, end="", flush=True)
+                                streaming_line_open = True
+                            elif isinstance(block, ToolUseBlock):
+                                tool_count += 1
                                 _profile.event(
-                                    "stream.session_init",
+                                    "stream.tool_use",
                                     session_key=self.session_key,
                                     turn=turn_idx,
-                                    sid=sid,
+                                    name=block.name,
                                     since_stream_ms=round(
                                         (time.perf_counter_ns() - stream_start_ns) / 1e6, 3,
                                     ),
                                 )
-                        elif isinstance(message, ResultMessage):
-                            result.text = message.result
-                            result.session_id = message.session_id
-                            result.cost_usd = message.total_cost_usd
-                            result.num_turns = message.num_turns
-                            if message.session_id:
-                                # Canonical CC session id — keep it cached
-                                # so downstream AgentHost can persist it and
-                                # so MCP tools read the right value on the
-                                # next turn.
-                                self.session_id = message.session_id
-                                self._mcp_ctx.session_id = message.session_id
-                            if message.is_error:
-                                result.error = message.result
-                            if streaming_line_open:
-                                print(flush=True)
-                                streaming_line_open = False
-                            usage = message.usage or {}
+                                args_preview = str(block.input)[:80]
+                                print(
+                                    f"\n  [tool: {block.name} {args_preview}]",
+                                    flush=True,
+                                )
+                                streaming_line_open = True
+
+                    elif isinstance(message, SystemMessage):
+                        if message.subtype == "init":
+                            sid = message.data.get("session_id")
+                            # A fresh sid on turn >=2 would indicate a
+                            # subprocess respawn we didn't expect — log
+                            # it so the regression is visible.
+                            if self.session_id and sid and sid != self.session_id:
+                                log.warning(
+                                    "stream %s: SystemMessage(init) reports sid %s != cached %s",
+                                    self.session_key, sid, self.session_id,
+                                )
+                            if sid:
+                                self.session_id = sid
+                            from pip_agent import sdk_caps
+                            sdk_caps.record(message.data.get("slash_commands"))
                             _profile.event(
-                                "stream.result",
+                                "stream.session_init",
                                 session_key=self.session_key,
                                 turn=turn_idx,
-                                turns=message.num_turns,
-                                cost_usd=message.total_cost_usd or 0,
-                                stop=message.stop_reason,
-                                err=message.is_error,
-                                tool_calls=tool_count,
-                                reply_len=len(message.result or ""),
-                                input_tokens=int(usage.get("input_tokens") or 0),
-                                output_tokens=int(usage.get("output_tokens") or 0),
-                                cache_read=int(usage.get("cache_read_input_tokens") or 0),
-                                cache_creation=int(usage.get("cache_creation_input_tokens") or 0),
+                                sid=sid,
+                                since_stream_ms=round(
+                                    (time.perf_counter_ns() - stream_start_ns) / 1e6, 3,
+                                ),
                             )
-                except ClaudeSDKError as exc:
-                    if streaming_line_open:
-                        print(flush=True)
-                    err_text = str(exc)
-                    result.error = err_text
-                    _profile.event(
-                        "stream.sdk_error",
-                        session_key=self.session_key,
-                        turn=turn_idx,
-                        err=err_text[:200],
-                    )
-                    log.error(
-                        "stream %s: SDK error on turn %d: %s",
-                        self.session_key, turn_idx, exc,
-                    )
-                    # Bubble up as stale so AgentHost can rebuild. If it
-                    # doesn't look stale we surface as a regular error via
-                    # the QueryResult (caller will handle).
-                    if self._looks_stale(err_text):
-                        raise StaleSessionError(err_text) from exc
-                except Exception as exc:  # noqa: BLE001
-                    if streaming_line_open:
-                        print(flush=True)
-                    err_text = str(exc)
-                    result.error = err_text
-                    _profile.event(
-                        "stream.unhandled_error",
-                        session_key=self.session_key,
-                        turn=turn_idx,
-                        err=err_text[:200],
-                        err_type=type(exc).__name__,
-                    )
-                    log.exception(
-                        "stream %s: unhandled error on turn %d",
-                        self.session_key, turn_idx,
-                    )
-                    if self._looks_stale(err_text):
-                        raise StaleSessionError(err_text) from exc
-                finally:
-                    self.last_used_ns = time.perf_counter_ns()
+                    elif isinstance(message, ResultMessage):
+                        result.text = message.result
+                        result.session_id = message.session_id
+                        result.cost_usd = message.total_cost_usd
+                        result.num_turns = message.num_turns
+                        if message.session_id:
+                            self.session_id = message.session_id
+                            self._mcp_ctx.session_id = message.session_id
+                        if message.is_error:
+                            result.error = message.result
+                        if streaming_line_open:
+                            print(flush=True)
+                            streaming_line_open = False
+                        usage = message.usage or {}
+                        _profile.event(
+                            "stream.result",
+                            session_key=self.session_key,
+                            turn=turn_idx,
+                            turns=message.num_turns,
+                            cost_usd=message.total_cost_usd or 0,
+                            stop=message.stop_reason,
+                            err=message.is_error,
+                            tool_calls=tool_count,
+                            reply_len=len(message.result or ""),
+                            input_tokens=int(usage.get("input_tokens") or 0),
+                            output_tokens=int(usage.get("output_tokens") or 0),
+                            cache_read=int(usage.get("cache_read_input_tokens") or 0),
+                            cache_creation=int(usage.get("cache_creation_input_tokens") or 0),
+                        )
+            except ClaudeSDKError as exc:
+                if streaming_line_open:
+                    print(flush=True)
+                err_text = str(exc)
+                result.error = err_text
+                _profile.event(
+                    "stream.sdk_error",
+                    session_key=self.session_key,
+                    turn=turn_idx,
+                    err=err_text[:200],
+                )
+                log.error(
+                    "stream %s: SDK error on turn %d: %s",
+                    self.session_key, turn_idx, exc,
+                )
+            except Exception as exc:  # noqa: BLE001
+                if streaming_line_open:
+                    print(flush=True)
+                err_text = str(exc)
+                result.error = err_text
+                _profile.event(
+                    "stream.unhandled_error",
+                    session_key=self.session_key,
+                    turn=turn_idx,
+                    err=err_text[:200],
+                    err_type=type(exc).__name__,
+                )
+                log.exception(
+                    "stream %s: unhandled error on turn %d",
+                    self.session_key, turn_idx,
+                )
+            finally:
+                self.last_used_ns = time.perf_counter_ns()
 
-            # Soft-error stale detection: some CC builds return the stale
-            # marker as a ResultMessage with ``is_error=True`` instead of
-            # raising. Translate that into StaleSessionError too so the
-            # caller can recover uniformly.
-            if result.error and self._looks_stale(result.error):
-                raise StaleSessionError(result.error)
+        return result
 
-            return result
+    async def _reconnect_after_invalid_model(self, err_text: str) -> bool:
+        """Drop the current client and reconnect with the next chain candidate.
+
+        Returns ``True`` when a fresh client is live and ready for a
+        retry, ``False`` when the chain is exhausted (caller should
+        surface the original error). The current model is removed from
+        the chain so a future retry never re-tries the known-bad name.
+        Resume metadata is dropped because the failed turn never reached
+        the model — there's no conversation state to preserve.
+        """
+        from pip_agent import _profile
+
+        try:
+            cur_idx = self._model_chain.index(self._model)
+        except ValueError:
+            return False
+
+        remaining = list(self._model_chain[cur_idx + 1:])
+        if not remaining:
+            log.warning(
+                "stream %s: model %s rejected and tier chain exhausted (%s)",
+                self.session_key, self._model, err_text[:160],
+            )
+            return False
+
+        log.warning(
+            "stream %s: model %s rejected (%s); reconnecting with next "
+            "tier candidate %s",
+            self.session_key, self._model, err_text[:160], remaining[0],
+        )
+        _profile.event(
+            "stream.runtime_model_fallback",
+            session_key=self.session_key,
+            failed_model=self._model,
+            next_model=remaining[0],
+            err=err_text[:200],
+        )
+
+        # Tear down the dead client. Best-effort — the subprocess might
+        # already be in a half-broken state, and we don't want a stale
+        # disconnect error to mask the runtime fallback.
+        if self._client is not None:
+            try:
+                await self._client.disconnect()
+            except Exception as exc:  # noqa: BLE001
+                log.debug(
+                    "stream %s: ignoring disconnect error during model "
+                    "fallback: %s", self.session_key, exc,
+                )
+        self._client = None
+        self._connected = False
+
+        # Reset the chain to start at the next candidate, drop any
+        # session-resume metadata (the failed turn was never accepted by
+        # the upstream so there's nothing to resume), and reconnect.
+        self._model_chain = remaining
+        self._resume_session_id = None
+        self.session_id = ""
+
+        await self.connect()
+        return True
 
 
 async def _single_user_blocks_stream(
