@@ -42,7 +42,9 @@ from typing import Any
 from pip_agent.agent_runner import (
     _BUILTIN_DISALLOWED_TOOLS,
     QueryResult,
+    StreamEventCallback,
     _build_env,
+    _emit_stream_event_deltas,
     _enrich_with_stderr,
     _StderrBuffer,
 )
@@ -166,6 +168,23 @@ class StreamingSession:
                 # without this, gateway errors arrive as the SDK's
                 # ``"Check stderr output for details"`` placeholder.
                 stderr=stderr_buf,
+                # Always on in cached sessions: option is frozen at
+                # ``connect()`` time, but a single connected client
+                # serves both progressive-reply channels (WeCom) and
+                # plain-old-text channels in arbitrary order. The
+                # extra ``StreamEvent`` envelopes are cheap to ignore
+                # when no per-turn ``on_stream_event`` is supplied,
+                # and reconnecting just to flip the flag would burn
+                # the ~400 ms tax this whole class exists to avoid.
+                include_partial_messages=True,
+                # Adaptive extended thinking. Same rationale as
+                # ``include_partial_messages``: frozen at connect
+                # time and the model decides per turn whether to
+                # actually emit thinking blocks, so the cost is
+                # only paid for turns that need it. Without this
+                # option the SDK leaves ``thinking`` unset and no
+                # ``thinking_delta`` events ever cross the wire.
+                thinking={"type": "adaptive"},
             )
 
             client = ClaudeSDKClient(options=options)
@@ -276,6 +295,7 @@ class StreamingSession:
         peer_id: str,
         stream_text: bool = True,
         account_id: str = "",
+        on_stream_event: StreamEventCallback | None = None,
     ) -> QueryResult:
         """Send one user turn into the live subprocess and drain the response.
 
@@ -312,6 +332,7 @@ class StreamingSession:
                     peer_id=peer_id,
                     stream_text=stream_text,
                     account_id=account_id,
+                    on_stream_event=on_stream_event,
                 )
                 if not result.error:
                     return result
@@ -335,6 +356,7 @@ class StreamingSession:
         peer_id: str,
         stream_text: bool,
         account_id: str,
+        on_stream_event: StreamEventCallback | None = None,
     ) -> QueryResult:
         """One pass at sending the prompt and draining the response.
 
@@ -347,12 +369,16 @@ class StreamingSession:
             AssistantMessage,
             ClaudeSDKError,
             ResultMessage,
+            StreamEvent,
             SystemMessage,
             TextBlock,
+            ThinkingBlock,
             ToolUseBlock,
         )
 
         from pip_agent import _profile
+
+        use_stream_events = on_stream_event is not None
 
         self.turn_count += 1
         turn_idx = self.turn_count
@@ -400,9 +426,19 @@ class StreamingSession:
                 await self._client.query(send_prompt)
 
                 async for message in self._client.receive_response():
+                    if isinstance(message, StreamEvent) and use_stream_events:
+                        # Forward fine-grained text/thinking deltas to
+                        # the renderer; whole-block events from
+                        # ``AssistantMessage`` would arrive too late
+                        # for the typewriter effect.
+                        await _emit_stream_event_deltas(
+                            message, on_stream_event,
+                        )
+                        continue
+
                     if isinstance(message, AssistantMessage):
                         for block in message.content:
-                            if isinstance(block, TextBlock) and stream_text:
+                            if isinstance(block, TextBlock):
                                 if not first_text_seen:
                                     _profile.event(
                                         "stream.first_text",
@@ -414,8 +450,21 @@ class StreamingSession:
                                         text_len=len(block.text),
                                     )
                                     first_text_seen = True
-                                print(block.text, end="", flush=True)
-                                streaming_line_open = True
+                                # Console mirror only when there's no
+                                # consumer — otherwise the delta path
+                                # already emitted character-by-character.
+                                if stream_text and not use_stream_events:
+                                    print(block.text, end="", flush=True)
+                                    streaming_line_open = True
+                            elif isinstance(block, ThinkingBlock) and not use_stream_events:
+                                # Fallback: forward whole thinking
+                                # blocks when partial messages weren't
+                                # subscribed to. With ``use_stream_events``
+                                # the deltas already covered the body.
+                                if on_stream_event is not None:
+                                    await on_stream_event(
+                                        "thinking_delta", text=block.thinking,
+                                    )
                             elif isinstance(block, ToolUseBlock):
                                 tool_count += 1
                                 _profile.event(
@@ -433,6 +482,10 @@ class StreamingSession:
                                     flush=True,
                                 )
                                 streaming_line_open = True
+                                if on_stream_event is not None:
+                                    await on_stream_event(
+                                        "tool_use", name=block.name,
+                                    )
 
                     elif isinstance(message, SystemMessage):
                         if message.subtype == "init":
@@ -487,6 +540,14 @@ class StreamingSession:
                             cache_read=int(usage.get("cache_read_input_tokens") or 0),
                             cache_creation=int(usage.get("cache_creation_input_tokens") or 0),
                         )
+                        if on_stream_event is not None:
+                            await on_stream_event(
+                                "finalize",
+                                final_text=message.result,
+                                num_turns=message.num_turns,
+                                cost_usd=message.total_cost_usd,
+                                usage=usage,
+                            )
             except ClaudeSDKError as exc:
                 if streaming_line_open:
                     print(flush=True)

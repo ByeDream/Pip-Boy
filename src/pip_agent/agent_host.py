@@ -35,6 +35,7 @@ from pip_agent.channels import (
     InboundMessage,
     send_with_retry,
 )
+from pip_agent.channels.stream_render import WecomStreamRenderer
 from pip_agent.config import WORKDIR, settings
 from pip_agent.host_scheduler import (
     _LAST_INBOUND_ACCOUNT_KEY,
@@ -960,6 +961,52 @@ class AgentHost:
     # Tier 1: streaming-session cache
     # ------------------------------------------------------------------
 
+    async def _maybe_open_stream_renderer(
+        self,
+        *,
+        ch: Channel,
+        inbound: InboundMessage,
+        reply_peer: str,
+    ) -> "tuple[WecomStreamRenderer | None, Any | None]":
+        """Try to open a progressive-reply stream on ``ch``.
+
+        Returns ``(renderer, callback)``: ``(None, None)`` when the
+        channel doesn't support streaming or the open failed (caller
+        falls back to one-shot ``send`` post-turn). When successful,
+        ``callback`` is the bound :meth:`WecomStreamRenderer.handle_event`
+        coroutine the runner / session feeds with semantic events.
+
+        ``start_stream`` is synchronous I/O over the WeCom WS — wrap it
+        in a worker thread so the event loop keeps draining inbounds
+        while we wait for the gateway ack.
+        """
+        inbound_id = str(inbound.raw.get("_pip_inbound_id") or "")
+        if not inbound_id:
+            return None, None
+        try:
+            handle = await asyncio.to_thread(
+                ch.start_stream,
+                reply_peer,
+                inbound_id=inbound_id,
+                account_id=inbound.account_id,
+            )
+        except Exception:
+            log.exception(
+                "channel %s: start_stream raised; falling back to "
+                "one-shot reply for this turn", inbound.channel,
+            )
+            return None, None
+        if not handle:
+            return None, None
+        renderer = WecomStreamRenderer(
+            channel=ch,
+            to=reply_peer,
+            handle=handle,
+            inbound_id=inbound_id,
+            account_id=inbound.account_id,
+        )
+        return renderer, renderer.handle_event
+
     async def _run_turn_streaming(
         self,
         *,
@@ -968,6 +1015,7 @@ class AgentHost:
         inbound: InboundMessage,
         mcp_ctx: McpContext,
         current_session_id: str | None,
+        on_stream_event: Any | None = None,
     ) -> QueryResult:
         """Dispatch one non-ephemeral turn through the cached client.
 
@@ -1010,6 +1058,7 @@ class AgentHost:
                 system_prompt_append=prepared.system_prompt,
                 cwd=prepared.paths.cwd,
                 stream_text=True,
+                on_stream_event=on_stream_event,
             )
 
         # Tier 2 lock-time coalescing — final fusion point.
@@ -1072,6 +1121,7 @@ class AgentHost:
                 peer_id=mcp_ctx.peer_id,
                 stream_text=True,
                 account_id=inbound.account_id,
+                on_stream_event=on_stream_event,
             )
         except StaleSessionError as exc:
             log.warning(
@@ -1106,6 +1156,7 @@ class AgentHost:
                 peer_id=mcp_ctx.peer_id,
                 stream_text=True,
                 account_id=inbound.account_id,
+                on_stream_event=on_stream_event,
             )
         return result
 
@@ -1880,6 +1931,27 @@ class AgentHost:
                     and not is_ephemeral
                     and not is_heartbeat
                 )
+                # Channel-side progressive-reply hookup. Enabled only
+                # when (a) the inbound came in over a channel that
+                # implements ``start_stream`` and returns a non-None
+                # handle (today only WeCom — others fall back), and
+                # (b) the turn is not a heartbeat (whose ``stream_text=
+                # False`` contract conflicts with live mid-call sends).
+                # ``stream_renderer`` stays ``None`` for the bypass
+                # cases so the runner / session call sites take the
+                # zero-overhead path.
+                stream_renderer: WecomStreamRenderer | None = None
+                stream_event_cb: Any | None = None
+                if (
+                    ch is not None
+                    and not is_heartbeat
+                    and inbound.channel == "wecom"
+                ):
+                    stream_renderer, stream_event_cb = (
+                        await self._maybe_open_stream_renderer(
+                            ch=ch, inbound=inbound, reply_peer=reply_peer,
+                        )
+                    )
                 try:
                     if use_streaming:
                         result = await self._run_turn_streaming(
@@ -1888,6 +1960,7 @@ class AgentHost:
                             inbound=inbound,
                             mcp_ctx=mcp_ctx,
                             current_session_id=current_session,
+                            on_stream_event=stream_event_cb,
                         )
                     else:
                         # One-shot path (cron / heartbeat / streaming
@@ -1921,11 +1994,25 @@ class AgentHost:
                                 # streaming is an interactive contract, not a
                                 # debug toggle.
                                 stream_text=not is_heartbeat,
+                                on_stream_event=stream_event_cb,
                             )
                 except Exception as exc:
                     log.error("SDK query failed for %s: %s", sk, exc)
                     tracked.failure(f"SDK query failed: {exc}")
-                    if ch:
+                    # Close the in-flight reply bubble with an inline
+                    # error notice so the user isn't left staring at a
+                    # frozen typing-dots animation.
+                    if stream_renderer is not None:
+                        try:
+                            await stream_renderer.fail(error=str(exc))
+                        except Exception:
+                            log.exception(
+                                "stream renderer fail() raised; ignoring",
+                            )
+                    if ch and (
+                        stream_renderer is None
+                        or not stream_renderer.delivered
+                    ):
                         send_with_retry(
                             ch, reply_peer, f"[error] {exc}",
                             inbound_id=str(
@@ -1956,6 +2043,22 @@ class AgentHost:
                 # cron auto-disable streak just like a raised exception.
                 tracked.failure(result.error)
 
+            # Renderer didn't get a ``finalize`` event (SDK errored
+            # mid-turn but didn't raise) — release the reply bubble
+            # ourselves before falling through to the normal dispatch.
+            if (
+                stream_renderer is not None
+                and not stream_renderer.delivered
+            ):
+                try:
+                    await stream_renderer.fail(
+                        error=result.error or "no response",
+                    )
+                except Exception:
+                    log.exception(
+                        "stream renderer fail() raised post-turn; ignoring",
+                    )
+
             with _profile.span_sync(  # PROFILE
                 "host.dispatch_reply",
                 channel=inbound.channel,
@@ -1968,6 +2071,10 @@ class AgentHost:
                     ch=ch,
                     reply_peer=reply_peer,
                     session_key=sk,
+                    streamed=(
+                        stream_renderer is not None
+                        and stream_renderer.delivered
+                    ),
                 )
 
     async def _release_or_flush_session(self, sk: str) -> None:
@@ -2107,6 +2214,7 @@ class AgentHost:
         ch: Channel | None,
         reply_peer: str,
         session_key: str,
+        streamed: bool = False,
     ) -> None:
         """Route the agent's reply back to the originating surface.
 
@@ -2115,6 +2223,13 @@ class AgentHost:
         whole point of the heartbeat. The single exception is the
         ``HEARTBEAT_OK`` sentinel defined in ``scaffold/heartbeat.md`` which
         means "nothing to report"; we swallow that to avoid CLI noise.
+
+        ``streamed=True`` means a progressive-reply renderer already
+        delivered the body through the channel's native streaming
+        bubble (currently only WeCom). In that case we skip the
+        non-CLI ``send_with_retry`` here — sending again would post a
+        second copy of the same answer. Errors and the CLI mirror are
+        unaffected.
 
         Silencing only works because :func:`AgentHost.process_inbound` disables
         text streaming for heartbeat inbounds — once characters have been
@@ -2144,7 +2259,7 @@ class AgentHost:
             log.warning("Agent error for %s: %s", session_key, result.error)
             if inbound.channel == "cli":
                 print(f"\n  [error] {result.error}")
-            elif ch:
+            elif ch and not streamed:
                 send_with_retry(
                     ch, reply_peer, f"[error] {result.error}",
                     inbound_id=inbound_id,
@@ -2164,7 +2279,7 @@ class AgentHost:
                     print(f"\n{result.text}")
                 else:
                     print()
-            elif ch:
+            elif ch and not streamed:
                 send_with_retry(
                     ch, reply_peer, result.text, inbound_id=inbound_id,
                     account_id=inbound.account_id,

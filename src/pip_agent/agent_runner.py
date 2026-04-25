@@ -8,7 +8,7 @@ in-process MCP server (see ``mcp_tools.py``).
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,11 +18,28 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKError,
     ResultMessage,
+    StreamEvent,
     SystemMessage,
     TextBlock,
+    ThinkingBlock,
     ToolUseBlock,
     query,
 )
+
+# Type alias for the per-turn streaming callback. Callers receive a
+# small set of semantic event names so the runner can swap its source
+# between ``StreamEvent`` (partial deltas) and ``AssistantMessage``
+# (whole blocks) without breaking the contract:
+#
+# * ``thinking_delta``  — kwargs: ``text`` (raw partial)
+# * ``text_delta``      — kwargs: ``text``
+# * ``tool_use``        — kwargs: ``name``
+# * ``finalize``        — kwargs: ``final_text``, ``num_turns``,
+#                          ``cost_usd``, ``usage``
+#
+# ``await``ed inline with the SDK message loop, so a slow callback
+# directly throttles delta consumption — keep handlers lean.
+StreamEventCallback = Callable[..., Awaitable[None]]
 
 from pip_agent import sdk_caps
 from pip_agent.hooks import build_hooks
@@ -198,6 +215,7 @@ async def run_query(
     system_prompt_append: str = "",
     cwd: str | Path | None = None,
     stream_text: bool = True,
+    on_stream_event: StreamEventCallback | None = None,
 ) -> QueryResult:
     """Run a single agent turn via the Claude Agent SDK.
 
@@ -232,6 +250,15 @@ async def run_query(
         to post-process the final text (e.g. ``AgentHost`` silencing the
         ``HEARTBEAT_OK`` sentinel) must pass ``False`` — once characters are
         on the wire there is nothing the host can do to unprint them.
+    on_stream_event:
+        Optional async callback fed semantic streaming events
+        (``text_delta`` / ``thinking_delta`` / ``tool_use`` /
+        ``finalize``). When supplied, the SDK is asked for partial
+        content-block messages so deltas land character-by-character;
+        the callback drives :class:`pip_agent.channels.stream_render.\
+WecomStreamRenderer` (or any other progressive-reply consumer). When
+        ``None`` the runner behaves exactly as before — no extra SDK
+        traffic, no extra overhead.
 
     Notes
     -----
@@ -291,6 +318,20 @@ async def run_query(
                 # etc.) carries a real reason instead of the SDK's
                 # ``"Check stderr output for details"`` placeholder.
                 stderr=stderr_buf,
+                # Partial messages give us per-character ``text_delta`` /
+                # ``thinking_delta`` events the WeCom renderer needs for
+                # the typewriter effect. Off by default so callers that
+                # don't care don't pay the per-token framing cost.
+                include_partial_messages=on_stream_event is not None,
+                # Adaptive extended thinking — without this the SDK
+                # leaves ``thinking`` unset and the gateway never asks
+                # the model to emit thinking blocks, so the WeCom
+                # cloud-icon block stays empty no matter how many
+                # ``content_block_delta`` we subscribe to. ``adaptive``
+                # lets the model decide turn-by-turn whether to think,
+                # which matches pipi's behaviour and avoids the
+                # always-on token cost of ``enabled``.
+                thinking={"type": "adaptive"},
             )
 
         result = await _run_one_attempt(
@@ -299,6 +340,7 @@ async def run_query(
             session_id=session_id,
             stream_text=stream_text,
             stderr_buf=stderr_buf,
+            on_stream_event=on_stream_event,
         )
 
         # Treat a model-invalid failure as a signal to fall back to the
@@ -354,6 +396,7 @@ async def _run_one_attempt(
     session_id: str | None,
     stream_text: bool,
     stderr_buf: _StderrBuffer | None = None,
+    on_stream_event: StreamEventCallback | None = None,
 ) -> QueryResult:
     """Execute a single SDK ``query`` pass with the prepared options.
 
@@ -387,6 +430,11 @@ async def _run_one_attempt(
 
     import time as _time  # PROFILE
 
+    # When a stream-event consumer is attached we emit fine-grained
+    # deltas from ``StreamEvent`` and silence the per-block path so the
+    # consumer is the single source of truth for streamed content.
+    use_stream_events = on_stream_event is not None
+
     try:
         async with _profile.span(  # PROFILE
             "runner.sdk_stream",
@@ -397,9 +445,15 @@ async def _run_one_attempt(
             first_text_seen = False  # PROFILE
             tool_count = 0  # PROFILE
             async for message in query(prompt=sdk_prompt, options=options):
+                if isinstance(message, StreamEvent) and use_stream_events:
+                    await _emit_stream_event_deltas(
+                        message, on_stream_event,
+                    )
+                    continue
+
                 if isinstance(message, AssistantMessage):
                     for block in message.content:
-                        if isinstance(block, TextBlock) and stream_text:
+                        if isinstance(block, TextBlock):
                             # PROFILE — first-token latency anchor.
                             if not first_text_seen:
                                 _profile.event(
@@ -412,8 +466,26 @@ async def _run_one_attempt(
                                     text_len=len(block.text),
                                 )
                                 first_text_seen = True
-                            print(block.text, end="", flush=True)
-                            streaming_line_open = True
+                            # Console mirror is gated independently from the
+                            # event consumer: the renderer cares about the
+                            # SDK deltas, the dev watching the terminal still
+                            # benefits from seeing whole blocks.
+                            if stream_text and not use_stream_events:
+                                print(block.text, end="", flush=True)
+                                streaming_line_open = True
+                            # Fallback path: when partial messages are off
+                            # (no consumer attached this is a no-op anyway,
+                            # since ``use_stream_events`` is False) we still
+                            # forward the whole block so the consumer gets
+                            # *something*. With ``include_partial_messages``
+                            # on, ``StreamEvent`` already delivered every
+                            # delta — skip to avoid double-emit.
+                        elif isinstance(block, ThinkingBlock) and not use_stream_events:
+                            # Same fallback rationale as TextBlock above.
+                            if on_stream_event is not None:
+                                await on_stream_event(
+                                    "thinking_delta", text=block.thinking,
+                                )
                         elif isinstance(block, ToolUseBlock):
                             # Tool-use traces are always surfaced: a user staring
                             # at a silent 30-second tool-chain cannot distinguish
@@ -439,6 +511,10 @@ async def _run_one_attempt(
                             # Tool traces start with ``\n`` and end without one,
                             # so the line remains "open" from the console's POV.
                             streaming_line_open = True
+                            if on_stream_event is not None:
+                                await on_stream_event(
+                                    "tool_use", name=block.name,
+                                )
 
                 elif isinstance(message, SystemMessage):
                     if message.subtype == "init":
@@ -489,6 +565,14 @@ async def _run_one_attempt(
                         message.total_cost_usd or 0,
                         message.stop_reason,
                     )
+                    if on_stream_event is not None:
+                        await on_stream_event(
+                            "finalize",
+                            final_text=message.result,
+                            num_turns=message.num_turns,
+                            cost_usd=message.total_cost_usd,
+                            usage=message.usage or {},
+                        )
 
     except ClaudeSDKError as exc:
         if streaming_line_open:
@@ -503,3 +587,34 @@ async def _run_one_attempt(
         )
 
     return result
+
+
+async def _emit_stream_event_deltas(
+    message: StreamEvent,
+    on_stream_event: StreamEventCallback,
+) -> None:
+    """Translate one ``StreamEvent`` into renderer-shaped semantic events.
+
+    The SDK forwards the raw Anthropic streaming envelope verbatim in
+    ``message.event``. We only care about ``content_block_delta``
+    frames here — block-start/stop carry no streamed text and are
+    already represented by ``AssistantMessage`` whole-block events
+    elsewhere in the loop. Keeping this function tiny and side-effect
+    free (single ``await``) is intentional: a slow callback would
+    starve the SDK's stream pump.
+    """
+    event = getattr(message, "event", None)
+    if not isinstance(event, dict):
+        return
+    if event.get("type") != "content_block_delta":
+        return
+    delta = event.get("delta") or {}
+    delta_type = delta.get("type")
+    if delta_type == "text_delta":
+        text = delta.get("text") or ""
+        if text:
+            await on_stream_event("text_delta", text=text)
+    elif delta_type == "thinking_delta":
+        text = delta.get("thinking") or ""
+        if text:
+            await on_stream_event("thinking_delta", text=text)

@@ -132,6 +132,44 @@ class Channel(ABC):
         """
         return None
 
+    # ------------------------------------------------------------------
+    # Optional progressive-reply API
+    # ------------------------------------------------------------------
+    #
+    # Channels that can render incremental updates within a single reply
+    # bubble (currently only WeCom via ``reply_stream``) override the
+    # three methods below. Default implementations return ``None`` /
+    # ``False`` so the caller can detect non-support and fall back to the
+    # one-shot :func:`send_with_retry` path. The contract:
+    #
+    # * ``start_stream`` — open a reply stream toward ``to`` for the
+    #   inbound identified by ``inbound_id``; return an opaque handle
+    #   the caller threads back into ``update_stream``/``finish_stream``,
+    #   or ``None`` when streaming isn't available.
+    # * ``update_stream`` — replace the in-flight reply body with
+    #   ``text`` (full snapshot, not delta). Safe to call repeatedly.
+    # * ``finish_stream`` — final replace + close. Channels release any
+    #   per-inbound state at this point.
+    #
+    # All three are blocking; callers from an asyncio loop should wrap
+    # invocations in ``asyncio.to_thread`` to keep the loop responsive.
+    def start_stream(
+        self, to: str, *, inbound_id: str = "", account_id: str = "",
+    ) -> str | None:
+        return None
+
+    def update_stream(
+        self, to: str, handle: str, text: str,
+        *, inbound_id: str = "", account_id: str = "",
+    ) -> bool:
+        return False
+
+    def finish_stream(
+        self, to: str, handle: str, text: str,
+        *, inbound_id: str = "", account_id: str = "",
+    ) -> bool:
+        return False
+
     def close(self) -> None:
         pass
 

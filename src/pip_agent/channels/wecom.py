@@ -569,6 +569,82 @@ class WecomChannel(Channel):
             stream_id = generate_req_id("stream")
             await self._ws_client.reply_stream(frame, stream_id, text, True)
 
+    # ------------------------------------------------------------------
+    # Progressive-reply API (Channel.start/update/finish_stream override)
+    # ------------------------------------------------------------------
+    #
+    # WeCom's ``reply_stream`` natively supports incremental snapshots
+    # (each call replaces the prior body until ``is_finished=True``).
+    # Two visual conventions worth knowing about — they're the WeCom
+    # client doing the work, not us:
+    #
+    # * ``<think></think>`` as the very first body triggers the typing-
+    #   dots animation. Sent unconditionally on stream open so the user
+    #   sees a reply bubble appear within milliseconds of the request.
+    # * Anything between ``<think>...</think>`` is rendered as a small
+    #   cloud-icon italic block above the main reply — pipi uses this
+    #   to surface ``thinking`` content live as the model emits it.
+    #
+    # The frame stays parked in ``_pending_frames`` for the entire
+    # stream's lifetime; ``finish_stream`` releases it the same way the
+    # one-shot ``send`` path does.
+
+    def start_stream(
+        self, to: str, *, inbound_id: str = "", account_id: str = "",
+    ) -> str | None:
+        if not self._ws_client or not inbound_id:
+            return None
+        with self._pending_lock:
+            frame = self._pending_frames.get(inbound_id)
+        if not frame:
+            log.debug(
+                "wecom start_stream: no frame for inbound_id=%s (peer=%s)",
+                inbound_id, to,
+            )
+            return None
+        stream_id = generate_req_id("stream")
+        ok, _ = self._run_async(
+            self._ws_client.reply_stream(
+                frame, stream_id, "<think></think>", False,
+            ),
+        )
+        if not ok:
+            return None
+        return stream_id
+
+    def update_stream(
+        self, to: str, handle: str, text: str,
+        *, inbound_id: str = "", account_id: str = "",
+    ) -> bool:
+        if not self._ws_client or not handle or not inbound_id:
+            return False
+        with self._pending_lock:
+            frame = self._pending_frames.get(inbound_id)
+        if not frame:
+            return False
+        ok, _ = self._run_async(
+            self._ws_client.reply_stream(frame, handle, text, False),
+        )
+        return ok
+
+    def finish_stream(
+        self, to: str, handle: str, text: str,
+        *, inbound_id: str = "", account_id: str = "",
+    ) -> bool:
+        if not self._ws_client or not handle or not inbound_id:
+            return False
+        with self._pending_lock:
+            frame = self._pending_frames.get(inbound_id)
+        if not frame:
+            return False
+        ok, _ = self._run_async(
+            self._ws_client.reply_stream(frame, handle, text, True),
+        )
+        # Mirror send_with_retry's release-on-completion contract so
+        # the pending-frames table stays bounded.
+        self.release_inbound(inbound_id)
+        return ok
+
     # -- media upload pipeline (WebSocket protocol, no SDK uploadMedia needed) --
 
     _UPLOAD_CHUNK_SIZE = 512 * 1024  # 512 KB per chunk
