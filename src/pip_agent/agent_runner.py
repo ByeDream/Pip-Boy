@@ -93,6 +93,65 @@ def _build_env() -> dict[str, str]:
     return env
 
 
+class _StderrBuffer:
+    """Bounded line-buffer for ``claude.exe`` stderr capture.
+
+    The SDK only pipes stderr when ``ClaudeAgentOptions.stderr`` is
+    set; otherwise ``ProcessError`` arrives with the literal
+    placeholder string ``"Check stderr output for details"`` and the
+    real gateway message (``API Error: 400 ... 模型不存在``) is gone.
+    Pass an instance as the ``stderr`` option, then call :meth:`text`
+    after the attempt to recover the captured output.
+
+    Bounded on purpose: a misbehaving proxy could emit megabytes of
+    error text into the SDK subprocess and we don't want that pinned
+    in process RAM. The first ``_MAX_LINES`` / ``_MAX_TOTAL_CHARS``
+    are kept; the rest is silently dropped (the API-error JSON line
+    we actually care about is always near the start).
+    """
+
+    _MAX_LINES: int = 200
+    _MAX_TOTAL_CHARS: int = 16_000
+
+    def __init__(self) -> None:
+        self._lines: list[str] = []
+        self._chars: int = 0
+
+    def __call__(self, line: str) -> None:
+        if len(self._lines) >= self._MAX_LINES:
+            return
+        budget = self._MAX_TOTAL_CHARS - self._chars
+        if budget <= 0:
+            return
+        if len(line) > budget:
+            line = line[:budget]
+        self._lines.append(line)
+        self._chars += len(line)
+
+    def text(self) -> str:
+        return "\n".join(self._lines).strip()
+
+    def reset(self) -> None:
+        self._lines.clear()
+        self._chars = 0
+
+
+def _enrich_with_stderr(err_text: str, captured: str) -> str:
+    """Splice captured stderr into an SDK error string when useful.
+
+    The SDK's ``ProcessError`` carries the literal placeholder
+    ``"Check stderr output for details"``. When we have real captured
+    output, swap the placeholder for it; otherwise append as a
+    suffix so callers still get the original error class label.
+    """
+    if not captured:
+        return err_text
+    placeholder = "Check stderr output for details"
+    if placeholder in err_text:
+        return err_text.replace(placeholder, captured)
+    return f"{err_text} | stderr: {captured}"
+
+
 async def _stream_single_user_message(
     content: list[dict[str, Any]],
 ) -> AsyncIterator[dict[str, Any]]:
@@ -181,6 +240,7 @@ async def run_query(
 
     last_error: str | None = None
     for attempt_idx, candidate_model in enumerate(candidates):
+        stderr_buf = _StderrBuffer()
         async with _profile.span("runner.sdk_setup"):
             mcp_server = build_mcp_server(mcp_ctx)
             effective_cwd = str(cwd) if cwd else str(mcp_ctx.workdir)
@@ -205,6 +265,11 @@ async def run_query(
                 env=_build_env(),
                 mcp_servers={"pip": mcp_server},
                 hooks=hooks,
+                # Capture subprocess stderr so a non-zero exit (gateway
+                # rejected the model, claude.exe crashed mid-request,
+                # etc.) carries a real reason instead of the SDK's
+                # ``"Check stderr output for details"`` placeholder.
+                stderr=stderr_buf,
             )
 
         result = await _run_one_attempt(
@@ -212,6 +277,7 @@ async def run_query(
             prompt=prompt,
             session_id=session_id,
             stream_text=stream_text,
+            stderr_buf=stderr_buf,
         )
 
         # Treat a model-invalid failure as a signal to fall back to the
@@ -266,12 +332,18 @@ async def _run_one_attempt(
     prompt: str | list[dict[str, Any]],
     session_id: str | None,
     stream_text: bool,
+    stderr_buf: _StderrBuffer | None = None,
 ) -> QueryResult:
     """Execute a single SDK ``query`` pass with the prepared options.
 
     Extracted from :func:`run_query` so the tier-fallback loop can rebuild
     options per candidate without duplicating the streaming / result
     handling. Behaviour below is the previously-inlined body.
+
+    ``stderr_buf`` (when supplied and bound to ``options.stderr``) is
+    spliced into the error string on failure so the SDK's placeholder
+    text is replaced with the real subprocess output — critical for
+    classifying the error and for end-user diagnostics.
     """
     from pip_agent import _profile
 
@@ -400,8 +472,13 @@ async def _run_one_attempt(
     except ClaudeSDKError as exc:
         if streaming_line_open:
             print(flush=True)
-        result.error = str(exc)
-        log.error("SDK error: %s", exc)
-        _profile.event("runner.sdk_error", err=str(exc)[:200])  # PROFILE
+        captured = stderr_buf.text() if stderr_buf is not None else ""
+        result.error = _enrich_with_stderr(str(exc), captured)
+        log.error("SDK error: %s", result.error)
+        _profile.event(  # PROFILE
+            "runner.sdk_error",
+            err=result.error[:200],
+            stderr_chars=len(captured),
+        )
 
     return result

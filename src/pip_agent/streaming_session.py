@@ -39,7 +39,12 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from pip_agent.agent_runner import QueryResult, _build_env
+from pip_agent.agent_runner import (
+    QueryResult,
+    _StderrBuffer,
+    _build_env,
+    _enrich_with_stderr,
+)
 from pip_agent.hooks import build_hooks
 from pip_agent.mcp_tools import McpContext, build_mcp_server
 
@@ -105,6 +110,11 @@ class StreamingSession:
         self._client: Any = None  # ClaudeSDKClient, imported lazily
         self._connected = False
         self._turn_lock = asyncio.Lock()
+        # Bound stderr capture for the current subprocess. Re-allocated
+        # by every ``connect()`` (each call spawns a fresh claude.exe)
+        # and reset at the start of every turn so a turn's failure
+        # carries only that turn's stderr context.
+        self._stderr_buf: _StderrBuffer | None = None
         # Invariant: session_id is "" until the first ResultMessage lands.
         self.session_id: str = ""
         self.last_used_ns: int = time.perf_counter_ns()
@@ -130,6 +140,7 @@ class StreamingSession:
         for idx, candidate in enumerate(self._model_chain):
             mcp_server = build_mcp_server(self._mcp_ctx)
             hooks = build_hooks(memory_store=self._mcp_ctx.memory_store)
+            stderr_buf = _StderrBuffer()
 
             options = ClaudeAgentOptions(
                 model=candidate or None,
@@ -149,6 +160,10 @@ class StreamingSession:
                 env=_build_env(),
                 mcp_servers={"pip": mcp_server},
                 hooks=hooks,
+                # See :class:`pip_agent.agent_runner._StderrBuffer` —
+                # without this, gateway errors arrive as the SDK's
+                # ``"Check stderr output for details"`` placeholder.
+                stderr=stderr_buf,
             )
 
             client = ClaudeSDKClient(options=options)
@@ -200,6 +215,7 @@ class StreamingSession:
             self._client = client
             self._model = candidate
             self._connected = True
+            self._stderr_buf = stderr_buf
             _profile.event(
                 "stream.opened",
                 session_key=self.session_key,
@@ -243,6 +259,7 @@ class StreamingSession:
         finally:
             self._client = None
             self._connected = False
+            self._stderr_buf = None
 
     def _looks_stale(self, err_text: str) -> bool:
         """Pattern match for the "server lost our session id" family."""
@@ -344,6 +361,11 @@ class StreamingSession:
         self._mcp_ctx.peer_id = peer_id
         self._mcp_ctx.session_id = self.session_id
         self._mcp_ctx.account_id = account_id
+        # Each turn's stderr is bounded to that turn — drop any context
+        # carried over from idle / earlier turns so a failure here
+        # surfaces only the relevant gateway lines.
+        if self._stderr_buf is not None:
+            self._stderr_buf.reset()
 
         _profile.event(
             "stream.user_pushed",
@@ -466,22 +488,25 @@ class StreamingSession:
             except ClaudeSDKError as exc:
                 if streaming_line_open:
                     print(flush=True)
-                err_text = str(exc)
+                captured = self._stderr_buf.text() if self._stderr_buf else ""
+                err_text = _enrich_with_stderr(str(exc), captured)
                 result.error = err_text
                 _profile.event(
                     "stream.sdk_error",
                     session_key=self.session_key,
                     turn=turn_idx,
                     err=err_text[:200],
+                    stderr_chars=len(captured),
                 )
                 log.error(
                     "stream %s: SDK error on turn %d: %s",
-                    self.session_key, turn_idx, exc,
+                    self.session_key, turn_idx, err_text,
                 )
             except Exception as exc:  # noqa: BLE001
                 if streaming_line_open:
                     print(flush=True)
-                err_text = str(exc)
+                captured = self._stderr_buf.text() if self._stderr_buf else ""
+                err_text = _enrich_with_stderr(str(exc), captured)
                 result.error = err_text
                 _profile.event(
                     "stream.unhandled_error",
@@ -489,6 +514,7 @@ class StreamingSession:
                     turn=turn_idx,
                     err=err_text[:200],
                     err_type=type(exc).__name__,
+                    stderr_chars=len(captured),
                 )
                 log.exception(
                     "stream %s: unhandled error on turn %d",

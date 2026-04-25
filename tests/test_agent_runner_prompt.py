@@ -371,6 +371,88 @@ class TestResultMessageFinalises:
         assert out.endswith("\n")
 
 
+class TestStderrBuffer:
+    """``_StderrBuffer`` is the stderr-capture sink we hand to
+    ``ClaudeAgentOptions.stderr``. Without it, ``ProcessError`` arrives
+    with the SDK's literal placeholder ``"Check stderr output for
+    details"`` and the real gateway error (e.g. ``API Error: 400 ...``)
+    is silently dropped. These tests lock the buffer's accumulation,
+    bounding, and reset semantics."""
+
+    def test_appends_lines_in_order(self):
+        buf = agent_runner._StderrBuffer()
+        buf("first line")
+        buf("second line")
+        assert buf.text() == "first line\nsecond line"
+
+    def test_reset_clears_lines_and_chars(self):
+        buf = agent_runner._StderrBuffer()
+        buf("noise from a prior turn")
+        buf.reset()
+        assert buf.text() == ""
+        # After reset the budget is fully restored.
+        buf("fresh")
+        assert buf.text() == "fresh"
+
+    def test_line_cap_drops_overflow(self, monkeypatch):
+        # Set a tiny cap so the test stays cheap and obvious.
+        monkeypatch.setattr(agent_runner._StderrBuffer, "_MAX_LINES", 3)
+        buf = agent_runner._StderrBuffer()
+        for i in range(10):
+            buf(f"line-{i}")
+        # First 3 kept, rest silently dropped — the API-error JSON is
+        # always near the start so this bound is safe.
+        assert buf.text().splitlines() == ["line-0", "line-1", "line-2"]
+
+    def test_char_cap_truncates_then_drops(self, monkeypatch):
+        monkeypatch.setattr(agent_runner._StderrBuffer, "_MAX_TOTAL_CHARS", 12)
+        buf = agent_runner._StderrBuffer()
+        buf("12345")            # 5 chars
+        buf("67890abcdef")      # would push past 12 → truncated to 7
+        buf("ignored")           # budget exhausted
+        # The second line is truncated to fit the remaining budget; the
+        # third line is dropped entirely. Joining adds 1 separator so
+        # final text length is 5 + 1 + 7 = 13.
+        assert buf.text() == "12345\n67890ab"
+
+
+class TestEnrichWithStderr:
+    """Verify that captured stderr replaces the SDK's placeholder
+    instead of being concatenated next to it. The proxy's real error
+    body MUST be in the user-facing error text — without this fix,
+    ``is_model_invalid_error`` only ever sees the placeholder string."""
+
+    def test_replaces_placeholder_when_present(self):
+        # ``ProcessError`` formats the placeholder as a multi-line
+        # tail. Captured stderr should land in its place.
+        err = (
+            "Command failed with exit code 1 (exit code: 1)\n"
+            "Error output: Check stderr output for details"
+        )
+        captured = (
+            'API Error: 400 {"type":"error","error":'
+            '{"type":"invalid_request_error","message":"模型不存在"}}'
+        )
+        out = agent_runner._enrich_with_stderr(err, captured)
+        assert "Check stderr output for details" not in out
+        assert "模型不存在" in out
+        assert "Command failed with exit code 1" in out
+
+    def test_appends_when_no_placeholder(self):
+        out = agent_runner._enrich_with_stderr(
+            "transport closed",
+            "warning: noisy line\nfatal: something",
+        )
+        assert out.startswith("transport closed")
+        assert "fatal: something" in out
+
+    def test_passthrough_when_capture_empty(self):
+        # No captured stderr → keep the original error verbatim so we
+        # don't pollute logs with empty " | stderr: " trailers.
+        original = "Command failed with exit code 1"
+        assert agent_runner._enrich_with_stderr(original, "") == original
+
+
 class TestClaudeSDKError:
     def test_sdk_error_becomes_result_error_without_raising(self, tmp_path):
         def _raising_query(*, prompt, options):
