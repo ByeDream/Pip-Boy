@@ -19,10 +19,8 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from pip_agent.channels.wechat import WeChatChannel, _WeChatAccount
-from pip_agent.routing import AgentConfig, AgentRegistry, Binding, BindingTable
+from pip_agent.routing import AgentConfig, Binding, BindingTable
 from pip_agent.wechat_controller import WeChatController
 
 

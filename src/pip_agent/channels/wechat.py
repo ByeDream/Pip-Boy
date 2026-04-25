@@ -614,10 +614,8 @@ class WeChatChannel(Channel):
         self, to: str, text: str, *,
         account_id: str = "", **kw: Any,
     ) -> bool:
+        from pip_agent import _profile  # PROFILE
         from pip_agent.fileutil import chunk_message
-
-        # PROFILE
-        from pip_agent import _profile
 
         acc: _WeChatAccount | None
         if account_id:

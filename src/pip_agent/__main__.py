@@ -4,7 +4,6 @@ import sys
 
 from pip_agent.config import settings
 
-
 # HTTP-layer loggers whose INFO records are pure wire-chatter
 # (one line per request, no useful signal). The WeChat iLink long-poll
 # returns ~20 req/sec in the quiet path, which makes the stdout

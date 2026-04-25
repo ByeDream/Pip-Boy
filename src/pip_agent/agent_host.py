@@ -14,10 +14,10 @@ import re
 import sys
 import threading
 import time
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
-from collections.abc import Callable
 from typing import Any
 
 from pip_agent import host_commands
@@ -50,7 +50,6 @@ from pip_agent.routing import (
     AgentRegistry,
     BindingTable,
     build_session_key,
-    normalize_agent_id,
     resolve_effective_config,
 )
 from pip_agent.streaming_session import StaleSessionError, StreamingSession
@@ -1789,7 +1788,6 @@ class AgentHost:
         lock/semaphore/turn-run code. All behaviour below is pre-existing
         and unchanged.
         """
-        eff = prepared.eff
         svc = prepared.svc
         sk = prepared.sk
         ch = prepared.ch

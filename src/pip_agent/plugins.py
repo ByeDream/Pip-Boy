@@ -129,7 +129,8 @@ class PluginsCLIError(RuntimeError):
 def _bundled_cli() -> Path:
     """Resolve the path to the Claude Code CLI binary.
 
-    Mirrors :meth:`claude_agent_sdk._internal.transport.subprocess_cli.SubprocessCLITransport._find_cli`
+    Mirrors
+    :meth:`claude_agent_sdk._internal.transport.subprocess_cli.SubprocessCLITransport._find_cli`
     so we don't depend on a private internal symbol: prefer the binary
     bundled with the SDK package, fall back to ``shutil.which("claude")``
     for editable installs / containers that strip ``_bundled``.

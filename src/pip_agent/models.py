@@ -136,7 +136,6 @@ def is_model_invalid_error(exc: BaseException) -> bool:
         return True
 
     raw = str(exc)
-    low = raw.lower()
 
     status_match = _CLI_STATUS_RE.search(raw)
     if status_match:

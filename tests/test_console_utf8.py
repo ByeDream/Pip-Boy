@@ -55,7 +55,11 @@ def _replace_with_bytes_stream(stream_name: str, data: bytes = b"") -> None:
     """Swap ``sys.<stream>`` for a TTY-reporting TextIOWrapper over a
     ``BytesIO`` seeded with ``data``. The real stdin/stdout on CI may not
     expose a writable ``.buffer``, so we fake it."""
-    buf = io.BufferedReader(io.BytesIO(data)) if stream_name == "stdin" else io.BufferedWriter(io.BytesIO())
+    buf: io.BufferedReader | io.BufferedWriter = (
+        io.BufferedReader(io.BytesIO(data))
+        if stream_name == "stdin"
+        else io.BufferedWriter(io.BytesIO())
+    )
     wrapper = _TTYTextIOWrapper(buf, encoding="utf-8")
     setattr(sys, stream_name, wrapper)
 

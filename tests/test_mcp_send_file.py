@@ -163,7 +163,7 @@ class TestPathResolution:
         result = _run(_get_send_file(ctx)({"path": "doc.pdf"}))
         assert result.get("is_error") is None
         # The bytes shipped must come from the workdir-anchored file.
-        (_to, data), kwargs = ch.send_file.call_args[:2], ch.send_file.call_args.kwargs
+        kwargs = ch.send_file.call_args.kwargs
         assert len(ch.send_file.call_args.args[1]) == 64
         assert kwargs.get("filename") == "doc.pdf"
 

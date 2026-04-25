@@ -20,7 +20,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import httpx
-import pytest
 
 from pip_agent.channels.wechat import WeChatChannel
 
