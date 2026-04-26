@@ -1,16 +1,20 @@
 /* Wasteland Radiation — default Pip-Boy TCSS.
  *
- * Layout (LOCKED widget IDs — themes must NOT change topology):
+ * Widget topology (themes must NOT change container structure):
  *
  *   Screen
- *     #status-bar          1 row at top
- *     #main                horizontal
- *       #agent-pane        vertical, 3fr
- *         #agent-log       expand
- *         #input           1 row
- *       #side-pane         vertical, 1fr
- *         #pipboy-art      auto height
- *         #app-log         expand
+ *     #status-bar              1 row at top
+ *     #main                    horizontal
+ *       #agent-pane            1fr
+ *         #agent-log           expand
+ *         #input               1 row
+ *       #side-pane             fixed 34 cols
+ *         #side-top            auto height
+ *           #pipboy-banner     auto height
+ *           #pipboy-deco       auto height
+ *           #pipboy-clock      fixed ~5 rows
+ *         #side-status         auto height
+ *         #app-log             1fr
  */
 
 Screen {
@@ -34,7 +38,7 @@ Screen {
 }
 
 #agent-pane {
-    width: 3fr;
+    width: 1fr;
     height: 1fr;
     layout: vertical;
 }
@@ -61,18 +65,48 @@ Screen {
 }
 
 #side-pane {
-    width: 1fr;
+    width: 34;
     height: 1fr;
     layout: vertical;
     border-left: vkey $accent-darken-2;
     padding: 0 1;
 }
 
-#pipboy-art {
+#side-top {
     height: auto;
-    color: $accent;
+    layout: vertical;
+    padding: 1 0 0 0;
+}
+
+#pipboy-banner {
+    height: auto;
     text-align: center;
+    color: $accent;
+    text-style: bold;
+}
+
+#pipboy-deco {
+    height: auto;
+    text-align: center;
+    color: $accent-darken-1;
+    padding: 1 0 0 0;
+}
+
+#pipboy-clock {
+    height: 4;
+    text-align: center;
+    color: $accent;
+    text-style: bold;
+    padding: 1 0 0 0;
+    border-top: hkey $accent-darken-2;
+}
+
+#side-status {
+    height: auto;
+    background: $surface;
+    color: $text;
     padding: 1 0;
+    border-top: hkey $accent-darken-2;
 }
 
 #app-log {

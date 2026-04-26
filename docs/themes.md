@@ -30,7 +30,10 @@ themes never crash the host.
 <slug>/
 ├── theme.toml      # required — manifest (palette, metadata, toggles)
 ├── theme.tcss      # required — Textual CSS
-└── art.txt         # optional — ASCII art (≤ 32 cols × 8 rows)
+├── banner.txt      # optional — big ASCII title (≤ 32 cols × 6 rows)
+├── deco.txt        # optional — small decoration (≤ 32 cols × 6 rows)
+└── art.txt         # optional legacy — single block (≤ 32 cols × 8 rows);
+                    #                    used only when `banner.txt` is absent
 ```
 
 The `<slug>` directory name MUST match `theme.name` in `theme.toml`,
@@ -110,17 +113,21 @@ from the manifest palette, then `PipBoyTuiApp` sets `App.theme` to that
 name. Without that bridge, `$accent` would stay on Textual's default
 orange even when the manifest says "Wasteland Radiation".
 
-**Locked widget IDs (themes MUST NOT change):**
+**Widget IDs (themes MUST NOT change):**
 
 | ID | Role |
 |---|---|
 | `#status-bar` | Top status row (1 line tall) |
 | `#main` | Horizontal split between agent + side panes |
-| `#agent-pane` | 3-fr column hosting the agent log + input |
+| `#agent-pane` | 1-fr column hosting the agent log + input |
 | `#agent-log` | `RichLog` for assistant text + tool traces |
 | `#input` | `Input` widget (operator types here) |
-| `#side-pane` | 1-fr column for art + app-log |
-| `#pipboy-art` | `Static` widget showing `art.txt` |
+| `#side-pane` | Fixed 34-col column: banner / status / log |
+| `#side-top` | Vertical container grouping banner + deco + clock |
+| `#pipboy-banner` | `Static` showing `banner.txt` (theme title) |
+| `#pipboy-deco` | `Static` showing `deco.txt` (small decoration) |
+| `#pipboy-clock` | `Static` date + time, re-drawn every second |
+| `#side-status` | `Static` snapshot of host state (agent/model/…) |
 | `#app-log` | `RichLog` for stdlib `logging` records |
 
 You may style any of those IDs. You may add custom classes on the
@@ -130,16 +137,23 @@ ratios in a way that hides a pane, or rearrange the topology — those
 choices live in `pip_agent/tui/app.py` and are guarded by the
 snapshot tests.
 
-### `art.txt` (optional)
+### `banner.txt`, `deco.txt`, `art.txt` (optional)
 
-Plain UTF-8 ASCII art. Hard limits enforced by the loader:
+Plain UTF-8 ASCII. The side pane is 34 columns wide with 1-column
+horizontal padding, so the usable budget is **32 columns**.
 
-* Width ≤ 32 columns (over-long lines are right-trimmed; the bundle
-  records `art_truncated=True` so `pip-boy doctor` can flag it).
-* Height ≤ 8 rows (over-long files are bottom-trimmed).
+| File | Max cols | Max rows | Rendered in |
+|---|---|---|---|
+| `banner.txt` | 32 | 6 | `#pipboy-banner` (big title) |
+| `deco.txt` | 32 | 6 | `#pipboy-deco` (small motif under banner) |
+| `art.txt` | 32 | 8 | `#pipboy-banner` fallback — used only when `banner.txt` is absent |
 
-If `show_art = false` in the manifest, `#pipboy-art` is hidden and the
-file is ignored.
+Over-long lines are right-trimmed; over-long files are bottom-trimmed.
+The bundle records `banner_truncated` / `deco_truncated` /
+`art_truncated` so `pip-boy doctor` can flag silently-clipped assets.
+
+If `show_art = false` in the manifest, all three slots are hidden
+and the files are ignored.
 
 ## Starter theme: `terminal-green`
 

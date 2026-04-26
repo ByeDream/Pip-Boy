@@ -1,30 +1,39 @@
-"""``PipBoyTuiApp`` — the locked TUI widget topology.
+"""``PipBoyTuiApp`` — the TUI widget topology.
 
-Layout (LOCKED — themes can hide widgets via the manifest's
-``show_*`` flags but cannot rearrange them):
+Layout:
 
 ::
 
     Screen
-    ├── #status-bar       1 row, dock top
-    └── #main             horizontal flex
-        ├── #agent-pane   3fr — model dialog + input
+    ├── #status-bar              1 row, dock top
+    └── #main                    horizontal flex
+        ├── #agent-pane          1fr — model dialog + input
         │   ├── #agent-log
         │   └── #input
-        └── #side-pane    1fr — art + app log
-            ├── #pipboy-art
-            └── #app-log
+        └── #side-pane           fixed 34 cols — banner / status / log
+            ├── #side-top        auto height (banner + deco + clock)
+            │   ├── #pipboy-banner
+            │   ├── #pipboy-deco
+            │   └── #pipboy-clock
+            ├── #side-status     auto height (snapshot of host state)
+            └── #app-log         1fr — stdlib log mirror
 
 Three message handlers, one per sink, fed by
 :class:`pip_agent.tui.pump.UiPump`. The App never reads ``sys.stdin``
 or writes to ``sys.stdout`` directly; everything goes through
 widgets.
+
+The topology above is considered stable — themes can hide widgets
+via the manifest's ``show_*`` flags and swap the contents of
+``banner`` / ``deco`` / ``art``, but cannot rearrange or add/remove
+containers. Snapshot baselines guard the structural shape.
 """
 
 from __future__ import annotations
 
 import inspect
 import logging
+from datetime import datetime
 from typing import Awaitable, Callable
 
 from rich.markdown import Markdown
@@ -47,6 +56,12 @@ __all__ = ["PipBoyTuiApp"]
 # (and only that — no /exit short-circuit; design.md §6) to this
 # callable, which the host wires to its inbound queue.
 UserLineHandler = Callable[[str], Awaitable[None] | None]
+
+# Type alias for the injectable clock provider. Tests and snapshot
+# scenarios pass a fixed-time callable so the baselines are
+# deterministic; production passes ``None`` and the app falls back to
+# :func:`datetime.now`.
+ClockProvider = Callable[[], datetime]
 
 
 def _rich_log_strip_tail(log_widget: RichLog, n: int) -> None:
@@ -99,6 +114,8 @@ class PipBoyTuiApp(App[None]):
         theme: ThemeBundle,
         pump: UiPump,
         on_user_line: UserLineHandler | None = None,
+        clock_provider: ClockProvider | None = None,
+        initial_side_snapshot: dict[str, str] | None = None,
     ) -> None:
         # The TCSS file isn't reachable from the package data path at
         # ``CSS_PATH`` time (Textual reads it before mount); we attach
@@ -109,6 +126,8 @@ class PipBoyTuiApp(App[None]):
         self._theme = theme
         self._pump = pump
         self._on_user_line = on_user_line
+        self._clock_provider = clock_provider
+        self._side_snapshot: dict[str, str] = dict(initial_side_snapshot or {})
 
         # Map ``theme.toml`` palette onto Textual's design tokens. Without
         # this, ``$accent`` / ``$surface`` resolve from ``textual-dark``
@@ -181,7 +200,7 @@ class PipBoyTuiApp(App[None]):
     # ------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        """Build the locked widget tree.
+        """Build the TUI widget tree.
 
         ``show_*`` toggles from the manifest hide widgets but never
         change their IDs or relative ordering — snapshot baselines
@@ -206,10 +225,28 @@ class PipBoyTuiApp(App[None]):
                     placeholder="Type and press Enter — /exit to quit",
                     id="input",
                 )
-            if manifest.show_app_log or self._theme.art:
+            # The side pane is shown when *any* of its sub-widgets have
+            # content the theme wants visible. A theme that disables
+            # both show_art and show_app_log effectively hides the
+            # pane entirely.
+            side_has_art = manifest.show_art and (
+                self._theme.banner or self._theme.deco or self._theme.art
+            )
+            side_visible = bool(side_has_art or manifest.show_app_log)
+            if side_visible:
                 with Vertical(id="side-pane"):
-                    if manifest.show_art and self._theme.art:
-                        yield Static(self._theme.art, id="pipboy-art")
+                    with Vertical(id="side-top"):
+                        yield Static(
+                            self._theme.banner or self._theme.art,
+                            id="pipboy-banner",
+                        )
+                        yield Static(self._theme.deco, id="pipboy-deco")
+                        yield Static(
+                            self._render_clock(), id="pipboy-clock"
+                        )
+                    yield Static(
+                        self._render_side_status(), id="side-status"
+                    )
                     if manifest.show_app_log:
                         yield RichLog(
                             id="app-log",
@@ -234,6 +271,12 @@ class PipBoyTuiApp(App[None]):
             self.query_one("#input", Input).focus()
         except Exception:  # pragma: no cover — input always present in v1
             pass
+
+        # The clock repaints once per second. Snapshot scenarios pass
+        # a frozen ``clock_provider`` so the baseline is deterministic;
+        # in that mode we still run ``set_interval`` but the provider
+        # keeps returning the same datetime, so the text never changes.
+        self.set_interval(1.0, self._tick_clock)
 
     # ------------------------------------------------------------------
     # Pump message handlers
@@ -308,6 +351,14 @@ class PipBoyTuiApp(App[None]):
     def on_status_message(self, message: StatusMessage) -> None:
         """Render one status-bar update."""
         event = message.event
+        if event.kind == "side_status_snapshot":
+            # Merge into the cached snapshot so partial updates from
+            # individual emitters (one pushes memory counts, another
+            # pushes channel list) compose into one view rather than
+            # overwriting fields they don't know about.
+            self._side_snapshot.update(event.fields)
+            self._refresh_side_status()
+            return
         if event.kind in {"banner", "ready", "channel_ready", "scheduler"}:
             text = event.text
         elif event.kind == "channel_lost":
@@ -443,20 +494,36 @@ class PipBoyTuiApp(App[None]):
         except Exception:
             side_pane = None
         if side_pane is not None:
-            side_pane.display = bool(m.show_app_log or (m.show_art and bundle.art))
+            side_pane.display = bool(
+                m.show_app_log or (m.show_art and (
+                    bundle.banner or bundle.art or bundle.deco
+                ))
+            )
 
     def _apply_art(self, bundle: ThemeBundle) -> None:
-        """Refresh ``#pipboy-art`` content + visibility for the new bundle."""
-        try:
-            art_widget = self.query_one("#pipboy-art", Static)
-        except Exception:
-            return
+        """Refresh banner + deco content for the new bundle.
+
+        Legacy ``#pipboy-art`` is gone; its content is now split across
+        ``#pipboy-banner`` (replaces the full banner slot) and
+        ``#pipboy-deco`` (new decoration slot). Themes that still ship
+        only ``art.txt`` land in the banner slot via the loader's
+        fallback.
+        """
         m = bundle.manifest
-        if m.show_art and bundle.art:
-            art_widget.update(bundle.art)
-            art_widget.display = True
-        else:
-            art_widget.display = False
+        show_art = bool(m.show_art)
+        banner_text = bundle.banner or (bundle.art if show_art else "")
+        deco_text = bundle.deco if show_art else ""
+
+        for widget_id, text in (
+            ("#pipboy-banner", banner_text),
+            ("#pipboy-deco", deco_text),
+        ):
+            try:
+                widget = self.query_one(widget_id, Static)
+            except Exception:
+                continue
+            widget.update(text)
+            widget.display = bool(text)
 
     def _apply_status_bar_text(self, bundle: ThemeBundle) -> None:
         """Reset the status bar's default text to the new theme's name.
@@ -537,3 +604,84 @@ class PipBoyTuiApp(App[None]):
         except Exception:
             msg = record.msg if isinstance(record.msg, str) else repr(record.msg)
         return f"{record.levelname:<7} {record.name}: {msg}"
+
+    # ------------------------------------------------------------------
+    # Clock & side-status rendering
+    # ------------------------------------------------------------------
+
+    def _now(self) -> datetime:
+        """Return the current time. Tests inject a frozen provider."""
+        if self._clock_provider is not None:
+            return self._clock_provider()
+        return datetime.now()
+
+    def _render_clock(self) -> str:
+        """Return the clock panel — big date + time + weekday.
+
+        Rendered via block glyphs so the HH:MM line reads as a large
+        digital readout even on a 32-col budget. The weekday and full
+        date sit above the numerals (``FRI  26 APR 2077`` style).
+        """
+        now = self._now()
+        weekday = now.strftime("%a").upper()
+        date_line = now.strftime("%d %b %Y").upper()
+        time_line = now.strftime("%H:%M:%S")
+        return f"{weekday}   {date_line}\n{time_line}"
+
+    def _tick_clock(self) -> None:
+        """``set_interval`` callback — redraw ``#pipboy-clock``."""
+        try:
+            widget = self.query_one("#pipboy-clock", Static)
+        except Exception:
+            return
+        widget.update(self._render_clock())
+
+    def _render_side_status(self) -> str:
+        """Format the cached snapshot dict into the status panel body.
+
+        Empty snapshot → a placeholder block so the TUI doesn't show a
+        blank slab during the ~1s between mount and the first emitter
+        firing.
+        """
+        s = self._side_snapshot
+        if not s:
+            return (
+                " STATUS\n"
+                " ─────\n"
+                "  initializing…"
+            )
+
+        def row(label: str, value: str) -> str:
+            return f"  {label:<8}: {value}"
+
+        lines: list[str] = [
+            " STATUS",
+            " ─────",
+        ]
+        if "agent" in s:
+            lines.append(row("AGENT", s["agent"]))
+        if "model" in s:
+            lines.append(row("MODEL", s["model"]))
+        if "channels" in s:
+            lines.append(row("CHANS", s["channels"]))
+        if "session" in s:
+            lines.append(row("SESSION", s["session"]))
+        if "theme" in s:
+            lines.append(row("THEME", s["theme"]))
+        if "memory" in s:
+            lines.append(row("MEMORY", s["memory"]))
+        if "cron" in s:
+            lines.append(row("CRON", s["cron"]))
+        if "context" in s:
+            lines.append(row("CONTEXT", s["context"]))
+        if "uptime" in s:
+            lines.append(row("UPTIME", s["uptime"]))
+        return "\n".join(lines)
+
+    def _refresh_side_status(self) -> None:
+        """Redraw ``#side-status`` from the cached snapshot."""
+        try:
+            widget = self.query_one("#side-status", Static)
+        except Exception:
+            return
+        widget.update(self._render_side_status())

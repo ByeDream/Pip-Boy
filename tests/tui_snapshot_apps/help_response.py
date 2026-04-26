@@ -2,9 +2,14 @@
 
 ``/help`` is GFM and uses ``AgentEvent.markdown`` (same path as model
 replies) so lists and headings render consistently in the TUI.
+
+Frozen clock + fixed initial snapshot keep the side panel
+deterministic across runs.
 """
 
 from __future__ import annotations
+
+from datetime import datetime
 
 from textual.events import Mount
 
@@ -22,10 +27,28 @@ HELP_TEXT = """\
 Type any other line to talk to the active agent.
 """
 
+_FROZEN = datetime(2077, 10, 23, 18, 56, 42)
+
+_SNAPSHOT = {
+    "agent": "pip-boy",
+    "model": "t0 · claude-opus-4-7",
+    "channels": "cli",
+    "session": "new",
+    "theme": "Wasteland Radiation v0.1.0",
+    "memory": "12 obs · 3 mems",
+    "cron": "2 jobs",
+    "uptime": "boot 18:56",
+    "context": "—",
+}
 
 _bundle = load_builtin_theme("wasteland")
 _pump = UiPump()
-app = PipBoyTuiApp(theme=_bundle, pump=_pump)
+app = PipBoyTuiApp(
+    theme=_bundle,
+    pump=_pump,
+    clock_provider=lambda: _FROZEN,
+    initial_side_snapshot=_SNAPSHOT,
+)
 
 
 async def _on_mount(_: Mount) -> None:

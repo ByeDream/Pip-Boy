@@ -65,12 +65,13 @@ AGENT_EVENT_KINDS: frozenset[str] = frozenset(
 
 STATUS_EVENT_KINDS: frozenset[str] = frozenset(
     {
-        "banner",           # one-shot welcome banner at boot
-        "channel_ready",    # "[+] Channel registered: cli"
-        "channel_lost",     # connectivity blip on a remote channel
-        "scheduler",        # cron / heartbeat tick announcement
-        "shutdown",         # "powering down" with reflect summary
-        "ready",            # "type and press Enter; /exit to quit"
+        "banner",                # one-shot welcome banner at boot
+        "channel_ready",         # "[+] Channel registered: cli"
+        "channel_lost",          # connectivity blip on a remote channel
+        "scheduler",             # cron / heartbeat tick announcement
+        "shutdown",              # "powering down" with reflect summary
+        "ready",                 # "type and press Enter; /exit to quit"
+        "side_status_snapshot",  # full #side-status refresh (see StatusEvent.fields)
     }
 )
 

@@ -31,18 +31,24 @@ of :class:`ThemeBundle` objects.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 __all__ = [
     "ART_MAX_COLUMNS",
     "ART_MAX_ROWS",
+    "BANNER_MAX_COLUMNS",
+    "BANNER_MAX_ROWS",
+    "DECO_MAX_COLUMNS",
+    "DECO_MAX_ROWS",
     "PALETTE_TOKENS",
     "ThemeBundle",
     "ThemeManifest",
     "ThemePalette",
     "ThemeValidationError",
+    "clamp_banner",
+    "clamp_deco",
     "validate_palette_dict",
 ]
 
@@ -51,15 +57,35 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 ART_MAX_COLUMNS: int = 32
-"""Maximum columns of ASCII art any theme is allowed to render.
+"""Maximum columns of legacy ``art.txt`` content.
 
-Set deliberately tight: art is decorative, not a status surface; a
-theme that wants more real estate is asking for the wrong widget.
-``ThemeBundle.from_paths`` truncates oversized art files with a
-warning rather than rejecting the theme outright."""
+Kept for v1 theme compatibility: themes that pre-date the banner/deco
+split still ship a single ``art.txt`` and the loader falls it back
+into the banner slot. New themes should use ``banner.txt`` +
+``deco.txt`` instead."""
 
 ART_MAX_ROWS: int = 8
-"""Maximum rows of ASCII art any theme is allowed to render."""
+"""Maximum rows of legacy ``art.txt`` content."""
+
+BANNER_MAX_COLUMNS: int = 32
+"""Maximum columns for the theme's top banner (``banner.txt``).
+
+The side pane is fixed at 34 columns with 1-col horizontal padding,
+giving 32 usable columns. Banners that overflow are truncated at load
+time — a warning surfaces via ``pip-boy doctor`` and the logger."""
+
+BANNER_MAX_ROWS: int = 6
+"""Maximum rows for the theme's top banner (``banner.txt``)."""
+
+DECO_MAX_COLUMNS: int = 32
+"""Maximum columns for the theme's decoration (``deco.txt``).
+
+The decoration sits below the banner in the top of ``#side-pane``
+(Vault-Boy head for wasteland, retro-sci-fi motif for vault-amber).
+Same 32-column usable budget as the banner."""
+
+DECO_MAX_ROWS: int = 6
+"""Maximum rows for the theme's decoration (``deco.txt``)."""
 
 
 # Slug rule for ``ThemeManifest.name``: lowercase letters, digits, dash.
@@ -171,7 +197,22 @@ class ThemeBundle:
     manifest: ThemeManifest
     tcss: str
     art: str
-    path: Path
+    """Legacy single-block ASCII art from ``art.txt``. Populated for
+    pre-split themes; the loader uses it as a banner fallback when a
+    theme has no ``banner.txt``. New themes should leave ``art.txt``
+    empty and supply ``banner.txt`` + ``deco.txt`` separately."""
+
+    banner: str = ""
+    """Clamped ``banner.txt`` — the big title block rendered in the top
+    of ``#side-pane``. Empty string when the theme supplies neither
+    ``banner.txt`` nor ``art.txt``."""
+
+    deco: str = ""
+    """Clamped ``deco.txt`` — the small decoration below the banner
+    (Vault-Boy head, retro-sci-fi motif, etc). Empty when the theme
+    doesn't ship one."""
+
+    path: Path = field(default_factory=Path)
     """Directory the theme was loaded from, e.g.
     ``<workspace>/.pip/themes/wasteland``. Always an absolute path
     after :func:`pip_agent.tui.manager.load_theme_bundle` returns."""
@@ -180,6 +221,12 @@ class ThemeBundle:
     """True iff the loader trimmed ``art`` to fit ``ART_MAX_*`` limits.
     Surfaced via ``pip-boy doctor`` so the operator sees the warning
     once instead of having to scrape boot logs."""
+
+    banner_truncated: bool = False
+    """True iff the loader trimmed ``banner`` to fit ``BANNER_MAX_*`` limits."""
+
+    deco_truncated: bool = False
+    """True iff the loader trimmed ``deco`` to fit ``DECO_MAX_*`` limits."""
 
 
 # ---------------------------------------------------------------------------
@@ -320,26 +367,51 @@ def validate_manifest_dict(
     )
 
 
-def clamp_art(text: str) -> tuple[str, bool]:
-    """Clamp art text to (:data:`ART_MAX_ROWS`, :data:`ART_MAX_COLUMNS`).
+def _clamp_block(
+    text: str, *, max_rows: int, max_cols: int,
+) -> tuple[str, bool]:
+    """Clamp a block of ASCII text to ``(max_rows, max_cols)``.
 
     Returns the clamped text plus a boolean indicating whether
-    truncation actually happened. Lines longer than ``ART_MAX_COLUMNS``
-    are truncated; rows beyond ``ART_MAX_ROWS`` are dropped.
+    truncation actually happened. Lines longer than ``max_cols`` are
+    truncated; rows beyond ``max_rows`` are dropped. Shared between
+    :func:`clamp_art`, :func:`clamp_banner`, :func:`clamp_deco`.
     """
     lines = text.splitlines()
     truncated = False
-    if len(lines) > ART_MAX_ROWS:
-        lines = lines[:ART_MAX_ROWS]
+    if len(lines) > max_rows:
+        lines = lines[:max_rows]
         truncated = True
     clamped: list[str] = []
     for ln in lines:
-        if len(ln) > ART_MAX_COLUMNS:
-            clamped.append(ln[:ART_MAX_COLUMNS])
+        if len(ln) > max_cols:
+            clamped.append(ln[:max_cols])
             truncated = True
         else:
             clamped.append(ln)
     return "\n".join(clamped), truncated
+
+
+def clamp_art(text: str) -> tuple[str, bool]:
+    """Clamp legacy ``art.txt`` text to (:data:`ART_MAX_ROWS`,
+    :data:`ART_MAX_COLUMNS`)."""
+    return _clamp_block(text, max_rows=ART_MAX_ROWS, max_cols=ART_MAX_COLUMNS)
+
+
+def clamp_banner(text: str) -> tuple[str, bool]:
+    """Clamp ``banner.txt`` text to (:data:`BANNER_MAX_ROWS`,
+    :data:`BANNER_MAX_COLUMNS`)."""
+    return _clamp_block(
+        text, max_rows=BANNER_MAX_ROWS, max_cols=BANNER_MAX_COLUMNS,
+    )
+
+
+def clamp_deco(text: str) -> tuple[str, bool]:
+    """Clamp ``deco.txt`` text to (:data:`DECO_MAX_ROWS`,
+    :data:`DECO_MAX_COLUMNS`)."""
+    return _clamp_block(
+        text, max_rows=DECO_MAX_ROWS, max_cols=DECO_MAX_COLUMNS,
+    )
 
 
 # ---------------------------------------------------------------------------

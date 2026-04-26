@@ -1,15 +1,16 @@
-# Second built-in Pip-Boy theme: amber-on-black retro Vault-Tec
-# console aesthetic. Picks up the same widget topology as
-# ``wasteland`` (themes don't own layout) and only swaps palette +
-# TCSS surfaces. See ``docs/themes.md`` (Phase C) for the manifest
-# schema reference.
+# Second built-in Pip-Boy theme: amber-on-black retro terminal
+# palette, steered away from Fallout iconography toward a
+# "Hitchhiker's Guide to the Galaxy" retro-sci-fi vibe (DON'T PANIC /
+# 42 / towel). Same locked widget topology as ``wasteland`` (themes
+# don't own layout) — only palette + TCSS surfaces + ASCII resources
+# differ. See ``docs/themes.md`` for the manifest schema reference.
 
 [theme]
 name = "vault-amber"
 display_name = "Vault Amber"
-version = "0.1.0"
+version = "0.2.0"
 author = "Pip-Boy"
-description = "Amber-on-black retro Vault-Tec console palette."
+description = "Amber-on-black retro terminal, HHGTTG flavour (DON'T PANIC / 42)."
 show_art = true
 show_app_log = true
 show_status_bar = true

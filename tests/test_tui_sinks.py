@@ -70,6 +70,7 @@ class TestStatusEventWhitelist:
                 "scheduler",
                 "shutdown",
                 "ready",
+                "side_status_snapshot",
             }
         )
 

@@ -64,14 +64,18 @@ async def test_app_mounts_and_renders_locked_widget_ids() -> None:
     app = PipBoyTuiApp(theme=bundle, pump=pump)
 
     async with app.run_test() as pilot:
-        # Locked widget IDs — themes can hide via show_* but not rename.
+        # Stable widget IDs — themes can hide via show_* but not rename.
         assert app.query_one("#status-bar")
         assert app.query_one("#main")
         assert app.query_one("#agent-pane")
         assert app.query_one("#agent-log")
         assert app.query_one("#input")
         assert app.query_one("#side-pane")
-        assert app.query_one("#pipboy-art")
+        assert app.query_one("#side-top")
+        assert app.query_one("#pipboy-banner")
+        assert app.query_one("#pipboy-deco")
+        assert app.query_one("#pipboy-clock")
+        assert app.query_one("#side-status")
         assert app.query_one("#app-log")
 
         # Pump must be attached at this point (on_mount ran).
