@@ -28,6 +28,11 @@ def test_fresh_init(tmp_path: Path) -> None:
     assert not (tmp_path / ".pip" / "owner.md").exists()
     assert (tmp_path / ".pip" / "incoming").is_dir()
     assert (tmp_path / ".pip" / "credentials").is_dir()
+    # Phase B (TUI Themes): a placeholder ``.pip/themes/`` directory
+    # plus an authoring README is seeded so users can drop a custom
+    # theme without learning the package internals.
+    assert (tmp_path / ".pip" / "themes").is_dir()
+    assert (tmp_path / ".pip" / "themes" / "README.md").is_file()
     # Phase 4.5: transcripts now live under ~/.claude/projects/ (CC native),
     # so Pip no longer creates its own ``transcripts/`` directory.
     assert not (tmp_path / ".pip" / "transcripts").exists()

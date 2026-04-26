@@ -541,12 +541,16 @@ class StreamingSession:
                             cache_creation=int(usage.get("cache_creation_input_tokens") or 0),
                         )
                         if on_stream_event is not None:
+                            elapsed_s = (
+                                time.perf_counter_ns() - stream_start_ns
+                            ) / 1e9
                             await on_stream_event(
                                 "finalize",
                                 final_text=message.result,
                                 num_turns=message.num_turns,
                                 cost_usd=message.total_cost_usd,
                                 usage=usage,
+                                elapsed_s=elapsed_s,
                             )
             except ClaudeSDKError as exc:
                 if streaming_line_open:

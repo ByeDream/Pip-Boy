@@ -26,6 +26,7 @@ from pip_agent.host_commands import (
     CommandContext,
     CommandResult,
     dispatch_command,
+    ensure_cli_command_markdown,
 )
 from pip_agent.routing import AgentRegistry, BindingTable
 
@@ -261,6 +262,31 @@ class TestDispatchRecognition:
 
 
 # ---------------------------------------------------------------------------
+# CLI markdown normalisation
+# ---------------------------------------------------------------------------
+
+
+class TestEnsureCliCommandMarkdown:
+    def test_gfm_heading_passthrough(self) -> None:
+        raw = "## Help\n\n- **x**\n"
+        assert ensure_cli_command_markdown(raw) == raw
+
+    def test_plain_multiline_becomes_bullets(self) -> None:
+        assert ensure_cli_command_markdown("a\nb") == "- a\n- b"
+
+    def test_single_line_unchanged(self) -> None:
+        assert ensure_cli_command_markdown("one line") == "one line"
+
+    def test_existing_markdown_list_preserved(self) -> None:
+        raw = "- a\n- b\n"
+        assert ensure_cli_command_markdown(raw) == raw
+
+    def test_ordered_list_preserved(self) -> None:
+        raw = "1. first\n2. second\n"
+        assert ensure_cli_command_markdown(raw) == raw
+
+
+# ---------------------------------------------------------------------------
 # ACL gate
 # ---------------------------------------------------------------------------
 
@@ -489,7 +515,9 @@ class TestHandlerOutputs:
         )
         result = dispatch_command(ctx)
         assert result.handled
-        assert "No cron jobs configured." in (result.response or "")
+        body = result.response or ""
+        assert "## Cron jobs" in body
+        assert "No jobs configured" in body
 
     def test_cron_lists_jobs(self, tmp_path: Path):
         sched = SimpleNamespace(
@@ -515,11 +543,12 @@ class TestHandlerOutputs:
         result = dispatch_command(ctx)
         assert result.handled
         body = result.response or ""
+        assert "## Cron jobs (2)" in body
         assert "Daily summary" in body
-        assert "[on ]" in body
+        assert "| yes |" in body
         assert "Flaky one" in body
-        assert "[off]" in body
-        assert "errors=5" in body
+        assert "| no |" in body
+        assert "| 5 |" in body
 
     def test_exit_on_cli_returns_hint(self, tmp_path: Path):
         # CLI /exit is normally intercepted *before* dispatch, but the
@@ -557,7 +586,7 @@ class TestSubagentCommand:
         result = dispatch_command(ctx)
         assert result.handled
         body = result.response or ""
-        assert "Agents:" in body
+        assert "## Agents" in body
         assert "pip-boy" in body
 
     def test_list_shows_agents(self, tmp_path: Path):
@@ -1504,6 +1533,19 @@ class _FakeWeChatController:
         self.removed: list[str] = []
         self.qr_calls: list[str] = []
 
+    def list_accounts(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "account_id": aid,
+                "agent_id": "",
+                "logged_in": False,
+            }
+            for aid in sorted(self._accounts)
+        ]
+
+    def current_qr_agent(self) -> str | None:
+        return None
+
     def remove_account(self, account_id: str) -> bool:
         if account_id in self._accounts:
             self._accounts.remove(account_id)
@@ -1708,7 +1750,7 @@ class TestPluginDispatch:
         assert result.handled is True
         body = result.response or ""
         assert "web-search" in body
-        assert "scope=user" in body
+        assert "| user |" in body
         # Argv must NOT carry --available unless explicitly requested.
         argv = calls[0]["argv"]
         assert "--available" not in argv
@@ -1751,11 +1793,10 @@ class TestPluginDispatch:
         ctx = _build_ctx(_cli_inbound("/plugin list --available"), tmp_path)
         result = dispatch_command(ctx)
         body = result.response or ""
-        assert "Available plugins (2):" in body
+        assert "## Available plugins (2)" in body
         assert "exa" in body
         assert "firecrawl" in body
-        # marketplaceName should surface as ``market=`` annotation.
-        assert "market=claude-plugins-official" in body
+        assert body.count("claude-plugins-official") >= 2
         # No literal dict / question-mark fallback in the output.
         assert "': '" not in body
         assert " ?" not in body.replace(" - ", " ")
@@ -1848,6 +1889,7 @@ class TestPluginDispatch:
         result = dispatch_command(ctx)
         assert result.handled is True
         body = result.response or ""
+        assert "## Marketplaces" in body
         assert "official" in body
         assert "anthropics/claude-code" in body
 

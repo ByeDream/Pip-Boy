@@ -34,6 +34,7 @@ behind a 40 s long-poll.
 from __future__ import annotations
 
 import base64
+import io
 import json
 import logging
 import random
@@ -52,6 +53,20 @@ from pip_agent.channels.base import (
 )
 
 log = logging.getLogger(__name__)
+
+
+def _wechat_operator_print(message: str) -> None:
+    """Route WeChat operator text to stdout (line mode) or the TUI agent pane.
+
+    ``login()`` historically used ``print`` + ``QRCode.print_ascii``,
+    which writes behind a running Textual canvas — the QR never
+    appears. :func:`pip_agent.host_io.emit_operator_plain` fans out
+    through the same sink as slash-command markdown when the pump is
+    attached.
+    """
+    from pip_agent.host_io import emit_operator_plain
+
+    emit_operator_plain(message)
 
 
 def _parse_ilink_aes_key(raw: str) -> bytes:
@@ -304,7 +319,7 @@ class WeChatChannel(Channel):
         operator sees a responsive abort instead of being wedged behind
         a 40 s long-poll.
         """
-        print("  [wechat] Requesting QR code...")
+        _wechat_operator_print("  [wechat] Requesting QR code...")
         try:
             resp = self._http.get(
                 f"{self.ILINK_BASE}/ilink/bot/get_bot_qrcode",
@@ -314,38 +329,58 @@ class WeChatChannel(Channel):
             )
             data = resp.json()
         except Exception as exc:  # noqa: BLE001
-            print(f"  [wechat] QR request failed: {exc}")
+            _wechat_operator_print(f"  [wechat] QR request failed: {exc}")
             return None
 
         qrcode_id = data.get("qrcode", "")
         qrcode_url = data.get("qrcode_img_content", "")
         if not qrcode_id:
-            print(f"  [wechat] Unexpected QR response: {data}")
+            _wechat_operator_print(f"  [wechat] Unexpected QR response: {data}")
             return None
 
-        print("  [wechat] Scan QR code with WeChat:")
-        print(f"  {qrcode_url}")
-
         import qrcode as _qr
+
         qr = _qr.QRCode(
             error_correction=_qr.constants.ERROR_CORRECT_L,
-            box_size=1, border=1,
+            box_size=1,
+            border=1,
         )
         qr.add_data(qrcode_url)
         qr.make(fit=True)
-        qr.print_ascii(invert=True)
-        print(
+        ascii_buf = io.StringIO()
+        qr.print_ascii(out=ascii_buf, invert=True)
+        ascii_qr = ascii_buf.getvalue().rstrip("\n")
+
+        from pip_agent.host_io import emit_agent_markdown, is_tui_active
+
+        qr_block = (
+            "### WeChat — scan this QR\n\n"
+            "  [wechat] Scan QR code with WeChat:\n\n"
+            f"Fallback URL (if the ASCII QR is unreadable):\n`{qrcode_url}`\n\n"
+            "```text\n"
+            f"{ascii_qr}\n"
+            "```\n\n"
             "  [wechat] Waiting for scan "
-            "(type /wechat cancel to abort, /exit to quit)...",
+            "(type `/wechat cancel` to abort, `/exit` to quit)...\n"
         )
+        if is_tui_active():
+            emit_agent_markdown(qr_block)
+        else:
+            print("  [wechat] Scan QR code with WeChat:")
+            print(f"  {qrcode_url}")
+            qr.print_ascii(invert=True)
+            print(
+                "  [wechat] Waiting for scan "
+                "(type /wechat cancel to abort, /exit to quit)...",
+            )
 
         deadline = time.time() + deadline_sec
         while time.time() < deadline:
             if stop.is_set():
-                print("  [wechat] QR login aborted (host shutdown).")
+                _wechat_operator_print("  [wechat] QR login aborted (host shutdown).")
                 return None
             if cancel.is_set():
-                print("  [wechat] QR login cancelled.")
+                _wechat_operator_print("  [wechat] QR login cancelled.")
                 return None
             try:
                 resp = self._http.get(
@@ -361,7 +396,7 @@ class WeChatChannel(Channel):
                 stop.wait(1.0)
                 continue
             except Exception as exc:  # noqa: BLE001
-                print(f"  [wechat] QR poll error: {exc}")
+                _wechat_operator_print(f"  [wechat] QR poll error: {exc}")
                 return None
 
             status = status_data.get("status", "wait")
@@ -369,16 +404,20 @@ class WeChatChannel(Channel):
                 stop.wait(1.0)
                 continue
             if status == "scaned":
-                print("  [wechat] QR scanned, waiting for confirmation...")
+                _wechat_operator_print(
+                    "  [wechat] QR scanned, waiting for confirmation...",
+                )
                 stop.wait(1.0)
                 continue
             if status == "expired":
-                print("  [wechat] QR code expired.")
+                _wechat_operator_print("  [wechat] QR code expired.")
                 return None
             if status == "confirmed":
                 account_id = str(status_data.get("ilink_bot_id") or "")
                 if not account_id:
-                    print("  [wechat] Login response missing ilink_bot_id.")
+                    _wechat_operator_print(
+                        "  [wechat] Login response missing ilink_bot_id.",
+                    )
                     return None
                 acc = _WeChatAccount(
                     account_id=account_id,
@@ -389,12 +428,14 @@ class WeChatChannel(Channel):
                     user_id=str(status_data.get("ilink_user_id") or ""),
                     get_updates_buf="",
                 )
-                print(f"  [wechat] Login successful (account={account_id})")
+                _wechat_operator_print(
+                    f"  [wechat] Login successful (account={account_id})",
+                )
                 return acc
             log.warning("wechat QR unknown status: %s", status)
             stop.wait(1.0)
 
-        print("  [wechat] QR login timed out.")
+        _wechat_operator_print("  [wechat] QR login timed out.")
         return None
 
     # -- CDN media download --
@@ -531,7 +572,7 @@ class WeChatChannel(Channel):
 
         ret = data.get("ret", 0)
         if ret == -14:
-            print(
+            _wechat_operator_print(
                 f"  [wechat] Session expired for {account_id} (-14), "
                 "need re-login.",
             )
@@ -636,7 +677,7 @@ class WeChatChannel(Channel):
                     if len(self._accounts) == 1 else None
                 )
         if acc is None:
-            print(
+            _wechat_operator_print(
                 f"  [wechat] Cannot send to {to}: unknown account_id "
                 f"{account_id!r}",
             )
@@ -644,7 +685,7 @@ class WeChatChannel(Channel):
 
         ctx_token = acc.context_tokens.get(to, "")
         if not ctx_token:
-            print(
+            _wechat_operator_print(
                 f"  [wechat] Cannot reply to {to} on account {acc.account_id}: "
                 "no context_token",
             )
@@ -751,7 +792,7 @@ def wechat_poll_loop(
     from pip_agent import _profile  # PROFILE
     from pip_agent.config import settings
 
-    print(f"  [wechat] Polling started for account {account_id}")
+    _wechat_operator_print(f"  [wechat] Polling started for account {account_id}")
     consecutive_errors = 0
     idle_polls_streak = 0
     while not stop.is_set():

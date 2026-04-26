@@ -86,7 +86,9 @@ from pip_agent.routing import (
 
 if TYPE_CHECKING:
     from pip_agent.host_scheduler import HostScheduler
+    from pip_agent.host_state import HostState
     from pip_agent.memory import MemoryStore
+    from pip_agent.tui import ThemeManager
     from pip_agent.wechat_controller import WeChatController
 
 log = logging.getLogger(__name__)
@@ -146,6 +148,28 @@ class CommandContext:
     in the write path) resurrects ``.pip/`` with a stale ``state.json``
     after the agent was supposed to be gone.
     """
+    theme_manager: "ThemeManager | None" = None
+    """Discovery walker for builtin + ``<workspace>/.pip/themes/``.
+
+    ``None`` outside the live host (unit tests that build
+    :class:`CommandContext` directly). The ``/theme`` family bails
+    with a one-line hint when this is unset, so the slash command
+    never NPEs."""
+
+    host_state: "HostState | None" = None
+    """Reader/writer for ``<workspace>/.pip/host_state.json``.
+
+    ``None`` outside the live host. ``/theme set`` writes through
+    this; ``/theme show`` reads the persisted slug to surface what
+    will load on next boot vs. what's currently active in memory."""
+
+    active_theme_name: str = ""
+    """Slug of the theme actually running in this host process.
+
+    Resolved at boot from the env var → host_state → default chain
+    and frozen for the run (no live reload in v1). ``/theme show``
+    surfaces it alongside the persisted preference so the operator
+    can tell ``"set but not yet applied"`` from ``"already active"``."""
 
 
 @dataclass(slots=True)
@@ -153,6 +177,45 @@ class CommandResult:
     handled: bool
     response: str | None = None
     agent_user_text: str | None = None
+
+
+_MD_ORDERED_ITEM = re.compile(r"^\d+\.\s")
+
+
+def ensure_cli_command_markdown(text: str) -> str:
+    """Prepare slash-command output for :func:`pip_agent.host_io.emit_agent_markdown`.
+
+    Hand-authored GFM (``/help`` — leading ``#`` or fenced code) is
+    returned unchanged. Plain multi-line listings become one Markdown
+    bullet per line so newlines are not collapsed into a single
+    paragraph.
+    """
+    if not text:
+        return text
+    lead = text.lstrip()
+    if lead.startswith("#") or lead.startswith("```"):
+        return text
+    core = text.strip("\n")
+    if "\n" not in core:
+        return text
+    out: list[str] = []
+    for raw in text.split("\n"):
+        line = raw.rstrip("\r")
+        s = line.strip()
+        if not s:
+            out.append("")
+            continue
+        if s.startswith(("- ", "* ", "> ")):
+            out.append(line)
+            continue
+        if s.startswith(">"):
+            out.append(line)
+            continue
+        if _MD_ORDERED_ITEM.match(s):
+            out.append(line)
+            continue
+        out.append(f"- {s}")
+    return "\n".join(out)
 
 
 # ---------------------------------------------------------------------------
@@ -298,94 +361,77 @@ def dispatch_command(ctx: CommandContext) -> CommandResult:
 # ---------------------------------------------------------------------------
 
 
-_HELP_COMMON = """\
-Available commands:
+_HELP_COMMON = (
+    "## Available commands\n\n"
+    "### SDK and routing\n\n"
+    "- **`/T <text>`** — Forward `<text>` to the SDK as a raw Claude Code "
+    "prompt (e.g. `/T /compact`). Typos like `/T /hlp` stay host-side errors "
+    "(never LLM turns). Some SDK slashes are interactive-only and will not "
+    "work in SDK mode (`/login`, `/clear`). Passthrough slashes are listed "
+    "at the end of `/help` after the first agent turn.\n"
+    "- **`/help`** — Show this help.\n"
+    "- **`/status`** — Current agent, session, and binding.\n"
+    "- **`/memory`** — Memory statistics for the current agent.\n"
+    "- **`/axioms`** — Current judgment principles.\n"
+    "- **`/recall <query>`** — Search stored memories.\n"
+    "- **`/cron`** — List scheduled cron jobs.\n"
+    "- **`/bind <id>`** — Route this chat to sub-agent `<id>` "
+    "(`/bind pip-boy` redirects to `/unbind`).\n"
+    "- **`/unbind`** — Clear this chat's binding; routing falls back to "
+    "pip-boy (no-op if already on pip-boy).\n\n"
+    "### Themes\n\n"
+    "- **`/theme list`** — Installed TUI themes.\n"
+    "- **`/theme show`** — Active + persisted theme slug.\n"
+    "- **`/theme set <name>`** — Persist a theme for the next boot.\n\n"
+    "### Plugins\n\n"
+    "- **`/plugin help`** — Full `/plugin` usage "
+    "(install, marketplace, scopes).\n"
+    "- **`/plugin list [--available]`** — Installed plugins, or "
+    "marketplace catalog.\n"
+    "- **`/plugin search <query>`** — Search marketplace by name / tag / "
+    "description.\n"
+    "- **`/plugin install <spec> [--scope SCOPE]`** — Install "
+    "(default `scope=user`; `project` or `local` for per-agent).\n"
+    "- **`/plugin marketplace list`** / "
+    "**`/plugin marketplace add <src> [--scope SCOPE]`** — List or "
+    "register a marketplace (owner/repo, `https` git URL, or path). "
+    "Other verbs: enable, disable, uninstall, remove, update.\n\n"
+    "## Bindings\n\n"
+    "- **`/bind`** — In a group chat creates a guild-level binding; in a "
+    "private chat, a peer-level binding.\n"
+    "- **Persistence** — Stored under `<workspace>/.pip/bindings.json`.\n"
+    "- **`/unbind`** — Removes this chat's binding; routing falls back to "
+    "pip-boy (no-op if already unbound)."
+)
 
-  /T <text>                     Forward <text> to the SDK as a raw prompt
-                                (e.g. `/T /compact` to dispatch a Claude
-                                Code slash command; typos like `/T /hlp`
-                                stay host errors, never LLM turns).
-                                Some slashes are interactive-only and
-                                won't work in SDK mode (`/login`,
-                                `/clear`). Available SDK slashes are
-                                listed at the end of `/help` once known.
 
-  /help                         Show this help
-  /status                       Show current agent / session / binding
-  /memory                       Memory statistics for the current agent
-  /axioms                       Current judgment principles
-  /recall <query>               Search stored memories
-  /cron                         List scheduled cron jobs
-
-  /bind <id>                    Route this chat to sub-agent <id>
-                                (bind pip-boy is a redirect to /unbind)
-  /unbind                       Clear this chat's binding so routing
-                                falls back to pip-boy (no-op when
-                                already on pip-boy)
-
-  /plugin help                  Show full /plugin usage
-  /plugin list [--available]    List installed (or marketplace-available) plugins
-  /plugin search <query>        Search marketplace plugins by name / tag / desc
-  /plugin install <spec>        Install a plugin (default scope=user;
-      [--scope SCOPE]           use --scope project|local for per-agent)
-  /plugin marketplace list      List configured marketplaces
-  /plugin marketplace add <src> Register a marketplace (gh-repo / url / path)
-      [--scope SCOPE]
-                                (also: enable / disable / uninstall / remove /
-                                 update — see `/plugin help`)
-
-Bindings:
-  /bind in a group chat creates a guild-level binding; in a private
-  chat, a peer-level binding. Bindings persist across restarts in
-  <workspace>/.pip/bindings.json. /unbind removes the binding for
-  the current chat so routing falls back to pip-boy."""
-
-
-_HELP_CLI_EXTRA = """\
-
-CLI-only commands (unavailable on remote channels):
-
-  /exit                         Quit Pip-Boy
-
-  /wechat list                  List registered WeChat accounts + bindings
-  /wechat add <agent_id>        Start QR login; bind new account to <agent_id>
-  /wechat cancel                Abort an in-progress QR login
-  /wechat remove <id>           Stop polling, delete credential + binding.
-                                <id> = an account_id (LHS of `/wechat
-                                list`) → removes that one account, or
-                                an agent_id (RHS) → detaches every WeChat
-                                account currently bound to that agent.
-
-  /subagent                     pip-boy only: list known sub-agents
-  /subagent create <label>      pip-boy only: create a new sub-agent.
-      [--id ID]                 Default: normalize(<label>) — lowercased,
-                                safe for a directory name.
-      [--name NAME]             Default: same as id. Human-facing display
-                                name; can be mixed-case, spaces, CJK.
-      [--model {t0|t1|t2}]      Default: t0. Picks a model tier;
-                                concrete model names live in MODEL_T*
-                                env vars and are resolved at call time.
-      [--dm_scope SCOPE]        Default: per-guild.
-                                Valid: main | per-guild | per-guild-peer.
-  /subagent archive <id>        pip-boy only: move <id>/.pip/ to
-                                .pip/archived/ (project files untouched)
-  /subagent delete <id> --yes   pip-boy only: wipe <id>/.pip/
-                                (project files untouched)
-  /subagent reset <id>          pip-boy only: rebuild sub-agent
-                                <id>'s .pip/ from a minimal backup —
-                                persona.md and HEARTBEAT.md are
-                                preserved, everything else is wiped
-                                and re-created. Not allowed on pip-boy
-                                itself (the running host is the one
-                                thing we can't safely self-surgery);
-                                stop the host and rebuild out-of-band
-                                if you really need to.
-
-Per-agent settings after creation (model, dm_scope, description) are
-edited directly on disk:
-  <workspace>/<id>/.pip/persona.md       (name, model, dm_scope)
-  <workspace>/.pip/agents_registry.json  (description)
-  <workspace>/.pip/bindings.json         (routing bindings)"""
+_HELP_CLI_EXTRA = (
+    "\n\n## CLI-only (refused on remote channels)\n\n"
+    "- **`/exit`** — Quit Pip-Boy (reflect / rotate run on the way out).\n"
+    "- **`/wechat list`** — Registered WeChat accounts and bindings.\n"
+    "- **`/wechat add <agent_id>`** — QR login; bind a new account to "
+    "`<agent_id>`.\n"
+    "- **`/wechat cancel`** — Abort in-progress QR login.\n"
+    "- **`/wechat remove <id>`** — Stop polling and delete credential + "
+    "binding. `<id>` is either an `account_id` from `/wechat list`, or an "
+    "`agent_id` to detach every WeChat account bound to that agent.\n"
+    "- **`/subagent`** — List sub-agents (pip-boy host only).\n"
+    "- **`/subagent create <label> [--id ID] [--name NAME] [--model t0|t1|t2] "
+    "[--dm_scope SCOPE]`** — Create a sub-agent. Defaults: id from "
+    "normalized label; `name=id`; model tier `t0`; `dm_scope=per-guild`. "
+    "Valid `dm_scope`: `main`, `per-guild`, `per-guild-peer`.\n"
+    "- **`/subagent archive <id>`** — Move `<id>/.pip/` under "
+    "`.pip/archived/` (project files untouched).\n"
+    "- **`/subagent delete <id> --yes`** — Wipe `<id>/.pip/` "
+    "(project files untouched).\n"
+    "- **`/subagent reset <id>`** — Rebuild `<id>/.pip/` from minimal "
+    "backup; keeps `persona.md` and `HEARTBEAT.md`. Not allowed on the "
+    "pip-boy root agent.\n\n"
+    "### After creation\n\n"
+    "Edit model / `dm_scope` / name in `<workspace>/<id>/.pip/persona.md`, "
+    "description in `<workspace>/.pip/agents_registry.json`, routing in "
+    "`<workspace>/.pip/bindings.json`."
+)
 
 
 def _cmd_help(ctx: CommandContext, _args: str) -> CommandResult:
@@ -399,14 +445,16 @@ def _cmd_help(ctx: CommandContext, _args: str) -> CommandResult:
     # of silently omitting the section.
     caps = sdk_caps.get()
     if caps:
-        slashes = ", ".join(f"/{n}" for n in sorted(caps))
-        body = f"  {slashes}"
+        slashes = ", ".join(f"`/{n}`" for n in sorted(caps))
+        body = slashes
     else:
         body = (
-            "  (populated after the first agent turn — send any message "
-            "to this agent first, then re-run `/help`)"
+            "*(Populated after the first agent turn — send any message to "
+            "this agent first, then re-run `/help`.)*"
         )
-    text = f"{text}\n\nSDK passthrough slashes (use with `/T`):\n{body}"
+    text = (
+        f"{text}\n\n## SDK passthrough slashes (use with `/T`)\n\n{body}"
+    )
     return CommandResult(handled=True, response=text)
 
 
@@ -523,23 +571,32 @@ def _cmd_cron(ctx: CommandContext, _args: str) -> CommandResult:
         return CommandResult(handled=True, response="Scheduler not running.")
     jobs = sched.list_jobs()
     if not jobs:
-        return CommandResult(handled=True, response="No cron jobs configured.")
+        return CommandResult(
+            handled=True,
+            response="## Cron jobs\n\n*(No jobs configured.)*",
+        )
 
-    lines = [f"Cron jobs ({len(jobs)}):"]
+    lines = [
+        f"## Cron jobs ({len(jobs)})",
+        "",
+        "| On | Name | Schedule | Next run (UTC) | Errors |",
+        "| --- | --- | --- | --- | --- |",
+    ]
     for j in jobs:
-        enabled = "on " if j.get("enabled", True) else "off"
+        on = "yes" if j.get("enabled", True) else "no"
         errors = j.get("consecutive_errors", 0)
         kind = j.get("schedule_kind", "?")
         name = j.get("name") or j.get("id") or "?"
         next_at = j.get("next_fire_at")
         if next_at:
             t = datetime.fromtimestamp(float(next_at), tz=UTC)
-            next_str = t.strftime("%Y-%m-%d %H:%M UTC")
+            next_str = t.strftime("%Y-%m-%d %H:%M")
         else:
             next_str = "n/a"
         lines.append(
-            f"  [{enabled}] {name} ({kind}) next={next_str} "
-            f"errors={errors}"
+            f"| {_md_table_cell(on)} | {_md_table_cell(name)} | "
+            f"{_md_table_cell(str(kind))} | {_md_table_cell(next_str)} | "
+            f"{_md_table_cell(str(errors))} |"
         )
     return CommandResult(handled=True, response="\n".join(lines))
 
@@ -751,24 +808,35 @@ def _cmd_subagent(ctx: CommandContext, args: str) -> CommandResult:
 def _agent_list(ctx: CommandContext, _tail: list[str]) -> CommandResult:
     agents = ctx.registry.list_agents()
     if not agents:
-        return CommandResult(handled=True, response="(no agents registered)")
+        return CommandResult(
+            handled=True,
+            response="## Agents\n\n*(No agents registered.)*",
+        )
 
     bound_id = _resolved_agent_id(ctx)
     default_id = ctx.registry.default_agent().id
 
-    lines = ["Agents:"]
+    lines = [
+        f"## Agents ({len(agents)})",
+        "",
+        "| Kind | Id | Display name | Routed here | Description |",
+        "| --- | --- | --- | --- | --- |",
+    ]
     for cfg in sorted(agents, key=lambda a: (a.id != default_id, a.id)):
         meta = ctx.registry.metadata_for(cfg.id)
-        kind = meta.get("kind", "sub")
-        marker = " *" if cfg.id == bound_id else ""
-        desc = meta.get("description", "")
-        descr = f" — {desc}" if desc else ""
+        kind = str(meta.get("kind", "sub"))
+        here = "yes" if cfg.id == bound_id else ""
+        desc = str(meta.get("description", "") or "")
+        disp = cfg.name or cfg.id
         lines.append(
-            f"  [{kind}] {cfg.id}{marker} ({cfg.name or cfg.id}){descr}"
+            f"| {_md_table_cell(kind)} | {_md_table_cell(cfg.id)} | "
+            f"{_md_table_cell(str(disp))} | {_md_table_cell(here)} | "
+            f"{_md_table_cell(desc, limit=64)} |"
         )
+    lines.append("")
     lines.append(
-        "\n* = currently routed for this chat. "
-        "Use `/bind <id>` to change, `/unbind` to return to pip-boy.",
+        "> **Routed here** = this chat is bound to that agent. "
+        "Use `/bind <id>` / `/unbind` to switch.",
     )
     return CommandResult(handled=True, response="\n".join(lines))
 
@@ -1624,20 +1692,29 @@ def _cmd_wechat(ctx: CommandContext, args: str) -> CommandResult:
             return CommandResult(
                 handled=True,
                 response=(
-                    "No WeChat accounts registered yet. Use "
-                    "`/wechat add <agent_id>` to scan one in."
+                    "## WeChat accounts\n\n"
+                    "*(No accounts registered.)*\n\n"
+                    "Use `/wechat add <agent_id>` to scan one in."
                 ),
             )
-        lines = ["account_id -> agent_id  (logged_in)"]
+        lines = [
+            f"## WeChat accounts ({len(rows)})",
+            "",
+            "| Account id | Agent id | Logged in |",
+            "| --- | --- | --- |",
+        ]
         for row in rows:
             agent = row["agent_id"] or "(unbound)"
+            aid = str(row.get("account_id") or "")
+            li = str(row.get("logged_in") or "")
             lines.append(
-                f"  {row['account_id']} -> {agent}  "
-                f"({row['logged_in']})"
+                f"| {_md_table_cell(aid)} | {_md_table_cell(agent)} | "
+                f"{_md_table_cell(li)} |"
             )
         current = controller.current_qr_agent()
         if current:
-            lines.append(f"QR scan in progress for agent: {current}")
+            lines.append("")
+            lines.append(f"*QR scan in progress for agent:* `{current}`")
         return CommandResult(handled=True, response="\n".join(lines))
 
     if sub == "add":
@@ -1714,6 +1791,186 @@ def _cmd_wechat(ctx: CommandContext, args: str) -> CommandResult:
         )
 
     return CommandResult(handled=True, response=_WECHAT_USAGE)
+
+
+# ---------------------------------------------------------------------------
+# /theme — TUI theme listing / selection / inspection
+# ---------------------------------------------------------------------------
+#
+# Theme handling lives entirely in :mod:`pip_agent.tui` (data) +
+# :mod:`pip_agent.host_state` (persistence). This dispatcher is a
+# thin keyboard shortcut for the operator: the slash itself doesn't
+# load TCSS or rebuild widgets — Pip-Boy v1 does NOT live-reload, so
+# ``/theme set`` only persists the new slug for the next boot.
+# Surfacing that distinction via ``/theme show`` is the whole point
+# of carrying ``active_theme_name`` on :class:`CommandContext`.
+
+_THEME_USAGE = (
+    "Usage:\n"
+    "  /theme list                — show installed themes\n"
+    "  /theme show                — show active theme + persisted preference\n"
+    "  /theme set <name>          — persist <name> for the next boot\n"
+    "\n"
+    "Themes are loaded from the package and from "
+    "<workspace>/.pip/themes/<slug>/ (a copy-paste install). v1 does "
+    "not live-reload; restart pip-boy to apply a `/theme set`."
+)
+
+
+def _cmd_theme(ctx: CommandContext, args: str) -> CommandResult:
+    """Dispatcher for the ``/theme`` family — flat subcommands."""
+    if ctx.theme_manager is None:
+        return CommandResult(
+            handled=True,
+            response=(
+                "Theme manager is not active in this run. "
+                "(Likely line-mode boot or a unit-test context.)"
+            ),
+        )
+
+    try:
+        tokens = shlex.split(args) if args.strip() else []
+    except ValueError as exc:
+        return CommandResult(handled=True, response=f"Parse error: {exc}")
+
+    if not tokens or tokens[0].lower() in {"help", "--help", "-h"}:
+        return CommandResult(handled=True, response=_THEME_USAGE)
+
+    sub = tokens[0].lower()
+    tail = tokens[1:]
+    if sub == "list":
+        return _theme_list(ctx, tail)
+    if sub == "show":
+        return _theme_show(ctx, tail)
+    if sub == "set":
+        return _theme_set(ctx, tail)
+
+    from difflib import get_close_matches
+
+    hint = get_close_matches(sub, ["list", "show", "set"], n=1, cutoff=0.6)
+    suffix = f" Did you mean `/theme {hint[0]}`?" if hint else ""
+    return CommandResult(
+        handled=True,
+        response=(
+            f"Unknown /theme subcommand '{sub}'.{suffix}\n{_THEME_USAGE}"
+        ),
+    )
+
+
+def _theme_list(ctx: CommandContext, _tail: list[str]) -> CommandResult:
+    mgr = ctx.theme_manager
+    assert mgr is not None  # checked by _cmd_theme
+    snapshot = mgr.discover()
+    bundles = list(snapshot.bundles.values())
+
+    if not bundles and not snapshot.issues:
+        return CommandResult(
+            handled=True,
+            response=(
+                "No themes available. Reinstall the package or drop a "
+                "valid theme directory under <workspace>/.pip/themes/."
+            ),
+        )
+
+    bundles.sort(key=lambda b: (b.source.split(":", 1)[0], b.manifest.name))
+    lines = [f"Themes ({len(bundles)}):"]
+    for bundle in bundles:
+        origin = bundle.source.split(":", 1)[0]
+        marker = " *" if bundle.manifest.name == ctx.active_theme_name else ""
+        truncated = " (art truncated)" if bundle.art_truncated else ""
+        lines.append(
+            f"  [{origin}] {bundle.manifest.name}{marker}"
+            f" — {bundle.manifest.display_name}"
+            f" v{bundle.manifest.version}"
+            f"{truncated}"
+        )
+    if snapshot.issues:
+        lines.append("")
+        lines.append(f"Skipped ({len(snapshot.issues)}):")
+        for issue in snapshot.issues:
+            head = issue.reason.splitlines()[0] if issue.reason else "(no detail)"
+            lines.append(f"  [{issue.origin}] {issue.path.name} — {head}")
+    lines.append("")
+    lines.append("* = currently active in this process. Use `/theme set <name>`.")
+    return CommandResult(handled=True, response="\n".join(lines))
+
+
+def _theme_show(ctx: CommandContext, _tail: list[str]) -> CommandResult:
+    mgr = ctx.theme_manager
+    assert mgr is not None
+    persisted: str | None = None
+    if ctx.host_state is not None:
+        persisted = ctx.host_state.get_theme()
+    active = ctx.active_theme_name or "(unknown)"
+    lines = [f"Active theme: {active}"]
+    if persisted:
+        if persisted == ctx.active_theme_name:
+            lines.append(
+                f"Persisted preference: {persisted} (matches active)"
+            )
+        else:
+            lines.append(
+                f"Persisted preference: {persisted} "
+                "(takes effect after restart)"
+            )
+    else:
+        lines.append("Persisted preference: (none — falls back to default)")
+    bundle = mgr.get(ctx.active_theme_name) if ctx.active_theme_name else None
+    if bundle is not None:
+        lines.append(f"Display name: {bundle.manifest.display_name}")
+        lines.append(f"Source: {bundle.source}")
+        lines.append(f"Version: {bundle.manifest.version}")
+    return CommandResult(handled=True, response="\n".join(lines))
+
+
+def _theme_set(ctx: CommandContext, tail: list[str]) -> CommandResult:
+    if len(tail) != 1:
+        return CommandResult(
+            handled=True,
+            response="Usage: /theme set <name>",
+        )
+    if ctx.host_state is None:
+        return CommandResult(
+            handled=True,
+            response=(
+                "Cannot persist theme: host_state is unavailable. "
+                "(Likely a unit-test context.)"
+            ),
+        )
+    name = tail[0].strip()
+    mgr = ctx.theme_manager
+    assert mgr is not None
+    bundle = mgr.get(name)
+    if bundle is None:
+        snapshot = mgr.discover()
+        known = ", ".join(sorted(snapshot.bundles)) or "(none)"
+        return CommandResult(
+            handled=True,
+            response=(
+                f"Unknown theme '{name}'. "
+                f"Known: {known}. Run `/theme list` for full detail."
+            ),
+        )
+    try:
+        ctx.host_state.set_theme(bundle.manifest.name)
+    except OSError as exc:
+        log.exception("Failed to persist theme preference")
+        return CommandResult(
+            handled=True, response=f"Failed to write host_state: {exc}",
+        )
+
+    lines = [
+        f"Persisted theme '{bundle.manifest.name}' "
+        f"(\"{bundle.manifest.display_name}\")."
+    ]
+    if bundle.manifest.name != ctx.active_theme_name:
+        lines.append(
+            "Currently running '" + (ctx.active_theme_name or "?")
+            + "'; restart pip-boy to apply (live reload is v1 out-of-scope)."
+        )
+    else:
+        lines.append("Already active in this process.")
+    return CommandResult(handled=True, response="\n".join(lines))
 
 
 def _cmd_exit(ctx: CommandContext, _args: str) -> CommandResult:
@@ -1840,26 +2097,38 @@ def _truncate(s: str, limit: int = 60) -> str:
     return s[: max(0, limit - 1)] + "\u2026"
 
 
+def _md_table_cell(s: str, *, limit: int = 72) -> str:
+    """Escape ``|`` and cap width so GFM tables stay parseable in the TUI."""
+    t = _truncate(str(s or ""), limit=limit).replace("|", "\\|")
+    return t.replace("\r", "")
+
+
 def _format_plugin_list(items: list[dict], available: bool) -> str:
     if not items:
         if available:
             return (
-                "No plugins available. Add a marketplace first with "
-                "`/plugin marketplace add <gh-repo|url|path>`."
+                "## Available plugins\n\n"
+                "*(No plugins in the catalogue.)*\n\n"
+                "Add a marketplace with `/plugin marketplace add "
+                "<gh-repo|url|path>`."
             )
-        return "No plugins installed. Run `/plugin list --available`."
+        return (
+            "## Installed plugins\n\n"
+            "*(No plugins installed.)*\n\n"
+            "Run `/plugin list --available` to browse the catalogue."
+        )
 
     label = "Available" if available else "Installed"
-    lines = [f"{label} plugins ({len(items)}):"]
+    lines = [
+        f"## {label} plugins ({len(items)})",
+        "",
+        "| Plugin | Scope | Marketplace | Description |",
+        "| --- | --- | --- | --- |",
+    ]
     for it in items:
         if not isinstance(it, dict):
             continue
         name = it.get("name") or it.get("id") or it.get("pluginId") or "?"
-        # ``scope`` only applies to *installed* records (where the CLI
-        # attaches ``user`` / ``project`` / ``local``). Available
-        # records carry a ``source`` dict (``{"source": "url", ...}``)
-        # which is neither a scope nor a marketplace and would render
-        # as a JSON blob if we forwarded it. Filter to strings only.
         scope_raw = it.get("scope")
         scope = scope_raw if isinstance(scope_raw, str) else ""
         market_raw = (
@@ -1870,36 +2139,32 @@ def _format_plugin_list(items: list[dict], available: bool) -> str:
         market = market_raw if isinstance(market_raw, str) else ""
         enabled = it.get("enabled")
         flag = " [disabled]" if enabled is False else ""
-        desc = _truncate(str(it.get("description") or it.get("summary") or ""))
-        bits = [f"  {name}{flag}"]
-        if scope:
-            bits.append(f"scope={scope}")
-        if market and market != scope:
-            bits.append(f"market={market}")
-        head = " ".join(bits)
-        if desc:
-            lines.append(f"{head} — {desc}")
-        else:
-            lines.append(head)
+        desc = str(it.get("description") or it.get("summary") or "")
+        name_disp = f"{name}{flag}"
+        lines.append(
+            f"| {_md_table_cell(name_disp)} | {_md_table_cell(scope)} | "
+            f"{_md_table_cell(market)} | {_md_table_cell(desc, limit=96)} |"
+        )
     return "\n".join(lines)
 
 
 def _format_marketplace_list(items: list[dict]) -> str:
     if not items:
         return (
-            "No marketplaces configured. "
+            "## Marketplaces\n\n"
+            "*(None configured.)*\n\n"
             "Add one with `/plugin marketplace add <gh-repo|url|path>`."
         )
-    lines = [f"Marketplaces ({len(items)}):"]
+    lines = [
+        f"## Marketplaces ({len(items)})",
+        "",
+        "| Name | Scope | Plugins | Source |",
+        "| --- | --- | --- | --- |",
+    ]
     for it in items:
         if not isinstance(it, dict):
             continue
         name = it.get("name") or it.get("id") or "?"
-        # ``repo`` (``owner/repo``) is the most informative identifier
-        # the CLI exposes for github-sourced marketplaces. ``source``
-        # alone is just the constant string ``"github"`` and adds no
-        # operator value. Local-path / URL marketplaces carry only
-        # those fields, hence the chained fallback.
         src = (
             it.get("repo")
             or it.get("url")
@@ -1911,14 +2176,11 @@ def _format_marketplace_list(items: list[dict]) -> str:
             src = ""
         scope = it.get("scope") if isinstance(it.get("scope"), str) else ""
         plug_count = it.get("pluginCount") or it.get("plugins") or ""
-        bits = [f"  {name}"]
-        if scope:
-            bits.append(f"scope={scope}")
-        if plug_count:
-            bits.append(f"plugins={plug_count}")
-        if src:
-            bits.append(f"src={src}")
-        lines.append(" ".join(bits))
+        plug_s = str(plug_count) if plug_count not in (None, "") else ""
+        lines.append(
+            f"| {_md_table_cell(name)} | {_md_table_cell(scope)} | "
+            f"{_md_table_cell(plug_s)} | {_md_table_cell(src, limit=96)} |"
+        )
     return "\n".join(lines)
 
 
@@ -2244,6 +2506,7 @@ _HANDLERS: dict[
     "/unbind": _cmd_unbind,
     "/wechat": _cmd_wechat,
     "/plugin": _cmd_plugin,
+    "/theme": _cmd_theme,
     "/exit": _cmd_exit,
 }
 

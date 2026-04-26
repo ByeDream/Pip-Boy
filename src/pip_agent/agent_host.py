@@ -711,11 +711,23 @@ class AgentHost:
         scheduler: HostScheduler | None = None,
         wechat_controller: "WeChatController | None" = None,
         wechat_bootstrap: Callable[[], "WeChatController"] | None = None,
+        theme_manager: "Any | None" = None,
+        host_state: "Any | None" = None,
+        active_theme_name: str = "",
     ) -> None:
         self._registry = registry
         self._binding_table = binding_table
         self._channel_mgr = channel_mgr
         self._scheduler = scheduler
+        # Theme-related context flows straight through to
+        # :class:`host_commands.CommandContext`. The host itself
+        # never reads the manager — Phase A's TUI runner already
+        # consumed the bundle by the time we get here, so everything
+        # the host needs after that lives on these three fields and
+        # is exposed only to the slash-command handlers.
+        self._theme_manager = theme_manager
+        self._host_state = host_state
+        self._active_theme_name = active_theme_name
         # ``None`` until something registers WeChat (boot path with
         # existing bindings, or lazy bootstrap from ``/wechat add``).
         # ``_wechat_bootstrap`` is the closure that builds + wires the
@@ -1625,6 +1637,9 @@ class AgentHost:
                         invalidate_agent=self.invalidate_agent_cache,
                         wechat_controller=self._wechat_controller,
                         ensure_wechat_controller=self.ensure_wechat_controller,
+                        theme_manager=self._theme_manager,
+                        host_state=self._host_state,
+                        active_theme_name=self._active_theme_name,
                     ),
                 )
             if cmd_result.handled:
@@ -1952,6 +1967,20 @@ class AgentHost:
                             ch=ch, inbound=inbound, reply_peer=reply_peer,
                         )
                     )
+                elif (
+                    not is_heartbeat
+                    and inbound.channel == "cli"
+                ):
+                    # TUI mode: feed text/thinking/tool deltas into the
+                    # agent pane via host_io. ``build_cli_stream_event_cb``
+                    # returns ``None`` in line mode, leaving the legacy
+                    # print path in agent_runner active. No-op for
+                    # heartbeats (they buffer the full reply for
+                    # HEARTBEAT_OK silencing — see the ``stream_text=
+                    # not is_heartbeat`` rule below).
+                    from pip_agent.host_io import build_cli_stream_event_cb
+
+                    stream_event_cb = build_cli_stream_event_cb()
                 try:
                     if use_streaming:
                         result = await self._run_turn_streaming(
@@ -2195,10 +2224,13 @@ class AgentHost:
             reply_peer = inbound.guild_id
 
         if inbound.channel == "cli":
-            # Mirror the indentation that streaming replies use so the
-            # CLI transcript reads uniformly, then force a newline so
-            # the next ``>>>`` prompt starts on its own line.
-            print(f"  {response}")
+            # TUI: same ``markdown`` sink as model replies. Plain multi-line
+            # listings are bullet-wrapped in :func:`host_commands.ensure_cli_command_markdown`.
+            from pip_agent.host_io import emit_agent_markdown
+
+            emit_agent_markdown(
+                host_commands.ensure_cli_command_markdown(response),
+            )
         elif ch:
             send_with_retry(
                 ch, reply_peer, response,
@@ -2258,7 +2290,9 @@ class AgentHost:
         if result.error:
             log.warning("Agent error for %s: %s", session_key, result.error)
             if inbound.channel == "cli":
-                print(f"\n  [error] {result.error}")
+                from pip_agent.host_io import emit_agent_error
+
+                emit_agent_error(str(result.error))
             elif ch and not streamed:
                 send_with_retry(
                     ch, reply_peer, f"[error] {result.error}",
@@ -2270,14 +2304,20 @@ class AgentHost:
         if result.text:
             if inbound.channel == "cli":
                 # Heartbeats never stream (see docstring), so dispatch is the
-                # sole source of their output — print full text. User / cron
-                # inbounds were streamed live by ``agent_runner`` regardless
-                # of VERBOSE (streaming is an interactive UX contract, not a
-                # debug toggle), so dispatch only needs to terminate the
-                # line before the next ``>>>`` prompt.
+                # sole source of their output — emit full text through the
+                # host_io shim. User / cron inbounds were streamed live by
+                # ``agent_runner`` (line mode) or by the TUI stream-event
+                # callback (TUI mode), so dispatch only needs to terminate
+                # the line before the next ``>>>`` prompt in line mode; the
+                # TUI gets the finalize event from agent_runner directly.
+                from pip_agent.host_io import (
+                    emit_agent_markdown,
+                    is_tui_active,
+                )
+
                 if is_heartbeat:
-                    print(f"\n{result.text}")
-                else:
+                    emit_agent_markdown(result.text)
+                elif not is_tui_active():
                     print()
             elif ch and not streamed:
                 send_with_retry(
@@ -2479,11 +2519,135 @@ def _bootstrap_plugin_marketplaces() -> None:
         )
 
 
-def run_host() -> None:
+def _bootstrap_tui(
+    *,
+    workdir: Path,
+    force_no_tui: bool,
+    msg_queue: list[InboundMessage],
+    q_lock: threading.Lock,
+    theme_manager: "Any | None" = None,
+    active_theme_name: str = "",
+) -> tuple[Any | None, Any | None, Any | None]:
+    """Run the TUI capability ladder and, on success, build the App + pump.
+
+    Returns a triple ``(app, pump, log_handler)``. Any element being
+    ``None`` means the TUI is not active for this boot — the caller
+    falls back to the line-mode stdin/print loop. The pump is also
+    installed into :mod:`pip_agent.host_io` so banner / channel /
+    error producers route into the TUI without each having to know
+    whether the pump exists.
+
+    A bootstrap failure is logged and *swallowed*: a broken TUI must
+    never block the host from running, since the user always has the
+    option of ``--no-tui`` to opt out cleanly. The capability log
+    captures the structured detail.
+
+    ``theme_manager`` and ``active_theme_name`` come from the host's
+    Phase B theme resolution (env / host_state / default). Passing the
+    pre-built bundle avoids re-walking the filesystem or re-applying
+    the precedence chain inside ``build_app``. When no manager is
+    provided (legacy callers, unit tests), the runner falls back to
+    the builtin loader for the default ``wasteland`` slug.
+
+    Pulled out of :func:`run_host` so the bootstrap path is testable
+    in isolation and so the main entry point stays focused on the
+    asyncio loop.
+    """
+    from pip_agent.host_io import install_pump, uninstall_pump
+    from pip_agent.tui.capability import (
+        detect_tui_capability,
+        write_capability_log,
+    )
+
+    capability = detect_tui_capability(force_no_tui=force_no_tui)
+    write_capability_log(workdir, capability)
+    if not capability.ok:
+        log.info(
+            "TUI capability check failed at stage=%s: %s — line mode.",
+            capability.stage, capability.detail,
+        )
+        return None, None, None
+
+    try:
+        from pip_agent.tui.app import PipBoyTuiApp
+        from pip_agent.tui.log_handler import TuiLogHandler
+        from pip_agent.tui.pump import UiPump
+        from pip_agent.tui.runner import build_app
+
+        def _tui_on_user_line(text: str) -> None:
+            """Forward a TUI input line into the host's inbound queue.
+
+            Identical wire format to the line-mode ``_stdin_reader``
+            thread — same channel, sender_id, peer_id — so the host
+            main loop's ``/exit`` detection and command dispatch don't
+            have to special-case the TUI.
+            """
+            stripped = text.strip()
+            if not stripped:
+                return
+            with q_lock:
+                msg_queue.append(InboundMessage(
+                    text=stripped,
+                    sender_id="cli-user",
+                    channel="cli",
+                    peer_id="cli-user",
+                ))
+
+        pump = UiPump()
+        if theme_manager is not None and active_theme_name:
+            # Phase B path: the manager already validated the bundle
+            # and resolved the precedence chain; reuse the bundle so
+            # the slash-command status (``/theme show``) and the
+            # rendered TUI agree on the active slug, including local
+            # overrides of builtins.
+            bundle = theme_manager.resolve(active_theme_name)
+            app = PipBoyTuiApp(
+                theme=bundle, pump=pump, on_user_line=_tui_on_user_line,
+            )
+        else:
+            app, _ = build_app(
+                theme_name=active_theme_name or "wasteland",
+                pump=pump,
+                on_user_line=_tui_on_user_line,
+            )
+        install_pump(pump)
+
+        # Reroute logging so records land in the TUI's #app-log pane
+        # instead of writing escape codes onto the active canvas. We
+        # remove the stdout StreamHandler that
+        # ``__main__._configure_logging`` installed at boot — that one
+        # is the source of "log spew corrupts the TUI" reports
+        # (PipBoyCLITheme/design.md §7).
+        root_logger = logging.getLogger()
+        original_level = root_logger.level or logging.WARNING
+        for h in list(root_logger.handlers):
+            if (
+                isinstance(h, logging.StreamHandler)
+                and getattr(h, "stream", None) is sys.stdout
+            ):
+                root_logger.removeHandler(h)
+        log_handler = TuiLogHandler(pump, level=original_level)
+        log_handler.setLevel(original_level)
+        root_logger.addHandler(log_handler)
+        return app, pump, log_handler
+    except Exception:  # noqa: BLE001 — broad: TUI must never block host boot
+        log.exception("TUI bootstrap failed; falling back to line mode.")
+        uninstall_pump()
+        return None, None, None
+
+
+def run_host(*, force_no_tui: bool = False) -> None:
     """Blocking multi-channel entry point.
 
     Starts channel threads, then enters an asyncio event loop that processes
     inbound messages through the SDK agent.
+
+    ``force_no_tui`` (default ``False``): when True the host skips the
+    TUI capability ladder entirely and uses the legacy line-mode
+    stdin/print loop. When False the host runs the capability ladder
+    (:mod:`pip_agent.tui.capability`) and only falls back to line mode
+    if it fails — that's the user-visible meaning of "TUI is the
+    default mode" from PipBoyCLITheme/design.md §5.
 
     Channel enablement rules
     ------------------------
@@ -2594,7 +2758,9 @@ def run_host() -> None:
             )
         except Exception as exc:  # noqa: BLE001
             log.exception("WeChat init failed")
-            print(f"  [wechat] Init failed: {exc}")
+            from pip_agent.host_io import emit_status
+
+            emit_status(f"[wechat] Init failed: {exc}")
             wechat_controller = None
 
     if settings.wecom_bot_id and settings.wecom_bot_secret:
@@ -2621,7 +2787,9 @@ def run_host() -> None:
             bg_threads.append(t)
             _profile.cold_start("wecom_ws_spawned")
         except Exception as exc:
-            print(f"  [wecom] Init failed: {exc}")
+            from pip_agent.host_io import emit_status
+
+            emit_status(f"[wecom] Init failed: {exc}")
 
     scheduler = HostScheduler(
         registry=registry,
@@ -2632,6 +2800,43 @@ def run_host() -> None:
     scheduler.start()
     _profile.cold_start("scheduler_ready")
 
+    # ------------------------------------------------------------------
+    # Theme resolution (Phase B). Done before AgentHost construction so
+    # the host can carry the manager through to the slash-command
+    # context. Discovery is best-effort: a broken local theme is
+    # logged and skipped (validated in tests/test_theme_manager.py),
+    # never re-raised. The manager is still constructed when a runtime
+    # error somehow trips the walker, but the resolver falls back to
+    # the package-default ``wasteland`` so boot continues.
+    # ------------------------------------------------------------------
+    from pip_agent.host_state import (
+        HostState as _HostState,
+    )
+    from pip_agent.host_state import (
+        resolve_active_theme_name,
+    )
+    from pip_agent.tui import DEFAULT_THEME_NAME, ThemeManager
+
+    host_state = _HostState(workspace_pip_dir=state_dir)
+    theme_manager = ThemeManager(workdir=WORKDIR)
+    try:
+        theme_manager.discover()
+    except Exception:  # noqa: BLE001 — never crash boot on a theme walker bug
+        log.exception("ThemeManager.discover crashed; theme catalogue empty.")
+    requested_theme = resolve_active_theme_name(
+        state=host_state, default=DEFAULT_THEME_NAME,
+    )
+    try:
+        active_bundle = theme_manager.resolve(requested_theme)
+        active_theme_name = active_bundle.manifest.name
+    except LookupError:
+        log.error(
+            "No themes installed (default '%s' missing). "
+            "TUI will use the package's wasteland fallback.",
+            DEFAULT_THEME_NAME,
+        )
+        active_theme_name = DEFAULT_THEME_NAME
+
     host = AgentHost(
         registry=registry,
         binding_table=binding_table,
@@ -2639,6 +2844,9 @@ def run_host() -> None:
         scheduler=scheduler,
         wechat_controller=wechat_controller,
         wechat_bootstrap=_wechat_bootstrap,
+        theme_manager=theme_manager,
+        host_state=host_state,
+        active_theme_name=active_theme_name,
     )
     _profile.cold_start("host_ready")
 
@@ -2649,10 +2857,26 @@ def run_host() -> None:
     )
     _profile.cold_start("channels_ready", channels=banner_transports)
 
+    # ------------------------------------------------------------------
+    # TUI bootstrap (runs the capability ladder; sets host_io's active
+    # pump on success). Must happen BEFORE the banner emit so the
+    # banner is routed through the pump rather than printed onto a
+    # canvas the App is about to take over.
+    # ------------------------------------------------------------------
+    tui_app, tui_pump, tui_log_handler = _bootstrap_tui(
+        workdir=WORKDIR,
+        force_no_tui=force_no_tui,
+        msg_queue=msg_queue,
+        q_lock=q_lock,
+        theme_manager=theme_manager,
+        active_theme_name=active_theme_name,
+    )
+
     from pip_agent import __version__
+    from pip_agent.host_io import emit_banner
 
     agents_list = ", ".join(a.id for a in registry.list_agents())
-    print(
+    emit_banner(
         "============================================\n"
         "  ROBCO INDUSTRIES (TM) TERMLINK PROTOCOL\n"
         "  PIP-BOY 3000 MARK IV  [SDK HOST]\n"
@@ -2704,9 +2928,25 @@ def run_host() -> None:
                             peer_id="cli-user",
                         ))
 
-        stdin_t = threading.Thread(target=_stdin_reader, daemon=True)
-        stdin_t.start()
-        print("  (type and press Enter; /exit to quit)")
+        # Input source picker: line mode = stdin reader thread; TUI
+        # mode = the App's input box already enqueues via
+        # ``_tui_on_user_line`` (wired in ``_bootstrap_tui``). Spawning
+        # the stdin thread under a TUI would race the App for
+        # keystrokes and double-submit every line.
+        tui_app_task: asyncio.Task[Any] | None = None
+        if tui_app is None:
+            stdin_t = threading.Thread(target=_stdin_reader, daemon=True)
+            stdin_t.start()
+        else:
+            # ``run_async`` returns when the App's loop exits (clean
+            # ``app.exit()``, Ctrl+C, driver crash). We schedule it as
+            # a task on this same asyncio loop so the existing message
+            # drain loop can co-exist with rendering.
+            tui_app_task = loop.create_task(tui_app.run_async())
+
+        from pip_agent.host_io import emit_ready
+
+        emit_ready("(type and press Enter; /exit to quit)")
 
         # ``process_inbound`` tasks are fired and tracked, not awaited
         # each tick. Awaiting would re-introduce the head-of-line bug
@@ -2793,27 +3033,37 @@ def run_host() -> None:
                     # technically true but reads like progress when there
                     # was none. Separating the "we looked but saw nothing
                     # new" case avoids over-promising.
+                    from pip_agent.host_io import emit_shutdown
+
                     if summary.observations:
-                        print(
-                            f"  Powering down — reflected "
+                        emit_shutdown(
+                            f"Powering down — reflected "
                             f"{summary.reflected} session(s), "
                             f"wrote {summary.observations} observation(s)."
                         )
                     elif summary.reflected:
-                        print(
-                            f"  Powering down — reviewed "
+                        emit_shutdown(
+                            f"Powering down — reviewed "
                             f"{summary.reflected} session(s); "
                             f"no new observations."
                         )
                     elif summary.rotated:
-                        print(
-                            f"  Powering down — rotated "
+                        emit_shutdown(
+                            f"Powering down — rotated "
                             f"{summary.rotated} session(s) "
                             f"(reflect skipped)."
                         )
                     else:
-                        print("  Powering down.")
+                        emit_shutdown("Powering down.")
                     stop_event.set()
+                    # In TUI mode, ask the App to exit AFTER the
+                    # shutdown banner is queued so the user sees the
+                    # final state before the canvas tears down. The
+                    # App's loop drains queued messages first, so
+                    # request_exit immediately is fine — Textual won't
+                    # discard pending messages.
+                    if tui_app is not None:
+                        tui_app.request_exit()
                     break
                 log.info(
                     "Picked up %s from %s/%s: %r",
@@ -2866,6 +3116,20 @@ def run_host() -> None:
         except Exception:  # noqa: BLE001
             log.exception("close_all_streaming_sessions during shutdown failed")
 
+        # Drain the TUI App task last so the user sees the final
+        # shutdown banner / app-log lines before the canvas releases.
+        # Bounded so a wedged Textual driver can't block host exit.
+        if tui_app_task is not None:
+            try:
+                await asyncio.wait_for(tui_app_task, timeout=5.0)
+            except asyncio.TimeoutError:
+                log.warning("TUI App did not exit within 5s; cancelling.")
+                tui_app_task.cancel()
+                try:
+                    await tui_app_task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+
     try:
         asyncio.run(_run())
     except KeyboardInterrupt:
@@ -2887,3 +3151,14 @@ def run_host() -> None:
         channel_mgr.close_all()
         for t in bg_threads:
             t.join(timeout=5.0)
+        # Detach the pump and drop the TUI log handler so a follow-up
+        # ``run_host`` invocation (e.g. tests that spin up + tear down
+        # multiple hosts in one process) starts from a clean state.
+        if tui_log_handler is not None:
+            try:
+                logging.getLogger().removeHandler(tui_log_handler)
+            except Exception:  # noqa: BLE001
+                pass
+        from pip_agent.host_io import uninstall_pump
+
+        uninstall_pump()

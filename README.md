@@ -303,6 +303,69 @@ The agent has self-service surface for additive operations only:
 
 Destructive operations (`uninstall`, `disable`, `marketplace remove`) are intentionally **not** exposed as tools — those decisions stay with the human via `/plugin`.
 
+## TUI & Themes
+
+Pip-Boy's CLI is a Textual + Rich TUI by default — a three-pane layout with
+streaming agent output, a side art / app-log column, and a status bar — and
+falls back to plain line mode only when the terminal can't host it. The
+fallback decision is logged to `<workspace>/.pip/tui_capability.log` so
+you can see exactly which probe failed.
+
+```text
+pip-boy            # TUI by default (line mode if the terminal can't host it)
+pip-boy --no-tui   # force line mode (CI, redirected pipes, broken CJK)
+pip-boy doctor     # one-shot env + capability + theme report
+```
+
+Themes are data-driven: a `theme.toml` manifest, a `theme.tcss` Textual CSS
+file, and an optional `art.txt`. Two themes ship in the wheel
+(`wasteland` and `vault-amber`); local themes drop into
+`<workspace>/.pip/themes/<slug>/` and override built-ins of the same name.
+
+```text
+/theme list                # installed themes (built-in + local)
+/theme show                # active theme + persisted preference
+/theme set <slug>          # persist <slug> for the next boot
+```
+
+Selection precedence: `PIP_TUI_THEME` env var → `host_state.json` (set via
+`/theme set`) → package default `wasteland`. Live reload is intentionally
+out of scope in v1; restart pip-boy after `/theme set` to apply. Themes
+own appearance only — widget topology, layout fractions, and pump wiring
+are framework invariants guarded by SVG snapshot tests.
+
+See [`docs/themes.md`](docs/themes.md) for the full author guide,
+including the locked palette tokens, widget IDs you can style, the
+starter theme template, and known v1 constraints.
+
+### Troubleshooting
+
+* **`pip-boy` exits immediately with a Windows runtime error dialog** —
+  this is the Textual win32 driver tripping on a stale `__stdout__`
+  alignment after the UTF-8 console rewrap. Pip-Boy v0.5+ aligns
+  `sys.__stdout__` / `sys.__stdin__` atomically inside
+  `force_utf8_console()` (regression-tested in
+  `tests/test_console_utf8.py`); if you still see the dialog, run
+  `pip-boy doctor` to confirm the `textual` version is `>=1`.
+* **`AssertionError: Driver must be in application mode`** — same
+  root cause as above; upgrade `pip-boy` to a build that includes
+  the alignment fix.
+* **CLI shows `[builtin] wasteland` but you copied a custom theme** —
+  the local theme directory must match the slug (e.g.
+  `.pip/themes/wasteland/theme.toml` with `name = "wasteland"`).
+  Mismatched slugs are listed under the `Skipped` section of
+  `/theme list` and `pip-boy doctor`.
+* **TUI stays disabled on a clearly capable terminal** — check
+  `<workspace>/.pip/tui_capability.log`. The first failing stage
+  (`tty`, `driver`, or `encoding`) tells you which probe disagreed
+  with the environment. Forcing `--no-tui` short-circuits at
+  `user_optout`.
+* **Updating dependencies fails on Windows** — close any running
+  `pip-boy` first. The bundled `claude.exe` (shipped by
+  `claude-agent-sdk`) keeps a write lock on its directory while a
+  host process is alive, so `pip install -U pip-boy` aborts mid-write.
+  Stop the host, retry the install, and start it again.
+
 ## Architecture, in one diagram
 
 ```
@@ -357,6 +420,7 @@ Destructive operations (`uninstall`, `disable`, `marketplace remove`) are intent
 
 ## Further reading
 
+- [`docs/themes.md`](docs/themes.md) — TUI theme author guide + starter theme.
 - [`docs/releasing.md`](docs/releasing.md) — Release workflow.
 
 ## License

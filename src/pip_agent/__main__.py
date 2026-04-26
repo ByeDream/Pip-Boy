@@ -83,12 +83,56 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--version", action="store_true", help="Show version and exit",
     )
+    # Operator-side TUI override. The capability ladder
+    # (:mod:`pip_agent.tui.capability`) defaults to "TUI on if the
+    # terminal supports it"; ``--no-tui`` is the explicit opt-out for
+    # the cases where the operator knows ahead of time the TUI won't
+    # work — CI, ``pip-boy < script.txt`` runs, terminals with broken
+    # CJK rendering, etc. ``cli_layout`` config flags are deliberately
+    # NOT introduced (PipBoyCLITheme/design.md §5).
+    parser.add_argument(
+        "--no-tui",
+        action="store_true",
+        help="Skip TUI bootstrap and run in line mode regardless of "
+             "terminal capability.",
+    )
+
+    # ``doctor`` is dispatched as a sub-parser instead of an action
+    # flag because PipBoyCLITheme/design.md §C makes it a separate
+    # command surface — read-only, must run without launching the
+    # host, and survives whatever the rest of the env is. Sub-parsers
+    # also leave room for future ``pip-boy theme list`` etc. without
+    # reshuffling the top-level argparse layout.
+    subparsers = parser.add_subparsers(dest="command")
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Print an environment + TUI self-check report and exit.",
+    )
+    doctor_parser.add_argument(
+        "--no-tui",
+        action="store_true",
+        help="Force the capability ladder shown in the report to "
+             "short-circuit at user_optout.",
+    )
     args = parser.parse_args(argv)
 
     if args.version:
         from pip_agent import __version__
         print(f"pip-boy {__version__}")
         return
+
+    if args.command == "doctor":
+        # The doctor is intentionally side-effect free: no logging
+        # bring-up, no UTF-8 console coercion (it should describe
+        # whatever the environment looks like, not "fix" it), no
+        # workspace scaffolding. Just read what's there and print.
+        from pathlib import Path
+
+        from pip_agent.doctor import run_doctor
+
+        sys.exit(run_doctor(
+            workdir=Path.cwd(), force_no_tui=args.no_tui,
+        ))
 
     # Order matters: UTF-8 console BEFORE logging. ``basicConfig`` captures
     # ``sys.stdout`` into a ``StreamHandler``; if we detach stdout afterward
@@ -109,7 +153,7 @@ def main(argv: list[str] | None = None) -> None:
 
     from pip_agent.agent_host import run_host
     _profile.cold_start("run_host_imported")
-    run_host()
+    run_host(force_no_tui=args.no_tui)
 
 
 if __name__ == "__main__":

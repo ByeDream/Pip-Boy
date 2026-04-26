@@ -148,3 +148,33 @@ class TestForceUtf8Console:
 
         # Wrapper still got installed despite the SetConsoleCP failure.
         assert sys.stdin.readline() == "hi\n"
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only invariant")
+    def test_windows_aligns_dunder_streams_with_rewrap(
+        self, preserve_std_streams,
+    ):
+        """Regression for PipBoyCLITheme/design.md §1.
+
+        After ``force_utf8_console`` returns, ``sys.__stdout__`` /
+        ``sys.__stdin__`` MUST point at the same TextIOWrapper objects
+        as ``sys.stdout`` / ``sys.stdin``. Textual's win32 driver reads
+        the dunder streams; if they drift apart the driver asserts
+        ``Driver must be in application mode`` and the TUI cannot start.
+
+        The fix is part of ``force_utf8_console`` (atomic with the
+        rewrap) precisely so a future TUI bootstrap CANNOT be tempted
+        to redo the alignment from a separate call site.
+        """
+        _replace_with_bytes_stream("stdin", "hi\n".encode("utf-8"))
+        _replace_with_bytes_stream("stdout")
+
+        force_utf8_console()
+
+        assert sys.stdout is sys.__stdout__, (
+            "force_utf8_console must keep sys.__stdout__ aligned with "
+            "the rewrapped sys.stdout"
+        )
+        assert sys.stdin is sys.__stdin__, (
+            "force_utf8_console must keep sys.__stdin__ aligned with "
+            "the rewrapped sys.stdin"
+        )

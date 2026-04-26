@@ -47,6 +47,7 @@ _MANIFEST_NAME = ".scaffold_manifest.json"
 _SCAFFOLD_FILES: list[tuple[str, str]] = [
     (".pip/persona.md", "pip-boy.md"),
     (".pip/HEARTBEAT.md", "heartbeat.md"),
+    (".pip/themes/README.md", "themes_README.md"),
     (".env", "env.example"),
 ]
 
@@ -160,6 +161,11 @@ def _ensure_dirs(workdir: Path) -> None:
         ".pip/addressbook",
         ".pip/incoming",
         ".pip/credentials",
+        # Local theme drop-in directory. Themes here are picked up by
+        # :class:`pip_agent.tui.ThemeManager` and listed via
+        # ``/theme list``. Phase B keeps this an empty placeholder
+        # plus the README file written by ``_SCAFFOLD_FILES`` above.
+        ".pip/themes",
     ]
     for rel in dirs:
         d = workdir / rel

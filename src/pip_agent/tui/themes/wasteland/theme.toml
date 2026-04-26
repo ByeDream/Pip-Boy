@@ -1,0 +1,29 @@
+# Default Pip-Boy theme: green-on-black "wasteland radiation" aesthetic.
+# This file is the v1 ThemeManifest schema reference — see
+# ``docs/themes.md`` (Phase C) for the full author guide.
+
+[theme]
+name = "wasteland"
+display_name = "Wasteland Radiation"
+version = "0.1.0"
+author = "Pip-Boy"
+description = "Default Fallout-inspired green-on-black wasteland theme."
+show_art = true
+show_app_log = true
+show_status_bar = true
+footer_template = "[{tools} tools · {turns} turn · {elapsed_s}s · ${cost}]"
+
+[palette]
+background = "#0a0f0a"
+foreground = "#7CFC00"
+accent = "#7CFC00"
+accent_dim = "#3a8000"
+user_input = "#aaffaa"
+agent_text = "#7CFC00"
+thinking = "#3a8000"
+tool_call = "#88ddff"
+log_info = "#7CFC00"
+log_warning = "#ffcc66"
+log_error = "#ff6666"
+status_bar = "#0a1a0a"
+status_bar_text = "#7CFC00"

@@ -271,7 +271,12 @@ class ChannelManager:
 
     def register(self, channel: Channel) -> None:
         self.channels[channel.name] = channel
-        print(f"  [+] Channel registered: {channel.name}")
+        # Route through the host_io shim so TUI mode lights up the
+        # status bar instead of writing escape-corrupted text into the
+        # canvas. Line mode falls back to the historical print line.
+        from pip_agent.host_io import emit_channel_ready
+
+        emit_channel_ready(channel.name)
 
     def get(self, name: str) -> Channel | None:
         return self.channels.get(name)

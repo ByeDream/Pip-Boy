@@ -24,6 +24,12 @@ dependencies = [
     "trafilatura>=1.12",
     "wecom-aibot-python-sdk>=1.0",
     "qrcode>=7",
+    # TUI stack. ``textual<1`` is deliberately barred — 0.89.x has
+    # documented Windows driver bugs (PipBoyCLITheme/design.md §4).
+    # Upper bound on textual<10 / rich<16 leaves headroom for two
+    # major versions before the next compatibility check.
+    "textual>=1,<10",
+    "rich>=13,<16",
 ]
 
 [project.optional-dependencies]
@@ -31,6 +37,10 @@ dev = [
     "pytest>=7",
     "pytest-cov",
     "ruff",
+    # SVG snapshot baseline is a hard merge gate for any TUI / theme
+    # change (PipBoyCLITheme/design.md §8). Pinned permissively because
+    # the plugin is small and stable across textual minors.
+    "pytest-textual-snapshot>=1,<3",
 ]
 
 [project.scripts]
@@ -45,6 +55,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 "pip_agent.scaffold" = ["*.md", "*.json", "*.txt", "*.example"]
 "pip_agent.memory" = ["sops/*.md"]
+"pip_agent.tui" = ["themes/*/theme.toml", "themes/*/theme.tcss", "themes/*/art.txt"]
 
 [tool.ruff]
 target-version = "py311"

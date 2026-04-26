@@ -1,0 +1,107 @@
+/* Wasteland Radiation — default Pip-Boy TCSS.
+ *
+ * Layout (LOCKED widget IDs — themes must NOT change topology):
+ *
+ *   Screen
+ *     #status-bar          1 row at top
+ *     #main                horizontal
+ *       #agent-pane        vertical, 3fr
+ *         #agent-log       expand
+ *         #input           1 row
+ *       #side-pane         vertical, 1fr
+ *         #pipboy-art      auto height
+ *         #app-log         expand
+ */
+
+Screen {
+    background: $surface;
+    color: $text;
+    layers: base overlay;
+}
+
+#status-bar {
+    dock: top;
+    height: 1;
+    background: $boost;
+    color: $text;
+    padding: 0 1;
+    text-style: bold;
+}
+
+#main {
+    layout: horizontal;
+    height: 1fr;
+}
+
+#agent-pane {
+    width: 3fr;
+    height: 1fr;
+    layout: vertical;
+}
+
+#agent-log {
+    height: 1fr;
+    background: $surface;
+    color: $text;
+    border: none;
+    padding: 0 1;
+    scrollbar-gutter: stable;
+}
+
+#input {
+    height: 3;
+    border: round $accent;
+    background: $surface;
+    color: $accent;
+}
+
+#input:focus {
+    border: round $accent;
+    background: $surface;
+}
+
+#side-pane {
+    width: 1fr;
+    height: 1fr;
+    layout: vertical;
+    border-left: vkey $accent-darken-2;
+    padding: 0 1;
+}
+
+#pipboy-art {
+    height: auto;
+    color: $accent;
+    text-align: center;
+    padding: 1 0;
+}
+
+#app-log {
+    height: 1fr;
+    background: $surface;
+    color: $text-muted;
+    border-top: hkey $accent-darken-2;
+    padding: 0 1;
+}
+
+.agent-thinking {
+    color: $text-muted;
+    text-style: italic;
+}
+
+.agent-tool {
+    color: $accent;
+    text-style: dim;
+}
+
+.agent-error {
+    color: $error;
+    text-style: bold;
+}
+
+.log-warning {
+    color: $warning;
+}
+
+.log-error {
+    color: $error;
+}

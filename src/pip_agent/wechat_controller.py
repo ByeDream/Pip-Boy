@@ -33,6 +33,7 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from pip_agent.channels.wechat import _wechat_operator_print
 from pip_agent.routing import (
     AgentRegistry,
     Binding,
@@ -192,7 +193,7 @@ class WeChatController:
             acc = self.channel.login(self.stop_event, cancel)
         except Exception as exc:  # noqa: BLE001
             log.exception("wechat QR worker crashed")
-            print(f"  [wechat] QR worker error: {exc}")
+            _wechat_operator_print(f"  [wechat] QR worker error: {exc}")
             return
         if acc is None:
             # login() already printed the specific reason (expired /
@@ -214,12 +215,12 @@ class WeChatController:
             self.bindings.save(self.bindings_path)
         except Exception as exc:  # noqa: BLE001
             log.exception("wechat QR worker: bindings.save failed")
-            print(f"  [wechat] Binding save failed: {exc}")
+            _wechat_operator_print(f"  [wechat] Binding save failed: {exc}")
             return
 
         # Start the poll loop so the new bot actually receives messages.
         self.spawn_poll(acc.account_id)
-        print(
+        _wechat_operator_print(
             f"  [wechat] Bound account {acc.account_id} -> agent:{agent_id}"
             " and polling started.",
         )
@@ -245,7 +246,7 @@ class WeChatController:
                 self.bindings.save(self.bindings_path)
             except Exception as exc:  # noqa: BLE001
                 log.exception("wechat: bindings.save failed during remove")
-                print(f"  [wechat] Binding save failed: {exc}")
+                _wechat_operator_print(f"  [wechat] Binding save failed: {exc}")
 
         with self._lock:
             self._poll_threads.pop(account_id, None)

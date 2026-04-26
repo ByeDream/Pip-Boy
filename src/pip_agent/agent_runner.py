@@ -35,7 +35,8 @@ from claude_agent_sdk import (
 # * ``text_delta``      — kwargs: ``text``
 # * ``tool_use``        — kwargs: ``name``
 # * ``finalize``        — kwargs: ``final_text``, ``num_turns``,
-#                          ``cost_usd``, ``usage``
+#                          ``cost_usd``, ``usage``, ``elapsed_s``
+#                          (wall seconds from stream open to result)
 #
 # ``await``ed inline with the SDK message loop, so a slow callback
 # directly throttles delta consumption — keep handlers lean.
@@ -504,13 +505,25 @@ async def _run_one_attempt(
                                 ),
                             )
                             args_preview = str(block.input)[:80]
-                            print(
-                                f"\n  [tool: {block.name} {args_preview}]",
-                                flush=True,
-                            )
-                            # Tool traces start with ``\n`` and end without one,
-                            # so the line remains "open" from the console's POV.
-                            streaming_line_open = True
+                            # Console mirror is suppressed when a stream-event
+                            # consumer is attached (TUI / WeCom); the consumer
+                            # already gets a ``tool_use`` callback below and
+                            # is the single source of truth for surfacing the
+                            # trace in that mode. Without this gate the TUI
+                            # canvas gets corrupted by ``\n  [tool: ...]``
+                            # writing directly to ``sys.stdout`` underneath
+                            # the rendered widgets.
+                            if not use_stream_events:
+                                print(
+                                    f"\n  [tool: {block.name} {args_preview}]",
+                                    flush=True,
+                                )
+                                # Tool traces start with ``\n`` and end without
+                                # one, so the line remains "open" from the
+                                # console's POV. Only set the flag in the
+                                # ungated branch — the consumer-driven path
+                                # has no streamed line to terminate.
+                                streaming_line_open = True
                             if on_stream_event is not None:
                                 await on_stream_event(
                                     "tool_use", name=block.name,
@@ -566,12 +579,16 @@ async def _run_one_attempt(
                         message.stop_reason,
                     )
                     if on_stream_event is not None:
+                        elapsed_s = (
+                            _time.perf_counter_ns() - stream_start_ns
+                        ) / 1e9
                         await on_stream_event(
                             "finalize",
                             final_text=message.result,
                             num_turns=message.num_turns,
                             cost_usd=message.total_cost_usd,
                             usage=message.usage or {},
+                            elapsed_s=elapsed_s,
                         )
 
     except ClaudeSDKError as exc:

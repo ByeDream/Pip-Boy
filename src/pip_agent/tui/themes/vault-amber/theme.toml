@@ -1,0 +1,31 @@
+# Second built-in Pip-Boy theme: amber-on-black retro Vault-Tec
+# console aesthetic. Picks up the same widget topology as
+# ``wasteland`` (themes don't own layout) and only swaps palette +
+# TCSS surfaces. See ``docs/themes.md`` (Phase C) for the manifest
+# schema reference.
+
+[theme]
+name = "vault-amber"
+display_name = "Vault Amber"
+version = "0.1.0"
+author = "Pip-Boy"
+description = "Amber-on-black retro Vault-Tec console palette."
+show_art = true
+show_app_log = true
+show_status_bar = true
+footer_template = "<{tools} tools · {turns} turns · {elapsed_s}s · ${cost}>"
+
+[palette]
+background = "#1a0e00"
+foreground = "#ffb000"
+accent = "#ffb000"
+accent_dim = "#7a5400"
+user_input = "#ffd97f"
+agent_text = "#ffb000"
+thinking = "#a07000"
+tool_call = "#ffe27a"
+log_info = "#ffb000"
+log_warning = "#ffd34d"
+log_error = "#ff6b3d"
+status_bar = "#3a2200"
+status_bar_text = "#ffd97f"

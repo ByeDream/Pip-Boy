@@ -103,7 +103,8 @@ class WecomStreamRenderer:
         * ``text_delta`` — kwargs: ``text``
         * ``tool_use`` — kwargs: ``name`` (purely for the footer count)
         * ``finalize`` — kwargs: ``final_text``, ``num_turns``,
-          ``cost_usd``, ``usage`` (dict). Triggers the closing flush.
+          ``cost_usd``, ``usage`` (dict), optional ``elapsed_s``.
+          Triggers the closing flush.
 
         Unknown types are ignored — the runner may add more later
         without breaking older renderers.
@@ -124,11 +125,19 @@ class WecomStreamRenderer:
             elif event_type == "tool_use":
                 self._tool_count += 1
             elif event_type == "finalize":
+                raw_elapsed = kwargs.get("elapsed_s")
+                try:
+                    elapsed_override = (
+                        float(raw_elapsed) if raw_elapsed is not None else None
+                    )
+                except (TypeError, ValueError):
+                    elapsed_override = None
                 await self.finalize(
                     final_text=kwargs.get("final_text"),
                     num_turns=int(kwargs.get("num_turns") or 0),
                     cost_usd=kwargs.get("cost_usd"),
                     usage=kwargs.get("usage") or {},
+                    elapsed_s=elapsed_override,
                 )
         except Exception:
             log.exception(
@@ -203,6 +212,7 @@ class WecomStreamRenderer:
         num_turns: int,
         cost_usd: float | None,
         usage: dict[str, Any],
+        elapsed_s: float | None = None,
     ) -> None:
         """Send the closing snapshot with body + stats footer.
 
@@ -224,6 +234,7 @@ class WecomStreamRenderer:
             num_turns=num_turns,
             cost_usd=cost_usd,
             usage=usage,
+            elapsed_s=elapsed_s,
         )
         ok = await self._do_flush(final=True, footer=footer)
         self._delivered = bool(ok)
@@ -253,8 +264,10 @@ class WecomStreamRenderer:
         num_turns: int,
         cost_usd: float | None,
         usage: dict[str, Any],
+        elapsed_s: float | None = None,
     ) -> str:
-        elapsed_s = (time.perf_counter_ns() - self._start_ns) / 1e9
+        if elapsed_s is None:
+            elapsed_s = (time.perf_counter_ns() - self._start_ns) / 1e9
         cost_text = f"${cost_usd:.3f}" if cost_usd is not None else "$0.000"
         in_tok = int(usage.get("input_tokens") or 0)
         out_tok = int(usage.get("output_tokens") or 0)

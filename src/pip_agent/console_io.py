@@ -80,6 +80,29 @@ def force_utf8_console() -> None:
     sys.stdout = _rewrap_utf8(sys.stdout, line_buffering=True)
     sys.stdin = _rewrap_utf8(sys.stdin, line_buffering=False)
 
+    # Atomic with the rewrap above: keep ``sys.__stdout__`` / ``sys.__stdin__``
+    # pointing at the *current* TextIOWrapper. Textual's ``win32`` driver
+    # reads ``sys.__stdout__`` directly when calling ``SetConsoleMode`` /
+    # ``WriteConsoleW``, and CPython does not sync ``__stdout__`` when
+    # user code re-binds ``sys.stdout``. Without this step a TUI launch
+    # raised ``AssertionError: Driver must be in application mode`` plus a
+    # Windows runtime error dialog — see the PipBoyCLITheme research stash
+    # for the full trace.
+    #
+    # Doing the alignment here (rather than from the TUI bootstrap) is
+    # deliberate: there must be ONE place that owns "stdio is rewrapped",
+    # and any caller that re-rewraps after this point would silently break
+    # the alignment again. The TUI runner asserts on the invariant rather
+    # than re-applying it.
+    if sys.platform == "win32":
+        try:
+            if sys.stdout is not sys.__stdout__:
+                sys.__stdout__ = sys.stdout  # type: ignore[misc]
+            if sys.stdin is not sys.__stdin__:
+                sys.__stdin__ = sys.stdin  # type: ignore[misc]
+        except (AttributeError, TypeError):  # pragma: no cover — exotic Python build
+            pass
+
 
 def _rewrap_utf8(stream: object, *, line_buffering: bool) -> object:
     """Return a UTF-8 TextIOWrapper over ``stream``, or ``stream`` unchanged
