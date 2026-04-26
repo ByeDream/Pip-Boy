@@ -233,6 +233,7 @@ async def marketplace_add(
     ``source`` accepts a GitHub ``owner/repo`` slug, an HTTPS git URL,
     or a local path — the CLI distinguishes them itself.
     """
+    await ensure_bootstrap_once()
     async with _profile.span("plugins.marketplace_add"):
         argv = ["plugin", "marketplace", "add", source, "--scope", scope]
         out, err, rc = await _run(*argv, cwd=cwd, timeout=_network_timeout())
@@ -245,6 +246,7 @@ async def marketplace_list(
     cwd: Path | str | None = None,
 ) -> list[dict]:
     """List configured marketplaces (parsed JSON)."""
+    await ensure_bootstrap_once()
     async with _profile.span("plugins.marketplace_list"):
         argv = ["plugin", "marketplace", "list", "--json"]
         out, err, rc = await _run(*argv, cwd=cwd)
@@ -259,6 +261,7 @@ async def marketplace_remove(
     cwd: Path | str | None = None,
 ) -> tuple[str, str, int]:
     """Remove a previously-registered marketplace by name."""
+    await ensure_bootstrap_once()
     async with _profile.span("plugins.marketplace_remove"):
         argv = ["plugin", "marketplace", "remove", name]
         out, err, rc = await _run(*argv, cwd=cwd)
@@ -272,6 +275,7 @@ async def marketplace_update(
     cwd: Path | str | None = None,
 ) -> tuple[str, str, int]:
     """Refresh marketplace metadata for ``name`` (or all if omitted)."""
+    await ensure_bootstrap_once()
     async with _profile.span("plugins.marketplace_update"):
         argv = ["plugin", "marketplace", "update"]
         if name:
@@ -299,6 +303,7 @@ async def plugin_install(
     same name appears in multiple sources. The CLI itself prints a
     helpful error when ``spec`` is ambiguous, so we just pass it through.
     """
+    await ensure_bootstrap_once()
     async with _profile.span("plugins.install"):
         argv = ["plugin", "install", spec, "-s", scope]
         out, err, rc = await _run(*argv, cwd=cwd, timeout=_network_timeout())
@@ -313,6 +318,7 @@ async def plugin_uninstall(
     cwd: Path | str | None = None,
 ) -> tuple[str, str, int]:
     """Uninstall ``name``. ``scope=None`` lets the CLI auto-detect."""
+    await ensure_bootstrap_once()
     async with _profile.span("plugins.uninstall"):
         argv = ["plugin", "uninstall", name]
         if scope:
@@ -347,6 +353,7 @@ async def plugin_list(
     formatters consume, so changing the shape downstream would be a
     bigger refactor than picking the right field here.
     """
+    await ensure_bootstrap_once()
     async with _profile.span("plugins.list"):
         argv = ["plugin", "list"]
         if available:
@@ -373,6 +380,7 @@ async def plugin_enable(
     cwd: Path | str | None = None,
 ) -> tuple[str, str, int]:
     """Re-enable a previously-disabled plugin."""
+    await ensure_bootstrap_once()
     async with _profile.span("plugins.enable"):
         argv = ["plugin", "enable", name]
         if scope:
@@ -389,6 +397,7 @@ async def plugin_disable(
     cwd: Path | str | None = None,
 ) -> tuple[str, str, int]:
     """Disable a plugin without uninstalling it."""
+    await ensure_bootstrap_once()
     async with _profile.span("plugins.disable"):
         argv = ["plugin", "disable", name]
         if scope:
@@ -435,6 +444,73 @@ def run_sync(coro):  # type: ignore[no-untyped-def]
     if "err" in box:
         raise box["err"]  # type: ignore[misc]
     return box["ok"]
+
+
+# ---------------------------------------------------------------------------
+# Lazy marketplace bootstrap
+# ---------------------------------------------------------------------------
+#
+# Previously ``run_host`` synchronously called ``ensure_marketplaces`` at
+# boot — a ~3 s ``claude.exe plugin marketplace list --json`` spawn paid
+# on every launch even though the result is almost always "already
+# configured". Sessions that never touch plugins were still billed for
+# it. We now defer the check to the first public plugins coroutine that
+# actually needs marketplace state (any of ``marketplace_*``,
+# ``plugin_*``). Flag + lock ensure exactly-once per process; setting
+# the flag *before* awaiting ``ensure_marketplaces`` also breaks the
+# recursion where the bootstrap itself calls ``marketplace_list`` /
+# ``marketplace_add``.
+
+_bootstrap_done = False
+_bootstrap_lock: asyncio.Lock | None = None
+
+
+async def ensure_bootstrap_once() -> None:
+    """Run the configured marketplace bootstrap at most once per process.
+
+    Idempotent, safe to call from any plugins coroutine. Failures are
+    swallowed (``ensure_marketplaces`` already logs them) and the flag
+    is still flipped so a transient network issue does not cause every
+    subsequent plugin operation to re-spawn the subprocess.
+    """
+    global _bootstrap_done, _bootstrap_lock
+    if _bootstrap_done:
+        return
+    if _bootstrap_lock is None:
+        _bootstrap_lock = asyncio.Lock()
+    async with _bootstrap_lock:
+        if _bootstrap_done:
+            return
+        # Flip *before* awaiting so ``ensure_marketplaces``'s internal
+        # calls to ``marketplace_list`` / ``marketplace_add`` hit the
+        # cheap True fast-path instead of deadlocking on this same lock.
+        _bootstrap_done = True
+        try:
+            from pip_agent.config import settings
+            csv = (settings.bootstrap_marketplaces or "").strip()
+        except Exception:  # noqa: BLE001
+            return
+        specs = [chunk for chunk in csv.split(",") if chunk.strip()]
+        if not specs:
+            return
+        try:
+            added = await ensure_marketplaces(specs)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("plugins: marketplace bootstrap aborted: %s", exc)
+            return
+        if added:
+            log.info(
+                "plugins: bootstrapped %d marketplace(s): %s",
+                len(added),
+                ", ".join(added),
+            )
+
+
+def reset_bootstrap_for_test() -> None:
+    """Test-only: clear the one-shot gate so each test starts clean."""
+    global _bootstrap_done, _bootstrap_lock
+    _bootstrap_done = False
+    _bootstrap_lock = None
 
 
 async def ensure_marketplaces(

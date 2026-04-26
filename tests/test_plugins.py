@@ -494,3 +494,106 @@ class TestEnsureMarketplaces:
         ]))
         assert added == ["https://github.com/some/repo.git"]
         assert len(fake_run.calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# ensure_bootstrap_once — lazy gate at first public coroutine use
+# ---------------------------------------------------------------------------
+
+
+class TestLazyBootstrap:
+    """First call into any gated coroutine runs the configured bootstrap;
+    later calls short-circuit. Previously the bootstrap ran at host boot
+    and paid a ~3 s subprocess hit per launch; this gate shifts it to
+    first plugin use so sessions that never touch plugins avoid it.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_gate(self):
+        # The suite-wide autouse fixture in ``conftest.py`` closes the
+        # gate for ordinary tests; these tests need it open. Reset
+        # before and after so state doesn't leak either way.
+        plug.reset_bootstrap_for_test()
+        yield
+        plug.reset_bootstrap_for_test()
+
+    def test_first_gated_call_fires_bootstrap(self, fake_run, monkeypatch):
+        from pip_agent.config import settings
+        monkeypatch.setattr(
+            settings, "bootstrap_marketplaces", "acme/foo", raising=False,
+        )
+        # marketplace_list (inside ensure_marketplaces) sees empty catalogue
+        # → marketplace_add fires → then the user's own marketplace_list
+        # call runs and returns the real payload.
+        fake_run.push("[]")            # bootstrap's own list
+        fake_run.push("ok\n")          # bootstrap's add
+        fake_run.push("[]")            # user's list
+        _run(plug.marketplace_list())
+        # 3 subprocess spawns: bootstrap list + bootstrap add + user list.
+        argvs = [c["argv"][:3] for c in fake_run.calls]
+        assert argvs == [
+            ["plugin", "marketplace", "list"],
+            ["plugin", "marketplace", "add"],
+            ["plugin", "marketplace", "list"],
+        ]
+
+    def test_second_call_does_not_rerun_bootstrap(self, fake_run, monkeypatch):
+        from pip_agent.config import settings
+        monkeypatch.setattr(
+            settings, "bootstrap_marketplaces", "acme/foo", raising=False,
+        )
+        fake_run.push("[]")            # bootstrap list
+        fake_run.push("ok\n")          # bootstrap add
+        fake_run.push("[]")            # first user list
+        fake_run.push("[]")            # second user list
+        _run(plug.marketplace_list())
+        _run(plug.marketplace_list())
+        # Bootstrap fires exactly once — 2 bootstrap calls + 2 user calls.
+        assert len(fake_run.calls) == 4
+
+    def test_empty_setting_skips_bootstrap_entirely(self, fake_run, monkeypatch):
+        from pip_agent.config import settings
+        monkeypatch.setattr(
+            settings, "bootstrap_marketplaces", "", raising=False,
+        )
+        fake_run.push("[]")
+        _run(plug.marketplace_list())
+        # Only the user's own call; no bootstrap subprocess.
+        assert len(fake_run.calls) == 1
+
+    def test_bootstrap_failure_is_swallowed_and_flag_flipped(
+        self, fake_run, monkeypatch, caplog,
+    ):
+        from pip_agent.config import settings
+        monkeypatch.setattr(
+            settings, "bootstrap_marketplaces", "acme/foo", raising=False,
+        )
+        # Explode inside ensure_marketplaces — the gate must catch it,
+        # log a WARNING, and still flip _bootstrap_done so retries
+        # don't re-spawn the subprocess on every subsequent call.
+        async def boom(_specs, **_kw):
+            raise RuntimeError("subprocess vanished")
+        monkeypatch.setattr(plug, "ensure_marketplaces", boom)
+        fake_run.push("[]")            # user's list after the failed gate
+        import logging
+        with caplog.at_level(logging.WARNING, logger=plug.__name__):
+            _run(plug.marketplace_list())
+        assert plug._bootstrap_done is True
+        assert any(
+            "marketplace bootstrap aborted" in rec.message
+            for rec in caplog.records
+        )
+
+    def test_install_also_triggers_gate(self, fake_run, monkeypatch):
+        # Every public coroutine is gated, not just the marketplace ones.
+        from pip_agent.config import settings
+        monkeypatch.setattr(
+            settings, "bootstrap_marketplaces", "acme/foo", raising=False,
+        )
+        fake_run.push("[]")            # bootstrap list
+        fake_run.push("ok\n")          # bootstrap add
+        fake_run.push("ok\n")          # user's install
+        _run(plug.plugin_install("something"))
+        # First call: marketplace list (bootstrap). Last call: install.
+        assert fake_run.calls[0]["argv"][:3] == ["plugin", "marketplace", "list"]
+        assert fake_run.calls[-1]["argv"][:2] == ["plugin", "install"]

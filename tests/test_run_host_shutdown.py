@@ -38,11 +38,6 @@ class TestRunHostFlushesOnCtrlC:
             "pip_agent.config.Settings.check_required",
             lambda self: None,
         )
-        # Skip the marketplace bootstrap subprocess — it isn't the
-        # surface under test here, and its internal ``asyncio.run`` would
-        # otherwise consume the ``_fake_asyncio_run`` slot we've reserved
-        # for the main event loop.
-        monkeypatch.setattr(mod, "_bootstrap_plugin_marketplaces", lambda: None)
         monkeypatch.setattr(mod, "WORKDIR", tmp_path)
         monkeypatch.setattr(
             mod, "WORKSPACE_PIP_DIR", tmp_path / ".pip",
@@ -135,11 +130,6 @@ class TestRunHostFlushesOnCtrlC:
             "pip_agent.config.Settings.check_required",
             lambda self: None,
         )
-        # Same justification as the sibling test above: the bootstrap
-        # subprocess is out of scope and would otherwise eat the
-        # ``_fake_asyncio_run`` first-call slot we use to inject the
-        # KeyboardInterrupt at the main event loop.
-        monkeypatch.setattr(mod, "_bootstrap_plugin_marketplaces", lambda: None)
         monkeypatch.setattr(mod, "WORKDIR", tmp_path)
         monkeypatch.setattr(
             mod, "WORKSPACE_PIP_DIR", tmp_path / ".pip",

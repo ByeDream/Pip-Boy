@@ -2499,49 +2499,6 @@ def _banner_transports(
     return names
 
 
-def _bootstrap_plugin_marketplaces() -> None:
-    """Idempotently register the marketplaces named in ``BOOTSTRAP_MARKETPLACES``.
-
-    Runs once per ``run_host`` invocation, before the registry / channel
-    machinery comes up. Splitting on ``,`` matches ``.env``-style CSV;
-    surrounding whitespace is trimmed by ``ensure_marketplaces`` itself.
-    Any failure (no network, bundled CLI missing, malformed spec) is
-    logged at WARNING by the wrapper — startup proceeds regardless, the
-    user simply sees an empty ``/plugin marketplace list`` and can retry
-    via ``/plugin marketplace add`` once the underlying issue is fixed.
-
-    Network impact: a fresh checkout pays a one-time clone (~15 s on a
-    healthy connection per marketplace). Subsequent boots short-circuit
-    via the JSON list check, so cold-start cost drops to a single
-    ~2.4 s subprocess spawn.
-    """
-    csv = (settings.bootstrap_marketplaces or "").strip()
-    if not csv:
-        return
-    specs = [chunk for chunk in csv.split(",") if chunk.strip()]
-    if not specs:
-        return
-
-    from pip_agent import plugins as _plugins
-
-    try:
-        added = _plugins.run_sync(_plugins.ensure_marketplaces(specs))
-    except Exception as exc:  # noqa: BLE001
-        # Defensive: ``ensure_marketplaces`` already swallows expected
-        # failures and returns ``[]``; this catch covers genuinely
-        # unexpected bugs (e.g. a future refactor that lets an exception
-        # bubble) and converts them to a log line so the host still boots.
-        log.warning("plugins: marketplace bootstrap aborted: %s", exc)
-        return
-
-    if added:
-        log.info(
-            "plugins: bootstrapped %d marketplace(s): %s",
-            len(added),
-            ", ".join(added),
-        )
-
-
 def _bootstrap_tui(
     *,
     workdir: Path,
@@ -2712,7 +2669,6 @@ def run_host(*, force_no_tui: bool = False) -> None:
         )
         file_log_handler = None
     settings.check_required()
-    _bootstrap_plugin_marketplaces()
 
     registry = AgentRegistry(WORKDIR)
     binding_table = BindingTable()
