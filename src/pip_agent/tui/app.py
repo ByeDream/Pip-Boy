@@ -143,6 +143,10 @@ class PipBoyTuiApp(App[None]):
         self._stream_buf: str = ""
         self._stream_tail_strips: int = 0
         self._streaming_open = False
+        # Same buffering for ``thinking_delta`` — each SDK chunk must not
+        # become its own row; accumulate and rewrite the tail instead.
+        self._think_buf: str = ""
+        self._think_tail_strips: int = 0
 
     # ------------------------------------------------------------------
     # Stylesheets
@@ -294,12 +298,12 @@ class PipBoyTuiApp(App[None]):
             self._streaming_open = False
             log_widget.write(Text(f"> {event.text}", style="bold"))
         elif event.kind == "thinking_delta":
-            self._flush_stream_buffer(log_widget)
             self._streaming_open = False
-            log_widget.write(
-                Text(event.text.rstrip("\n"), style="dim italic")
-            )
+            self._think_buf += event.text
+            self._rewrite_think_tail(log_widget)
         elif event.kind == "text_delta":
+            if self._think_buf:
+                self._flush_think_buffer(log_widget)
             self._streaming_open = True
             self._stream_buf += event.text
             self._rewrite_stream_tail(log_widget)
@@ -546,6 +550,8 @@ class PipBoyTuiApp(App[None]):
         """``Ctrl+L`` clears the agent log only — app log is preserved."""
         self._stream_buf = ""
         self._stream_tail_strips = 0
+        self._think_buf = ""
+        self._think_tail_strips = 0
         try:
             self.query_one("#agent-log", RichLog).clear()
         except Exception:
@@ -563,6 +569,7 @@ class PipBoyTuiApp(App[None]):
         self, log_widget: RichLog, *, materialize_markdown: bool = False,
     ) -> None:
         """Drop streaming bookkeeping; optionally re-render the tail as Markdown."""
+        self._flush_think_buffer(log_widget)
         buf = self._stream_buf
         n = self._stream_tail_strips
         if materialize_markdown and buf.strip() and n > 0:
@@ -570,6 +577,20 @@ class PipBoyTuiApp(App[None]):
             log_widget.write(Markdown(buf, justify="left"))
         self._stream_buf = ""
         self._stream_tail_strips = 0
+
+    def _flush_think_buffer(self, log_widget: RichLog) -> None:  # noqa: ARG002
+        self._think_buf = ""
+        self._think_tail_strips = 0
+
+    def _rewrite_think_tail(self, log_widget: RichLog) -> None:
+        buf = self._think_buf
+        if not buf:
+            self._think_tail_strips = 0
+            return
+        _rich_log_strip_tail(log_widget, self._think_tail_strips)
+        before = len(log_widget.lines)
+        log_widget.write(Text("💭 " + buf.rstrip("\n"), style="dim italic"), expand=True)
+        self._think_tail_strips = len(log_widget.lines) - before
 
     def _rewrite_stream_tail(self, log_widget: RichLog) -> None:
         buf = self._stream_buf
