@@ -26,6 +26,10 @@ from claude_agent_sdk import (
     query,
 )
 
+from pip_agent import sdk_caps
+from pip_agent.hooks import build_hooks
+from pip_agent.mcp_tools import McpContext, build_mcp_server
+
 # Type alias for the per-turn streaming callback. Callers receive a
 # small set of semantic event names so the runner can swap its source
 # between ``StreamEvent`` (partial deltas) and ``AssistantMessage``
@@ -41,10 +45,6 @@ from claude_agent_sdk import (
 # ``await``ed inline with the SDK message loop, so a slow callback
 # directly throttles delta consumption — keep handlers lean.
 StreamEventCallback = Callable[..., Awaitable[None]]
-
-from pip_agent import sdk_caps
-from pip_agent.hooks import build_hooks
-from pip_agent.mcp_tools import McpContext, build_mcp_server
 
 log = logging.getLogger(__name__)
 
