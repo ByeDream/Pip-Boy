@@ -257,8 +257,14 @@ async def _cli_tui_stream_cb(event_type: str, **kwargs: Any) -> None:
                 AgentEvent(kind="text_delta", text=str(kwargs.get("text", "")))
             )
         elif event_type == "tool_use":
+            raw_input = kwargs.get("input")
+            tool_input = raw_input if isinstance(raw_input, dict) else {}
             pump.agent_sink(
-                AgentEvent(kind="tool_use", name=str(kwargs.get("name", "")))
+                AgentEvent(
+                    kind="tool_use",
+                    name=str(kwargs.get("name", "")),
+                    tool_input=tool_input,
+                )
             )
         elif event_type == "finalize":
             usage = kwargs.get("usage") or {}

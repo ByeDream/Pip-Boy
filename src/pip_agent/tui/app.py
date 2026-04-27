@@ -47,6 +47,7 @@ from pip_agent.tui.pump import UiPump
 from pip_agent.tui.sinks import AgentEvent
 from pip_agent.tui.textual_theme import textual_theme_from_bundle
 from pip_agent.tui.theme_api import ThemeBundle
+from pip_agent.tui.tool_format import format_tool_summary
 
 __all__ = ["PipBoyTuiApp"]
 
@@ -362,7 +363,10 @@ class PipBoyTuiApp(App[None]):
         elif event.kind == "tool_use":
             self._flush_stream_buffer(log_widget)
             self._streaming_open = False
-            args = f" {event.text}" if event.text else ""
+            summary = format_tool_summary(event.name, event.tool_input)
+            if not summary and event.text:
+                summary = event.text
+            args = f" {summary}" if summary else ""
             log_widget.write(
                 Text(f"[tool: {event.name}{args}]", style="cyan")
             )

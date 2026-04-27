@@ -89,7 +89,9 @@ class AgentEvent:
     * ``user_input``        — ``text``
     * ``thinking_delta``    — ``text``
     * ``text_delta``        — ``text``
-    * ``tool_use``          — ``name`` (+ optional ``text`` for args preview)
+    * ``tool_use``          — ``name`` (+ optional ``tool_input`` dict
+                               with raw SDK tool-call arguments; the
+                               renderer formats per-tool from this)
     * ``markdown``          — ``text`` (full markdown block)
     * ``plain``             — ``text`` (verbatim plain block; no markup)
     * ``finalize``          — ``num_turns``, ``cost_usd``, ``usage``,
@@ -108,6 +110,7 @@ class AgentEvent:
     cost_usd: float | None = None
     usage: dict[str, int] = field(default_factory=dict)
     elapsed_s: float = 0.0
+    tool_input: dict[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.kind not in AGENT_EVENT_KINDS:
