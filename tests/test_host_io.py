@@ -219,6 +219,54 @@ async def test_cli_stream_cb_finalize_carries_elapsed_s(
 
 
 @pytest.mark.asyncio
+async def test_cli_stream_cb_tool_use_pipes_input_dict(
+    attached_pump: UiPump,
+) -> None:
+    """`tool_use` kwargs carry the raw SDK input dict through to AgentEvent.
+
+    Without this the TUI can only render the tool's name — the formatter
+    (tui.tool_format) has no data to work with. Regression guard for
+    the Phase-1 observability commit.
+    """
+    cb = host_io.build_cli_stream_event_cb()
+    assert cb is not None
+    await cb(
+        "tool_use",
+        name="Write",
+        input={"file_path": "/tmp/x.md", "content": "hi"},
+    )
+    msgs = attached_pump._app.messages  # type: ignore[attr-defined]
+    ev = next(
+        m.event for m in msgs
+        if getattr(getattr(m, "event", None), "kind", "") == "tool_use"
+    )
+    assert ev.name == "Write"
+    assert ev.tool_input == {"file_path": "/tmp/x.md", "content": "hi"}
+
+
+@pytest.mark.asyncio
+async def test_cli_stream_cb_tool_use_without_input(
+    attached_pump: UiPump,
+) -> None:
+    """Missing or non-dict `input` must degrade to an empty dict, not
+    crash the dispatch. Backward-compat with pre-Phase-1 producers."""
+    cb = host_io.build_cli_stream_event_cb()
+    assert cb is not None
+    await cb("tool_use", name="Read")
+    await cb("tool_use", name="Read", input=None)
+    await cb("tool_use", name="Read", input="not-a-dict")
+    msgs = attached_pump._app.messages  # type: ignore[attr-defined]
+    tool_events = [
+        m.event for m in msgs
+        if getattr(getattr(m, "event", None), "kind", "") == "tool_use"
+    ]
+    assert len(tool_events) == 3
+    for ev in tool_events:
+        assert ev.tool_input == {}
+
+
+
+@pytest.mark.asyncio
 async def test_cli_stream_cb_swallows_internal_errors(
     attached_pump: UiPump,
 ) -> None:

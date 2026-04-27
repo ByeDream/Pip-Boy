@@ -37,7 +37,8 @@ from pip_agent.mcp_tools import McpContext, build_mcp_server
 #
 # * ``thinking_delta``  — kwargs: ``text`` (raw partial)
 # * ``text_delta``      — kwargs: ``text``
-# * ``tool_use``        — kwargs: ``name``
+# * ``tool_use``        — kwargs: ``name``, ``input`` (raw tool-call
+#                          argument dict, as sent by the SDK)
 # * ``finalize``        — kwargs: ``final_text``, ``num_turns``,
 #                          ``cost_usd``, ``usage``, ``elapsed_s``
 #                          (wall seconds from stream open to result)
@@ -526,7 +527,9 @@ async def _run_one_attempt(
                                 streaming_line_open = True
                             if on_stream_event is not None:
                                 await on_stream_event(
-                                    "tool_use", name=block.name,
+                                    "tool_use",
+                                    name=block.name,
+                                    input=block.input,
                                 )
 
                 elif isinstance(message, SystemMessage):

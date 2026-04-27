@@ -484,7 +484,9 @@ class StreamingSession:
                                 streaming_line_open = True
                                 if on_stream_event is not None:
                                     await on_stream_event(
-                                        "tool_use", name=block.name,
+                                        "tool_use",
+                                        name=block.name,
+                                        input=block.input,
                                     )
 
                     elif isinstance(message, SystemMessage):
