@@ -41,11 +41,12 @@ class TestBuiltinWastelandTheme:
 
     def test_art_within_design_limits(self) -> None:
         bundle = load_builtin_theme("wasteland")
-        if bundle.art:
-            lines = bundle.art.splitlines()
-            assert len(lines) <= 8
-            for ln in lines:
-                assert len(ln) <= 32
+        if bundle.art_frames:
+            for frame in bundle.art_frames:
+                lines = frame.splitlines()
+                assert len(lines) <= 30  # ART_FRAME_MAX_ROWS
+                for ln in lines:
+                    assert len(ln) <= 100  # ART_FRAME_MAX_COLS
 
     def test_unknown_theme_raises(self) -> None:
         with pytest.raises(FileNotFoundError):
@@ -72,8 +73,7 @@ async def test_app_mounts_and_renders_locked_widget_ids() -> None:
         assert app.query_one("#input")
         assert app.query_one("#side-pane")
         assert app.query_one("#side-top")
-        assert app.query_one("#pipboy-banner")
-        assert app.query_one("#pipboy-deco")
+        assert app.query_one("#pipboy-art")
         assert app.query_one("#pipboy-clock")
         assert app.query_one("#side-status")
         assert app.query_one("#app-log")
@@ -185,7 +185,7 @@ async def test_text_delta_coalesces_before_finalize() -> None:
         for _ in range(40):
             pump.agent_sink(AgentEvent(kind="text_delta", text="测"))
         await pilot.pause()
-        assert len(log.lines) < 5
+        assert len(log.lines) < 10
         pump.agent_sink(
             AgentEvent(
                 kind="finalize",

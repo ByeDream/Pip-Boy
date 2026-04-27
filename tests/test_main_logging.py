@@ -13,11 +13,11 @@ below WARNING. To an operator, the host looked frozen.
 
 These tests lock the contract down:
 
-* ``_configure_logging`` honours ``VERBOSE`` with a two-tier layout:
-  root at INFO (or WARNING in quiet mode) and ``pip_agent.*`` at DEBUG
-  only under ``VERBOSE=true``. Third parties are NOT pinned — they ride
-  the root level, which we want at INFO (not DEBUG) so their internals
-  stay readable.
+* ``_configure_logging`` honours ``VERBOSE`` as a DEBUG toggle for
+  Pip-Boy's own code only: ``pip_agent.*`` at DEBUG when VERBOSE=true
+  and INFO otherwise. Third parties ride the root level — INFO under
+  VERBOSE=true, WARNING otherwise — so flipping VERBOSE never changes
+  what third parties emit at INFO/DEBUG.
 * ``main()`` always calls ``_configure_logging`` *before* handing control
   to ``run_host``. If a future change drops that call site the regression
   test fails loudly.
@@ -100,19 +100,21 @@ class TestConfigureLoggingHonoursVerbose:
 
         assert fresh_root_logger.level == logging.WARNING
 
-    def test_verbose_false_leaves_pip_agent_unpinned(
+    def test_verbose_false_pins_pip_agent_to_info(
         self, fresh_root_logger, monkeypatch,
     ):
-        # Quiet mode inherits root — pip_agent.debug/info are hidden and
-        # pip_agent.warning still flows through. If a future change pins
-        # pip_agent under quiet mode, errors would suddenly shift level
-        # and quiet mode would start leaking INFO.
+        # Quiet mode keeps pip_agent at INFO — startup, channel bring-up
+        # and scheduler context still surface through stdout, the TUI
+        # app-log pane, and pip-boy.log. Only DEBUG is suppressed. If a
+        # future change pushes pip_agent back to NOTSET/WARNING under
+        # quiet mode, the TUI's bottom-right pane goes empty during
+        # healthy runs — the operator regression this test guards.
         from pip_agent import __main__ as main_mod
 
         monkeypatch.setattr(main_mod.settings, "verbose", False)
         main_mod._configure_logging()
 
-        assert logging.getLogger("pip_agent").level == logging.NOTSET
+        assert logging.getLogger("pip_agent").level == logging.INFO
 
 
 class TestThirdPartyLibsRideRootLevel:
@@ -260,24 +262,29 @@ class TestConfigureLoggingActuallyEmits:
         assert "getupdates 200" not in captured.out
         assert "connection reset" in captured.out
 
-    def test_everything_suppressed_below_warning_when_not_verbose(
+    def test_pip_agent_info_reaches_stdout_when_not_verbose(
         self, fresh_root_logger, monkeypatch, capsys,
     ):
+        # Quiet mode must still surface pip_agent INFO — startup /
+        # scheduler / channel context. The pane going dark during a
+        # healthy run is a direct symptom of this breaking.
         from pip_agent import __main__ as main_mod
 
         monkeypatch.setattr(main_mod.settings, "verbose", False)
         main_mod._configure_logging()
 
-        logging.getLogger("pip_agent.host_scheduler").info("should be hidden")
-        logging.getLogger("pip_agent.host_scheduler").warning("should show")
-        logging.getLogger("httpx").info("also hidden")
-        logging.getLogger("httpx").warning("also shown")
+        logging.getLogger("pip_agent.host_scheduler").debug("debug hidden")
+        logging.getLogger("pip_agent.host_scheduler").info("info visible")
+        logging.getLogger("pip_agent.host_scheduler").warning("warning visible")
+        logging.getLogger("httpx").info("httpx hidden")
+        logging.getLogger("claude_agent_sdk").info("third-party hidden")
 
         captured = capsys.readouterr()
-        assert "should be hidden" not in captured.out
-        assert "also hidden" not in captured.out
-        assert "should show" in captured.out
-        assert "also shown" in captured.out
+        assert "debug hidden" not in captured.out
+        assert "info visible" in captured.out
+        assert "warning visible" in captured.out
+        assert "httpx hidden" not in captured.out
+        assert "third-party hidden" not in captured.out
 
 
 # ---------------------------------------------------------------------------

@@ -339,17 +339,28 @@ def test_themes_root_is_none_when_workdir_unset() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_load_theme_bundle_clamps_oversized_art(tmp_path: Path) -> None:
-    long_line = "X" * 80
-    art = "\n".join([long_line] * 12)
-    theme_dir = _write_theme(tmp_path, "art-test", art=art)
+def test_load_theme_bundle_loads_ascii_art_frames(tmp_path: Path) -> None:
+    theme_dir = _write_theme(tmp_path, "art-test")
+    (theme_dir / "ascii_art_0.txt").write_text("hello\nworld", encoding="utf-8")
+    (theme_dir / "ascii_art_1.txt").write_text("foo\nbar\nbaz", encoding="utf-8")
 
     bundle = load_theme_bundle(theme_dir)
 
-    assert bundle.art_truncated is True
-    rows = bundle.art.splitlines()
-    assert len(rows) <= 8
-    assert all(len(row) <= 32 for row in rows)
+    assert len(bundle.art_frames) == 2
+    assert bundle.art_frames[0] == "hello\nworld"
+    assert bundle.art_frames[1] == "foo\nbar\nbaz"
+    assert bundle.art_frame_width == 5  # "hello"
+    assert bundle.art_frame_height == 3  # 3 rows in frame 1
+
+
+def test_load_theme_bundle_no_art_files_gives_empty_frames(tmp_path: Path) -> None:
+    theme_dir = _write_theme(tmp_path, "no-art")
+
+    bundle = load_theme_bundle(theme_dir)
+
+    assert bundle.art_frames == ()
+    assert bundle.art_frame_width == 0
+    assert bundle.art_frame_height == 0
 
 
 def test_load_theme_bundle_rejects_directory_name_mismatch(

@@ -23,15 +23,15 @@ _HTTP_NOISY_LIBS: tuple[str, ...] = (
 def _configure_logging() -> None:
     """Route internal log records to stdout.
 
-    ``VERBOSE`` is the single "open the log firehose" switch. It controls
-    **only** the stdlib ``logging`` threshold — it does **not** gate
-    streaming agent replies or tool-use traces, because those are part of
-    the interactive CLI contract and must show regardless of log volume.
+    ``VERBOSE`` is the "open the DEBUG firehose for Pip-Boy's own code"
+    switch. It does NOT change third-party libraries — those always ride
+    the root logger so flipping ``VERBOSE`` never surprises the operator
+    with an SDK/MCP DEBUG flood.
 
-    Layout (two tiers, with a WARNING cap on HTTP wire-chatter libs):
+    Layout (with a WARNING cap on HTTP wire-chatter libs):
 
     * ``VERBOSE=true``
-        - root logger at ``INFO`` — most third-party libs (``mcp``,
+        - root logger at ``INFO`` — third-party libs (``mcp``,
           ``claude_agent_sdk``, ``asyncio``, ``anyio``, …) emit INFO+
           only. Their DEBUG layers stay hidden, which keeps the output
           readable and also silences the SDK's best-effort
@@ -40,23 +40,33 @@ def _configure_logging() -> None:
           sentinel suppression, memory pipeline state, hook invocations,
           and every other ``log.debug`` we ship. This is the signal you
           actually want from "firehose mode".
-        - ``httpx`` / ``httpcore`` / ``urllib3`` / ``h11`` capped at
-          ``WARNING``. Their INFO is one line per HTTP request; the
-          WeChat long-poll fires ~20 req/sec when the server fast-returns,
-          which floods the CLI and makes the input prompt unusable.
-          Errors still surface because they log at WARNING+.
     * ``VERBOSE=false`` (default)
-        - root logger at ``WARNING``. Errors, channel-level failures, and
-          the agent's own text output still show; the "plumbing is doing
-          its job" chatter does not. ``pip_agent.*`` inherits root, so
-          our DEBUG/INFO is hidden too.
+        - root logger at ``WARNING`` — third-party libs only surface
+          WARNING/ERROR. The "plumbing is doing its job" chatter stays
+          hidden.
+        - ``pip_agent.*`` at ``INFO`` — Pip-Boy's own startup / channel /
+          scheduler records still reach stdout, the TUI ``#app-log``
+          pane, and ``pip-boy.log``. Only DEBUG is suppressed, which is
+          the actual purpose of quiet mode.
+
+    In both tiers ``httpx`` / ``httpcore`` / ``urllib3`` / ``h11`` are
+    pinned at ``WARNING``: their INFO is one line per HTTP request and
+    the WeChat long-poll fires ~20 req/sec when the server fast-returns,
+    which floods stdout and renders the CLI prompt unusable. Errors
+    still surface at WARNING+.
 
     Regression guard: ``tests/test_main_logging.py`` asserts that ``main()``
     always passes through here before invoking ``run_host``. Historically,
     multiple refactors silently dropped that call site — every ``log.*``
     in the codebase went dark and the host looked dead.
     """
-    root_level = logging.INFO if settings.verbose else logging.WARNING
+    if settings.verbose:
+        root_level = logging.INFO
+        pip_agent_level = logging.DEBUG
+    else:
+        root_level = logging.WARNING
+        pip_agent_level = logging.INFO
+
     # ``force=True`` so we override any stale basicConfig left behind by an
     # earlier import or a test harness (pytest's logging plugin installs its
     # own root handler which would otherwise make this call a silent no-op).
@@ -66,14 +76,8 @@ def _configure_logging() -> None:
         stream=sys.stdout,
         force=True,
     )
-    if settings.verbose:
-        # Only Pip-Boy's own modules go to DEBUG; third parties stay at the
-        # root level (INFO) so their internals don't drown our signal.
-        logging.getLogger("pip_agent").setLevel(logging.DEBUG)
+    logging.getLogger("pip_agent").setLevel(pip_agent_level)
 
-    # Cap HTTP wire-chatter at WARNING regardless of VERBOSE. See the
-    # module-level comment on ``_HTTP_NOISY_LIBS`` for the operational
-    # reason this can't be left to ride root.
     for name in _HTTP_NOISY_LIBS:
         logging.getLogger(name).setLevel(logging.WARNING)
 

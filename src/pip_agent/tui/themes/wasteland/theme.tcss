@@ -8,11 +8,10 @@
  *       #agent-pane            1fr
  *         #agent-log           expand
  *         #input               1 row
- *       #side-pane             fixed 34 cols
+ *       #side-pane             width set dynamically by app (min 50, max 100)
  *         #side-top            auto height
- *           #pipboy-banner     auto height
- *           #pipboy-deco       auto height
- *           #pipboy-clock      fixed ~5 rows
+ *           #pipboy-art        fixed height set dynamically (max 30)
+ *           #pipboy-clock      fixed ~3 rows
  *         #side-status         auto height
  *         #app-log             1fr
  */
@@ -65,7 +64,7 @@ Screen {
 }
 
 #side-pane {
-    width: 34;
+    width: auto;
     height: 1fr;
     layout: vertical;
     border-left: vkey $accent-darken-2;
@@ -75,30 +74,21 @@ Screen {
 #side-top {
     height: auto;
     layout: vertical;
-    padding: 1 0 0 0;
 }
 
-#pipboy-banner {
+#pipboy-art {
     height: auto;
     text-align: center;
     color: $accent;
     text-style: bold;
-}
-
-#pipboy-deco {
-    height: auto;
-    text-align: center;
-    color: $accent-darken-1;
-    padding: 1 0 0 0;
 }
 
 #pipboy-clock {
-    height: 4;
+    height: 3;
     text-align: center;
     color: $accent;
     text-style: bold;
     padding: 1 0 0 0;
-    border-top: hkey $accent-darken-2;
 }
 
 #side-status {

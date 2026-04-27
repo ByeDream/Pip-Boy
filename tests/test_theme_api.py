@@ -11,14 +11,15 @@ from pathlib import Path
 import pytest
 
 from pip_agent.tui.theme_api import (
-    ART_MAX_COLUMNS,
-    ART_MAX_ROWS,
+    ART_FRAME_MAX_COLS,
+    ART_FRAME_MAX_ROWS,
+    ART_FRAME_MIN_COLS,
     PALETTE_TOKENS,
     ThemeBundle,
     ThemeManifest,
     ThemePalette,
     ThemeValidationError,
-    clamp_art,
+    measure_art_block,
     validate_manifest_dict,
     validate_palette_dict,
 )
@@ -152,28 +153,29 @@ class TestManifestValidation:
 
 
 # ---------------------------------------------------------------------------
-# Art clamp
+# Art measurement
 # ---------------------------------------------------------------------------
 
 
-class TestClampArt:
-    def test_within_limits_unchanged(self) -> None:
-        art = "abc\n" * 4
-        clamped, truncated = clamp_art(art)
-        assert clamped == art.rstrip("\n")
-        assert truncated is False
+class TestMeasureArtBlock:
+    def test_empty_returns_zero(self) -> None:
+        assert measure_art_block("") == (0, 0)
 
-    def test_too_many_rows_dropped(self) -> None:
-        art = "x\n" * (ART_MAX_ROWS + 5)
-        clamped, truncated = clamp_art(art)
-        assert clamped.count("\n") == ART_MAX_ROWS - 1
-        assert truncated is True
+    def test_single_line(self) -> None:
+        w, h = measure_art_block("hello")
+        assert w == 5
+        assert h == 1
 
-    def test_too_wide_lines_truncated(self) -> None:
-        art = "y" * (ART_MAX_COLUMNS + 10)
-        clamped, truncated = clamp_art(art)
-        assert len(clamped) == ART_MAX_COLUMNS
-        assert truncated is True
+    def test_multiline_max_width(self) -> None:
+        w, h = measure_art_block("abc\nde\nfghij")
+        assert w == 5
+        assert h == 3
+
+    def test_bounds_constants_sane(self) -> None:
+        assert ART_FRAME_MIN_COLS < ART_FRAME_MAX_COLS
+        assert ART_FRAME_MIN_COLS == 50
+        assert ART_FRAME_MAX_COLS == 100
+        assert ART_FRAME_MAX_ROWS == 30
 
 
 # ---------------------------------------------------------------------------
@@ -182,23 +184,26 @@ class TestClampArt:
 
 
 class TestThemeBundle:
-    def test_bundle_carries_manifest_tcss_art_path(self) -> None:
+    def test_bundle_carries_manifest_tcss_frames_path(self) -> None:
         manifest = validate_manifest_dict(_full_manifest_dict())
         bundle = ThemeBundle(
             manifest=manifest,
             tcss="Screen { background: #000; }",
-            art="* * *",
+            art_frames=("* * *",),
+            art_frame_width=5,
+            art_frame_height=1,
             path=Path("/workspace/.pip/themes/wasteland"),
         )
         assert bundle.manifest.name == "wasteland"
         assert "background" in bundle.tcss
         assert bundle.path == Path("/workspace/.pip/themes/wasteland")
-        assert bundle.art_truncated is False
+        assert bundle.art_frames == ("* * *",)
+        assert bundle.art_frame_width == 5
 
     def test_bundle_is_frozen(self) -> None:
         manifest = validate_manifest_dict(_full_manifest_dict())
         bundle = ThemeBundle(
-            manifest=manifest, tcss="", art="", path=Path("/x"),
+            manifest=manifest, tcss="", path=Path("/x"),
         )
         with pytest.raises((AttributeError, TypeError)):
             bundle.tcss = "mutated"  # type: ignore[misc]

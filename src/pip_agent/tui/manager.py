@@ -27,20 +27,15 @@ module-level cache.
 from __future__ import annotations
 
 import logging
+import re as _re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
 from pip_agent.tui.theme_api import (
-    BANNER_MAX_COLUMNS,
-    BANNER_MAX_ROWS,
-    DECO_MAX_COLUMNS,
-    DECO_MAX_ROWS,
     ThemeBundle,
     ThemeValidationError,
-    clamp_art,
-    clamp_banner,
-    clamp_deco,
+    measure_art_block,
     validate_manifest_dict,
 )
 
@@ -92,6 +87,9 @@ class ThemeLoadIssue:
     """Human-readable explanation; trimmed for log noise."""
 
 
+_ART_FRAME_RE = _re.compile(r"^ascii_art_(\d+)\.txt$")
+
+
 def load_theme_bundle(theme_dir: Path) -> ThemeBundle:
     """Load and validate one theme directory into a :class:`ThemeBundle`.
 
@@ -108,9 +106,6 @@ def load_theme_bundle(theme_dir: Path) -> ThemeBundle:
     name = theme_dir.name
     manifest_path = theme_dir / "theme.toml"
     tcss_path = theme_dir / "theme.tcss"
-    art_path = theme_dir / "art.txt"
-    banner_path = theme_dir / "banner.txt"
-    deco_path = theme_dir / "deco.txt"
 
     if not manifest_path.is_file():
         raise ThemeValidationError(
@@ -129,57 +124,36 @@ def load_theme_bundle(theme_dir: Path) -> ThemeBundle:
 
     tcss = tcss_path.read_text(encoding="utf-8") if tcss_path.exists() else ""
 
-    # Art assets: banner / deco are the v2 split; art.txt is the legacy
-    # single block kept for backward compatibility. If a theme supplies
-    # neither banner.txt nor art.txt the banner slot stays empty — the
-    # TUI renders a blank top strip rather than error.
-    art_text = ""
-    art_truncated = False
-    if manifest.show_art and art_path.exists():
-        raw_art = art_path.read_text(encoding="utf-8")
-        art_text, art_truncated = clamp_art(raw_art)
-        if art_truncated:
-            log.warning(
-                "Theme '%s' art exceeds %dx%d limit; truncated.",
-                name, 32, 8,
-            )
+    art_frames: list[str] = []
+    if manifest.show_art:
+        frame_entries = sorted(
+            (
+                (int(_ART_FRAME_RE.match(p.name).group(1)), p)  # type: ignore[union-attr]
+                for p in theme_dir.iterdir()
+                if _ART_FRAME_RE.match(p.name)
+            ),
+            key=lambda t: t[0],
+        )
+        for _, fp in frame_entries:
+            art_frames.append(fp.read_text(encoding="utf-8").rstrip("\n"))
 
-    banner_text = ""
-    banner_truncated = False
-    if manifest.show_art and banner_path.exists():
-        raw_banner = banner_path.read_text(encoding="utf-8")
-        banner_text, banner_truncated = clamp_banner(raw_banner)
-        if banner_truncated:
-            log.warning(
-                "Theme '%s' banner exceeds %dx%d limit; truncated.",
-                name, BANNER_MAX_COLUMNS, BANNER_MAX_ROWS,
-            )
-    elif manifest.show_art and art_text:
-        # Legacy theme: fall back to art.txt so the top strip has
-        # something to draw without forcing theme authors to rename.
-        banner_text = art_text
-
-    deco_text = ""
-    deco_truncated = False
-    if manifest.show_art and deco_path.exists():
-        raw_deco = deco_path.read_text(encoding="utf-8")
-        deco_text, deco_truncated = clamp_deco(raw_deco)
-        if deco_truncated:
-            log.warning(
-                "Theme '%s' deco exceeds %dx%d limit; truncated.",
-                name, DECO_MAX_COLUMNS, DECO_MAX_ROWS,
-            )
+    # Measure max dimensions across all frames.
+    art_frame_width = 0
+    art_frame_height = 0
+    for frame in art_frames:
+        w, h = measure_art_block(frame)
+        if w > art_frame_width:
+            art_frame_width = w
+        if h > art_frame_height:
+            art_frame_height = h
 
     return ThemeBundle(
         manifest=manifest,
         tcss=tcss,
-        art=art_text,
-        banner=banner_text,
-        deco=deco_text,
-        path=theme_dir,
-        art_truncated=art_truncated,
-        banner_truncated=banner_truncated,
-        deco_truncated=deco_truncated,
+        art_frames=tuple(art_frames),
+        art_frame_width=art_frame_width,
+        art_frame_height=art_frame_height,
+        path=theme_dir.resolve(),
     )
 
 

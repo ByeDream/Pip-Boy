@@ -2685,12 +2685,14 @@ def _bootstrap_tui(
             bundle = theme_manager.resolve(active_theme_name)
             app = PipBoyTuiApp(
                 theme=bundle, pump=pump, on_user_line=_tui_on_user_line,
+                art_anim_interval=settings.art_anim_interval,
             )
         else:
             app, _ = build_app(
                 theme_name=active_theme_name or "wasteland",
                 pump=pump,
                 on_user_line=_tui_on_user_line,
+                art_anim_interval=settings.art_anim_interval,
             )
         install_pump(pump)
 
@@ -2701,15 +2703,18 @@ def _bootstrap_tui(
         # is the source of "log spew corrupts the TUI" reports
         # (PipBoyCLITheme/design.md §7).
         root_logger = logging.getLogger()
-        original_level = root_logger.level or logging.WARNING
         for h in list(root_logger.handlers):
             if (
                 isinstance(h, logging.StreamHandler)
                 and getattr(h, "stream", None) is sys.stdout
             ):
                 root_logger.removeHandler(h)
-        log_handler = TuiLogHandler(pump, level=original_level)
-        log_handler.setLevel(original_level)
+        # Handler stays at NOTSET so whatever each emitting logger allows
+        # through (pip_agent INFO under quiet, DEBUG under VERBOSE) lands
+        # in the panel. Pinning the handler to root's level would drop
+        # pip_agent INFO records under VERBOSE=false and leave the pane
+        # empty during healthy runs.
+        log_handler = TuiLogHandler(pump)
         root_logger.addHandler(log_handler)
         return app, pump, log_handler
     except Exception:  # noqa: BLE001 — broad: TUI must never block host boot

@@ -78,6 +78,7 @@ def build_app(
     theme_name: str = "wasteland",
     pump: UiPump | None = None,
     on_user_line: UserLineHandler | None = None,
+    art_anim_interval: float = 3.0,
 ) -> tuple[PipBoyTuiApp, UiPump]:
     """Build (but do NOT run) a :class:`PipBoyTuiApp`.
 
@@ -90,7 +91,10 @@ def build_app(
     bundle = load_builtin_theme(theme_name)
     if pump is None:
         pump = UiPump()
-    app = PipBoyTuiApp(theme=bundle, pump=pump, on_user_line=on_user_line)
+    app = PipBoyTuiApp(
+        theme=bundle, pump=pump, on_user_line=on_user_line,
+        art_anim_interval=art_anim_interval,
+    )
     return app, pump
 
 

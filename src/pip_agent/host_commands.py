@@ -1883,7 +1883,11 @@ def _theme_list(ctx: CommandContext, _tail: list[str]) -> CommandResult:
     lines = [f"Themes ({len(bundles)}):"]
     for bundle in bundles:
         marker = " *" if bundle.manifest.name == ctx.active_theme_name else ""
-        truncated = " (art truncated)" if bundle.art_truncated else ""
+        has_art = bool(bundle.art_frames)
+        truncated = (
+            f" ({bundle.art_frame_height}x{bundle.art_frame_width} art)"
+            if has_art else ""
+        )
         lines.append(
             f"  {bundle.manifest.name}{marker}"
             f" — {bundle.manifest.display_name}"

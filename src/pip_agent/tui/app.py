@@ -10,10 +10,9 @@ Layout:
         ├── #agent-pane          1fr — model dialog + input
         │   ├── #agent-log
         │   └── #input
-        └── #side-pane           fixed 34 cols — banner / status / log
-            ├── #side-top        auto height (banner + deco + clock)
-            │   ├── #pipboy-banner
-            │   ├── #pipboy-deco
+        └── #side-pane           adaptive width (min 50, max 100 cols)
+            ├── #side-top        auto height (art + clock)
+            │   ├── #pipboy-art
             │   └── #pipboy-clock
             ├── #side-status     auto height (snapshot of host state)
             └── #app-log         1fr — stdlib log mirror
@@ -24,9 +23,9 @@ or writes to ``sys.stdout`` directly; everything goes through
 widgets.
 
 The topology above is considered stable — themes can hide widgets
-via the manifest's ``show_*`` flags and swap the contents of
-``banner`` / ``deco`` / ``art``, but cannot rearrange or add/remove
-containers. Snapshot baselines guard the structural shape.
+via the manifest's ``show_*`` flags and swap ``ascii_art_*.txt``
+frames, but cannot rearrange or add/remove containers. Snapshot
+baselines guard the structural shape.
 """
 
 from __future__ import annotations
@@ -116,6 +115,7 @@ class PipBoyTuiApp(App[None]):
         on_user_line: UserLineHandler | None = None,
         clock_provider: ClockProvider | None = None,
         initial_side_snapshot: dict[str, str] | None = None,
+        art_anim_interval: float = 3.0,
     ) -> None:
         # The TCSS file isn't reachable from the package data path at
         # ``CSS_PATH`` time (Textual reads it before mount); we attach
@@ -128,6 +128,11 @@ class PipBoyTuiApp(App[None]):
         self._on_user_line = on_user_line
         self._clock_provider = clock_provider
         self._side_snapshot: dict[str, str] = dict(initial_side_snapshot or {})
+
+        # Art animation state.
+        self._art_frames: tuple[str, ...] = theme.art_frames
+        self._art_frame_idx: int = 0
+        self._art_anim_interval: float = art_anim_interval
 
         # Map ``theme.toml`` palette onto Textual's design tokens. Without
         # this, ``$accent`` / ``$surface`` resolve from ``textual-dark``
@@ -233,18 +238,15 @@ class PipBoyTuiApp(App[None]):
             # content the theme wants visible. A theme that disables
             # both show_art and show_app_log effectively hides the
             # pane entirely.
-            side_has_art = manifest.show_art and (
-                self._theme.banner or self._theme.deco or self._theme.art
-            )
+            side_has_art = manifest.show_art and bool(self._art_frames)
             side_visible = bool(side_has_art or manifest.show_app_log)
             if side_visible:
                 with Vertical(id="side-pane"):
                     with Vertical(id="side-top"):
                         yield Static(
-                            self._theme.banner or self._theme.art,
-                            id="pipboy-banner",
+                            self._art_frames[0] if self._art_frames else "",
+                            id="pipboy-art",
                         )
-                        yield Static(self._theme.deco, id="pipboy-deco")
                         yield Static(
                             self._render_clock(), id="pipboy-clock"
                         )
@@ -276,11 +278,37 @@ class PipBoyTuiApp(App[None]):
         except Exception:  # pragma: no cover — input always present in v1
             pass
 
+        # Side-pane width: clamp(art_frame_width + 3, 50, 100).
+        # +3 covers the pane's chrome: 1 col for `border-left: vkey` plus
+        # 2 cols for `padding: 0 1`. With +2 the widest art line overflows
+        # by 1 cell and Textual wraps the trailing border char to a new row.
+        try:
+            pane = self.query_one("#side-pane")
+            pane.styles.width = max(50, min(100, self._theme.art_frame_width + 3))
+        except Exception:
+            pass
+
+        # Art widget height: min(art_frame_height + 2, 30) — no lower
+        # bound, so small art (e.g. 12 rows) sits in a 14-row frame
+        # instead of floating in a 40-row empty block.
+        try:
+            art_h = min(30, self._theme.art_frame_height + 2)
+            art_widget = self.query_one("#pipboy-art", Static)
+            art_widget.styles.height = art_h
+            if self._art_frames:
+                art_widget.update(self._center_art(self._art_frames[0], art_h))
+        except Exception:
+            pass
+
         # The clock repaints once per second. Snapshot scenarios pass
         # a frozen ``clock_provider`` so the baseline is deterministic;
         # in that mode we still run ``set_interval`` but the provider
         # keeps returning the same datetime, so the text never changes.
         self.set_interval(1.0, self._tick_clock)
+
+        # Art animation: only start if there are multiple frames.
+        if len(self._art_frames) > 1:
+            self.set_interval(self._art_anim_interval, self._tick_art)
 
     # ------------------------------------------------------------------
     # Pump message handlers
@@ -499,35 +527,32 @@ class PipBoyTuiApp(App[None]):
             side_pane = None
         if side_pane is not None:
             side_pane.display = bool(
-                m.show_app_log or (m.show_art and (
-                    bundle.banner or bundle.art or bundle.deco
-                ))
+                m.show_app_log or (m.show_art and bool(bundle.art_frames))
             )
 
     def _apply_art(self, bundle: ThemeBundle) -> None:
-        """Refresh banner + deco content for the new bundle.
-
-        Legacy ``#pipboy-art`` is gone; its content is now split across
-        ``#pipboy-banner`` (replaces the full banner slot) and
-        ``#pipboy-deco`` (new decoration slot). Themes that still ship
-        only ``art.txt`` land in the banner slot via the loader's
-        fallback.
-        """
+        """Refresh ``#pipboy-art`` and resize side-pane for the new bundle."""
         m = bundle.manifest
-        show_art = bool(m.show_art)
-        banner_text = bundle.banner or (bundle.art if show_art else "")
-        deco_text = bundle.deco if show_art else ""
+        frames = bundle.art_frames if m.show_art else ()
+        self._art_frames = frames
+        self._art_frame_idx = 0
 
-        for widget_id, text in (
-            ("#pipboy-banner", banner_text),
-            ("#pipboy-deco", deco_text),
-        ):
-            try:
-                widget = self.query_one(widget_id, Static)
-            except Exception:
-                continue
-            widget.update(text)
-            widget.display = bool(text)
+        art_h = min(30, bundle.art_frame_height + 2)
+        try:
+            art_widget = self.query_one("#pipboy-art", Static)
+            art_widget.styles.height = art_h
+            art_widget.update(
+                self._center_art(frames[0], art_h) if frames else ""
+            )
+            art_widget.display = bool(frames)
+        except Exception:
+            pass
+
+        try:
+            pane = self.query_one("#side-pane")
+            pane.styles.width = max(50, min(100, bundle.art_frame_width + 3))
+        except Exception:
+            pass
 
     def _apply_status_bar_text(self, bundle: ThemeBundle) -> None:
         """Reset the status bar's default text to the new theme's name.
@@ -629,6 +654,31 @@ class PipBoyTuiApp(App[None]):
     # ------------------------------------------------------------------
     # Clock & side-status rendering
     # ------------------------------------------------------------------
+
+    def _center_art(self, frame: str, widget_height: int) -> str:
+        """Return ``frame`` vertically centered within ``widget_height`` rows.
+
+        Adds blank lines above and below so the art floats in the middle
+        of the fixed-height ``#pipboy-art`` widget. Horizontal centering
+        is handled by ``text-align: center`` in TCSS.
+        """
+        lines = frame.splitlines()
+        top = (widget_height - len(lines)) // 2
+        bottom = widget_height - len(lines) - top
+        return "\n".join([""] * top + lines + [""] * bottom)
+
+    def _tick_art(self) -> None:
+        """Animation callback — advance to the next art frame."""
+        if not self._art_frames:
+            return
+        self._art_frame_idx = (self._art_frame_idx + 1) % len(self._art_frames)
+        try:
+            widget = self.query_one("#pipboy-art", Static)
+            art_h = widget.styles.height
+            h = int(art_h.value) if art_h and art_h.value else self._theme.art_frame_height + 2
+            widget.update(self._center_art(self._art_frames[self._art_frame_idx], h))
+        except Exception:
+            pass
 
     def _now(self) -> datetime:
         """Return the current time. Tests inject a frozen provider."""

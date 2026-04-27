@@ -202,7 +202,11 @@ def _print_themes(out: TextIO, *, workdir: Path) -> None:
         out.write("    (none)\n")
     for bundle in bundles:
         marker = " *" if bundle.manifest.name == requested else ""
-        truncated = " (art truncated)" if bundle.art_truncated else ""
+        has_art = bool(bundle.art_frames)
+        truncated = (
+            f" ({bundle.art_frame_height}x{bundle.art_frame_width} art)"
+            if has_art else ""
+        )
         out.write(
             f"    {bundle.manifest.name}{marker} — "
             f"{bundle.manifest.display_name} v{bundle.manifest.version}"

@@ -78,6 +78,10 @@ class Settings(BaseSettings):
     # every turn back to the one-shot path (useful for A/B comparison).
     enable_streaming_session: bool = Field(default=True)
 
+    # Interval (seconds) between ASCII art animation frame advances.
+    # Set to 0 to disable animation (single-frame themes are unaffected).
+    art_anim_interval: float = Field(default=3.0)
+
     # Idle-eviction window for cached streaming clients, in seconds.
     # Sweep runs on the host scheduler; clients idle longer than this
     # are disconnected to (a) free ~25 MB RSS per stale ``claude.exe``
