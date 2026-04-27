@@ -2504,7 +2504,7 @@ def _banner_transports(
     return names
 
 
-def _emit_boot_side_status(
+def _build_side_snapshot(
     *,
     host: "AgentHost",
     registry: "AgentRegistry",
@@ -2512,95 +2512,116 @@ def _emit_boot_side_status(
     scheduler: "Any",
     active_theme_name: str,
     theme_manager: "Any",
-) -> None:
-    """Build the initial ``#side-status`` snapshot and push it to the TUI.
+    boot_time: float,
+) -> dict[str, str]:
+    """Snapshot local host state for the ``#side-status`` panel.
 
-    Reads from the host's service objects (registry / scheduler /
-    memory_store / theme_manager / channel_mgr) and ships a single
-    ``side_status_snapshot`` through the pump. Called once, right
-    after ``emit_banner`` in :func:`run_host`.
+    Called at bootstrap to seed the initial render, and again by the
+    App's ``set_interval`` tick every few seconds so values that move
+    (cron count, memory obs, last reflect, uptime) refresh in place.
+    Each field is wrapped in try/except so a flaky sub-system (e.g.
+    scheduler mid-restart) doesn't take down the entire panel — the
+    field falls back to ``"—"`` and neighbouring fields still paint.
 
-    Best-effort: wrapped in a top-level try/except so a failure
-    anywhere (including unit-test stubs that don't implement the full
-    registry / scheduler protocol) never blocks boot. Individual
-    fields that fail fall back to ``"—"``.
+    Returns ``dict[str, str]`` with keys ``agent``, ``model``,
+    ``chans``, ``theme``, ``memory``, ``reflect``, ``dream``, ``cron``,
+    ``uptime``. The App's renderer tolerates missing keys.
     """
+    from datetime import UTC, datetime
+
+    from pip_agent.models import primary_model
+
+    def _rel_time(ts: float | None) -> str:
+        if not ts:
+            return "—"
+        delta = time.time() - float(ts)
+        if delta < 0:
+            return "just now"
+        if delta < 60:
+            return f"{int(delta)}s ago"
+        if delta < 3600:
+            return f"{int(delta // 60)}m ago"
+        if delta < 86400:
+            return f"{int(delta // 3600)}h ago"
+        return datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%d")
+
     try:
-        from datetime import datetime
-
-        from pip_agent.host_io import emit_side_status_snapshot
-        from pip_agent.models import primary_model
-
-        try:
-            default_agent = registry.default_agent()
-        except Exception:  # noqa: BLE001
-            default_agent = None
-
-        agent_name = "—"
-        tier = "t0"
-        if default_agent is not None:
-            agent_name = (
-                getattr(default_agent, "name", None)
-                or getattr(default_agent, "id", None)
-                or "—"
-            )
-            tier = getattr(default_agent, "tier", None) or "t0"
-
-        try:
-            resolved_model = primary_model(tier)  # type: ignore[arg-type]
-        except Exception:  # noqa: BLE001
-            resolved_model = None
-        model_display = (
-            f"{tier} · {resolved_model}" if resolved_model else f"{tier} · (unset)"
-        )
-
-        memory_display = "—"
-        if default_agent is not None:
-            try:
-                svc = host._get_agent_services(default_agent.id)  # noqa: SLF001
-                mem_stats = svc.memory_store.stats()
-                memory_display = (
-                    f"{mem_stats.get('observations', 0)} obs · "
-                    f"{mem_stats.get('memories', 0)} mems"
-                )
-            except Exception:  # noqa: BLE001
-                pass
-
-        try:
-            jobs = scheduler.list_jobs()
-            cron_display = f"{len(jobs)} jobs"
-        except Exception:  # noqa: BLE001
-            cron_display = "—"
-
-        try:
-            active_bundle = theme_manager.resolve(active_theme_name)
-            theme_display = (
-                f"{active_bundle.manifest.display_name} "
-                f"v{active_bundle.manifest.version}"
-            )
-        except Exception:  # noqa: BLE001
-            theme_display = active_theme_name or "—"
-
-        try:
-            channels_display = ", ".join(channel_mgr.list_channels()) or "none"
-        except Exception:  # noqa: BLE001
-            channels_display = "—"
-
-        boot_time = datetime.now().strftime("%H:%M")
-
-        emit_side_status_snapshot({
-            "agent": agent_name,
-            "model": model_display,
-            "channels": channels_display,
-            "session": "new",
-            "theme": theme_display,
-            "memory": memory_display,
-            "cron": cron_display,
-            "uptime": f"boot {boot_time}",
-            "context": "—",
-        })
+        default_agent = registry.default_agent()
     except Exception:  # noqa: BLE001
-        log.exception("_emit_boot_side_status failed; skipping snapshot.")
+        default_agent = None
+
+    agent_name = "—"
+    tier: str = "t0"
+    if default_agent is not None:
+        agent_name = (
+            getattr(default_agent, "name", None)
+            or getattr(default_agent, "id", None)
+            or "—"
+        )
+        tier = getattr(default_agent, "tier", None) or "t0"
+
+    try:
+        resolved_model = primary_model(tier)  # type: ignore[arg-type]
+    except Exception:  # noqa: BLE001
+        resolved_model = None
+    model_display = (
+        f"{tier} · {resolved_model}" if resolved_model else f"{tier} · (unset)"
+    )
+
+    memory_display = "—"
+    reflect_display = "—"
+    dream_display = "—"
+    if default_agent is not None:
+        try:
+            svc = host._get_agent_services(default_agent.id)  # noqa: SLF001
+            mem_stats = svc.memory_store.stats()
+            memory_display = (
+                f"{mem_stats.get('observations', 0)} obs · "
+                f"{mem_stats.get('memories', 0)} mems"
+            )
+            state = svc.memory_store.load_state()
+            reflect_display = _rel_time(state.get("last_reflect_at"))
+            dream_display = _rel_time(state.get("last_dream_at"))
+        except Exception:  # noqa: BLE001
+            pass
+
+    try:
+        jobs = scheduler.list_jobs()
+        cron_display = f"{len(jobs)} jobs"
+    except Exception:  # noqa: BLE001
+        cron_display = "—"
+
+    try:
+        active_bundle = theme_manager.resolve(active_theme_name)
+        theme_display = (
+            f"{active_bundle.manifest.display_name} "
+            f"v{active_bundle.manifest.version}"
+        )
+    except Exception:  # noqa: BLE001
+        theme_display = active_theme_name or "—"
+
+    try:
+        channels_display = ", ".join(channel_mgr.list_channels()) or "none"
+    except Exception:  # noqa: BLE001
+        channels_display = "—"
+
+    elapsed = max(0.0, time.time() - boot_time)
+    if elapsed < 3600:
+        uptime_display = f"{int(elapsed // 60)}m {int(elapsed % 60):02d}s"
+    else:
+        uptime_display = f"{int(elapsed // 3600)}h {int((elapsed % 3600) // 60):02d}m"
+
+    return {
+        "agent": agent_name,
+        "model": model_display,
+        "chans": channels_display,
+        "theme": theme_display,
+        "memory": memory_display,
+        "reflect": reflect_display,
+        "dream": dream_display,
+        "cron": cron_display,
+        "uptime": uptime_display,
+    }
 
 
 def _bootstrap_tui(
@@ -2611,6 +2632,8 @@ def _bootstrap_tui(
     q_lock: threading.Lock,
     theme_manager: "Any | None" = None,
     active_theme_name: str = "",
+    initial_side_snapshot: dict[str, str] | None = None,
+    snapshot_provider: "Callable[[], dict[str, str]] | None" = None,
 ) -> tuple[Any | None, Any | None, Any | None]:
     """Run the TUI capability ladder and, on success, build the App + pump.
 
@@ -2686,6 +2709,8 @@ def _bootstrap_tui(
             app = PipBoyTuiApp(
                 theme=bundle, pump=pump, on_user_line=_tui_on_user_line,
                 art_anim_interval=settings.art_anim_interval,
+                initial_side_snapshot=initial_side_snapshot,
+                snapshot_provider=snapshot_provider,
             )
         else:
             app, _ = build_app(
@@ -2693,6 +2718,8 @@ def _bootstrap_tui(
                 pump=pump,
                 on_user_line=_tui_on_user_line,
                 art_anim_interval=settings.art_anim_interval,
+                initial_side_snapshot=initial_side_snapshot,
+                snapshot_provider=snapshot_provider,
             )
         install_pump(pump)
 
@@ -2966,6 +2993,25 @@ def run_host(*, force_no_tui: bool = False) -> None:
     # banner is routed through the pump rather than printed onto a
     # canvas the App is about to take over.
     # ------------------------------------------------------------------
+    boot_time = time.time()
+
+    def _snapshot_provider() -> dict[str, str]:
+        return _build_side_snapshot(
+            host=host,
+            registry=registry,
+            channel_mgr=channel_mgr,
+            scheduler=scheduler,
+            active_theme_name=active_theme_name,
+            theme_manager=theme_manager,
+            boot_time=boot_time,
+        )
+
+    try:
+        initial_snapshot = _snapshot_provider()
+    except Exception:  # noqa: BLE001
+        log.exception("Initial side-status snapshot build failed.")
+        initial_snapshot = {}
+
     tui_app, tui_pump, tui_log_handler = _bootstrap_tui(
         workdir=WORKDIR,
         force_no_tui=force_no_tui,
@@ -2973,6 +3019,8 @@ def run_host(*, force_no_tui: bool = False) -> None:
         q_lock=q_lock,
         theme_manager=theme_manager,
         active_theme_name=active_theme_name,
+        initial_side_snapshot=initial_snapshot,
+        snapshot_provider=_snapshot_provider,
     )
     host.set_tui_app(tui_app)
 
@@ -2991,21 +3039,6 @@ def run_host(*, force_no_tui: bool = False) -> None:
         f"  Channels: {', '.join(banner_transports) if banner_transports else 'none'}\n"
         f"  Agents: {agents_list}\n"
         "============================================"
-    )
-
-    # One-shot #side-status snapshot: this is the only push Pip-Boy
-    # makes into the side panel. Per plan decision Q2=C, mid-session
-    # updates (channel lost, memory write, cron change) are
-    # deliberately NOT wired — the panel is a boot-time snapshot, not
-    # a live dashboard. The ``context`` field stays as "—" until the
-    # Phase-5 silent /context query ships.
-    _emit_boot_side_status(
-        host=host,
-        registry=registry,
-        channel_mgr=channel_mgr,
-        scheduler=scheduler,
-        active_theme_name=active_theme_name,
-        theme_manager=theme_manager,
     )
 
     # The scheduler and all remote channels push into ``msg_queue``, so the

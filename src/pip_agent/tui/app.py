@@ -62,6 +62,13 @@ UserLineHandler = Callable[[str], Awaitable[None] | None]
 # :func:`datetime.now`.
 ClockProvider = Callable[[], datetime]
 
+# Type alias for the periodic #side-status snapshot refresher. The
+# App re-invokes this every ``snapshot_refresh_interval`` seconds and
+# merges the returned dict into its cached snapshot. Returning ``{}``
+# leaves the current view intact; returning a partial dict updates
+# only the named fields.
+SnapshotProvider = Callable[[], dict[str, str]]
+
 
 def _rich_log_strip_tail(log_widget: RichLog, n: int) -> None:
     """Remove the last ``n`` rendered strips and fix RichLog geometry.
@@ -115,6 +122,8 @@ class PipBoyTuiApp(App[None]):
         on_user_line: UserLineHandler | None = None,
         clock_provider: ClockProvider | None = None,
         initial_side_snapshot: dict[str, str] | None = None,
+        snapshot_provider: SnapshotProvider | None = None,
+        snapshot_refresh_interval: float = 5.0,
         art_anim_interval: float = 3.0,
     ) -> None:
         # The TCSS file isn't reachable from the package data path at
@@ -128,6 +137,8 @@ class PipBoyTuiApp(App[None]):
         self._on_user_line = on_user_line
         self._clock_provider = clock_provider
         self._side_snapshot: dict[str, str] = dict(initial_side_snapshot or {})
+        self._snapshot_provider = snapshot_provider
+        self._snapshot_refresh_interval = snapshot_refresh_interval
 
         # Art animation state.
         self._art_frames: tuple[str, ...] = theme.art_frames
@@ -310,6 +321,15 @@ class PipBoyTuiApp(App[None]):
         if len(self._art_frames) > 1:
             self.set_interval(self._art_anim_interval, self._tick_art)
 
+        # #side-status: one-shot refresh from the provider right away
+        # (so the first render reflects live state, not the frozen
+        # bootstrap dict) + periodic refresh thereafter.
+        if self._snapshot_provider is not None:
+            self._tick_side_status()
+            self.set_interval(
+                self._snapshot_refresh_interval, self._tick_side_status,
+            )
+
     # ------------------------------------------------------------------
     # Pump message handlers
     # ------------------------------------------------------------------
@@ -383,14 +403,6 @@ class PipBoyTuiApp(App[None]):
     def on_status_message(self, message: StatusMessage) -> None:
         """Render one status-bar update."""
         event = message.event
-        if event.kind == "side_status_snapshot":
-            # Merge into the cached snapshot so partial updates from
-            # individual emitters (one pushes memory counts, another
-            # pushes channel list) compose into one view rather than
-            # overwriting fields they don't know about.
-            self._side_snapshot.update(event.fields)
-            self._refresh_side_status()
-            return
         if event.kind in {"banner", "ready", "channel_ready", "scheduler"}:
             text = event.text
         elif event.kind == "channel_lost":
@@ -711,42 +723,40 @@ class PipBoyTuiApp(App[None]):
         """Format the cached snapshot dict into the status panel body.
 
         Empty snapshot → a placeholder block so the TUI doesn't show a
-        blank slab during the ~1s between mount and the first emitter
-        firing.
+        blank slab during the ~1s between mount and the first provider
+        tick.
+
+        Output uses Textual/Rich markup: ``[bold]LABEL[/]`` for field
+        names, ``[dim]│[/]`` for the separator. The hosting ``Static``
+        widget has ``markup=True`` by default.
         """
         s = self._side_snapshot
         if not s:
             return (
-                " STATUS\n"
-                " ─────\n"
-                "  initializing…"
+                "[bold]STATUS[/]\n"
+                "[dim]─────[/]\n"
+                "[dim]initializing…[/]"
             )
 
-        def row(label: str, value: str) -> str:
-            return f"  {label:<8}: {value}"
-
-        lines: list[str] = [
-            " STATUS",
-            " ─────",
-        ]
-        if "agent" in s:
-            lines.append(row("AGENT", s["agent"]))
-        if "model" in s:
-            lines.append(row("MODEL", s["model"]))
-        if "channels" in s:
-            lines.append(row("CHANS", s["channels"]))
-        if "session" in s:
-            lines.append(row("SESSION", s["session"]))
-        if "theme" in s:
-            lines.append(row("THEME", s["theme"]))
-        if "memory" in s:
-            lines.append(row("MEMORY", s["memory"]))
-        if "cron" in s:
-            lines.append(row("CRON", s["cron"]))
-        if "context" in s:
-            lines.append(row("CONTEXT", s["context"]))
-        if "uptime" in s:
-            lines.append(row("UPTIME", s["uptime"]))
+        # Ordered so the "what am I / where am I" fields come first and
+        # the time-sensitive telemetry (reflect / cron / uptime) follow.
+        ordered: tuple[tuple[str, str], ...] = (
+            ("agent", "AGENT"),
+            ("model", "MODEL"),
+            ("chans", "CHANS"),
+            ("theme", "THEME"),
+            ("memory", "MEMORY"),
+            ("reflect", "REFLECT"),
+            ("dream", "DREAM"),
+            ("cron", "CRON"),
+            ("uptime", "UPTIME"),
+        )
+        lines: list[str] = ["[bold]STATUS[/]", "[dim]─────[/]"]
+        for key, label in ordered:
+            value = s.get(key)
+            if value is None or value == "":
+                continue
+            lines.append(f"[bold]{label:<7}[/] [dim]│[/] {value}")
         return "\n".join(lines)
 
     def _refresh_side_status(self) -> None:
@@ -756,3 +766,22 @@ class PipBoyTuiApp(App[None]):
         except Exception:
             return
         widget.update(self._render_side_status())
+
+    def _tick_side_status(self) -> None:
+        """``set_interval`` callback — pull fresh fields and repaint.
+
+        The provider is best-effort: any exception is swallowed so a
+        flaky data source (e.g. scheduler mid-restart) never crashes
+        the TUI loop. An empty dict is a valid return — the cached
+        snapshot keeps whatever it had.
+        """
+        if self._snapshot_provider is None:
+            return
+        try:
+            fields = self._snapshot_provider()
+        except Exception:
+            return
+        if not fields:
+            return
+        self._side_snapshot.update(fields)
+        self._refresh_side_status()

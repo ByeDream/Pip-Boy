@@ -30,7 +30,7 @@ import logging
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from pip_agent.tui.app import PipBoyTuiApp, UserLineHandler
+from pip_agent.tui.app import PipBoyTuiApp, SnapshotProvider, UserLineHandler
 from pip_agent.tui.capability import (
     CapabilityResult,
     detect_tui_capability,
@@ -79,6 +79,8 @@ def build_app(
     pump: UiPump | None = None,
     on_user_line: UserLineHandler | None = None,
     art_anim_interval: float = 3.0,
+    initial_side_snapshot: dict[str, str] | None = None,
+    snapshot_provider: SnapshotProvider | None = None,
 ) -> tuple[PipBoyTuiApp, UiPump]:
     """Build (but do NOT run) a :class:`PipBoyTuiApp`.
 
@@ -94,6 +96,8 @@ def build_app(
     app = PipBoyTuiApp(
         theme=bundle, pump=pump, on_user_line=on_user_line,
         art_anim_interval=art_anim_interval,
+        initial_side_snapshot=initial_side_snapshot,
+        snapshot_provider=snapshot_provider,
     )
     return app, pump
 

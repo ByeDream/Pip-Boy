@@ -46,7 +46,6 @@ __all__ = [
     "emit_channel_ready",
     "emit_ready",
     "emit_shutdown",
-    "emit_side_status_snapshot",
     "emit_status",
     "install_pump",
     "is_tui_active",
@@ -152,32 +151,6 @@ def emit_shutdown(text: str) -> None:
         _PUMP.agent_sink(AgentEvent(kind="markdown", text=f"_{text}_"))  # type: ignore[union-attr]
         return
     print(f"  {text}")
-
-
-def emit_side_status_snapshot(fields: dict[str, str]) -> None:
-    """Push a ``#side-status`` refresh into the TUI.
-
-    ``fields`` merges into the cached snapshot on the App side — so a
-    caller that only knows about (say) the channel list can push just
-    ``{"channels": "cli, wecom"}`` and the model/memory/cron fields
-    stay untouched. Line mode drops the call silently; there's no
-    line-mode equivalent of the side panel.
-
-    Emitted at boot after all channels / scheduler / memory are up.
-    Subsequent events (channel lost, theme swap, memory write) are
-    free to call this again with partial dicts; the cumulative view
-    is what's rendered.
-    """
-    if not is_tui_active():
-        return
-    # Coerce everything to str: StatusEvent.fields is typed as
-    # ``dict[str, str]`` and callers pass counts / percentages as
-    # ints/floats. Doing the conversion here keeps every call site
-    # from repeating the pattern.
-    str_fields = {k: str(v) for k, v in fields.items()}
-    _PUMP.status_sink(  # type: ignore[union-attr]
-        StatusEvent(kind="side_status_snapshot", fields=str_fields)
-    )
 
 
 # ---------------------------------------------------------------------------

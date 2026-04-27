@@ -71,7 +71,6 @@ STATUS_EVENT_KINDS: frozenset[str] = frozenset(
         "scheduler",             # cron / heartbeat tick announcement
         "shutdown",              # "powering down" with reflect summary
         "ready",                 # "type and press Enter; /exit to quit"
-        "side_status_snapshot",  # full #side-status refresh (see StatusEvent.fields)
     }
 )
 

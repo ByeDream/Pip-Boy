@@ -25,13 +25,13 @@ _FROZEN = datetime(2077, 10, 23, 18, 56, 42)
 _SNAPSHOT = {
     "agent": "pip-boy",
     "model": "t0 · claude-opus-4-7",
-    "channels": "cli",
-    "session": "new",
+    "chans": "cli",
     "theme": "Wasteland Radiation v0.1.0",
     "memory": "12 obs · 3 mems",
+    "reflect": "5m ago",
+    "dream": "2h ago",
     "cron": "2 jobs",
-    "uptime": "boot 18:56",
-    "context": "—",
+    "uptime": "1m 23s",
 }
 
 _bundle = load_builtin_theme("wasteland")
