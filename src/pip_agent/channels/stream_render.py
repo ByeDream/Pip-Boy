@@ -27,6 +27,8 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any
 
+from pip_agent.tui.tool_format import format_tool_summary
+
 if TYPE_CHECKING:
     from pip_agent.channels.base import Channel
 
@@ -124,6 +126,28 @@ class WecomStreamRenderer:
                     await self._maybe_flush()
             elif event_type == "tool_use":
                 self._tool_count += 1
+                # Without a visible marker, successive text_delta bursts
+                # bracketing this tool call get concatenated into one
+                # opaque blob in the WeCom bubble — e.g. "Now update
+                # TCSSNow update on_agent_messageNow add tests". Inject
+                # a one-line trace into the body so the user can see
+                # the tool boundary + tool args and the bubble has
+                # something to paint while the tool executes (tools
+                # that block for seconds otherwise leave the bubble
+                # static and looking stuck).
+                name = str(kwargs.get("name", ""))
+                raw_input = kwargs.get("input")
+                tool_input = raw_input if isinstance(raw_input, dict) else None
+                summary = format_tool_summary(name, tool_input)
+                marker_inner = f"▸ {name} {summary}".rstrip() if summary else f"▸ {name}"
+                # Leading + trailing blank lines keep the marker from
+                # gluing to surrounding text_delta chunks even if the
+                # model's narration doesn't supply its own newlines.
+                self._body_parts.append(f"\n\n{marker_inner}\n\n")
+                # Force-flush past the 300 ms throttle so the marker
+                # surfaces immediately; without this the user watches
+                # the bubble freeze while the tool runs.
+                await self._do_flush(final=False)
             elif event_type == "finalize":
                 raw_elapsed = kwargs.get("elapsed_s")
                 try:
