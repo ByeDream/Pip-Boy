@@ -45,6 +45,7 @@ from textual.geometry import Size
 from textual.widgets import Input, RichLog, Static
 
 from pip_agent.tui.messages import AgentMessage, LogMessage, StatusMessage
+from pip_agent.tui.modals import AskUserModal, PlanReviewModal
 from pip_agent.tui.pump import UiPump
 from pip_agent.tui.sinks import AgentEvent
 from pip_agent.tui.textual_theme import textual_theme_from_bundle
@@ -442,6 +443,12 @@ class PipBoyTuiApp(App[None]):
             if detail:
                 target.write(Text(detail, style="bright_yellow"))
             target.write(Text(""))
+            # Interactive follow-up: for AskUserQuestion and
+            # ExitPlanMode, pop a modal so the user can actually answer
+            # / approve instead of staring at the dim trace. The modal
+            # result (if any) is injected back into the chat as a
+            # regular user_line — the agent sees it next turn.
+            self._maybe_trigger_tool_modal(event)
         elif event.kind == "markdown":
             self._flush_stream_buffer(log_widget)
             self._streaming_open = False
@@ -535,6 +542,93 @@ class PipBoyTuiApp(App[None]):
                 logging.getLogger(__name__).exception(
                     "on_user_line handler raised; suppressing to keep "
                     "TUI responsive."
+                )
+
+    # ------------------------------------------------------------------
+    # Interactive tool modals
+    # ------------------------------------------------------------------
+
+    def _maybe_trigger_tool_modal(self, event: AgentEvent) -> None:
+        """Push a modal for AskUserQuestion / ExitPlanMode tool_use events.
+
+        Dismissed result is forwarded via ``_forward_modal_result`` —
+        which routes it through ``_on_user_line`` so the next agent turn
+        receives the user's answer as a normal chat message. No SDK
+        permission round-trip; see ``OVERNIGHT_REPORT.md`` for rationale.
+
+        Modals are best-effort: if the App hasn't finished mounting yet
+        (``is_running`` False), or if ``push_screen`` raises for any
+        reason, the trace still landed in the detail pane — we just
+        don't interrupt the user with a modal in an unusable state.
+        """
+        if not getattr(self, "is_running", False):
+            return
+        if not isinstance(event.tool_input, dict) or not event.tool_input:
+            return
+        if event.name == "AskUserQuestion":
+            questions = event.tool_input.get("questions")
+            if not isinstance(questions, list) or not questions:
+                return
+            try:
+                self.push_screen(
+                    AskUserModal(questions),
+                    callback=self._forward_modal_result,
+                )
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "AskUserModal push failed; skipping.",
+                )
+        elif event.name == "ExitPlanMode":
+            plan = event.tool_input.get("plan")
+            if not isinstance(plan, str) or not plan.strip():
+                return
+            try:
+                self.push_screen(
+                    PlanReviewModal(plan),
+                    callback=self._forward_modal_result,
+                )
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "PlanReviewModal push failed; skipping.",
+                )
+
+    def _forward_modal_result(self, result: str | None) -> None:
+        """Modal callback — feed the answer into the chat via on_user_line.
+
+        ``None`` means the user cancelled (Esc); in that case we emit
+        a user_input event so the transcript still records that the
+        question was declined, but nothing is forwarded to the agent.
+        Non-empty answers run through the same path as typing in
+        ``#input``, so behaviour is identical from the host's POV.
+        """
+        if result is None:
+            try:
+                self._pump.agent_sink(
+                    AgentEvent(kind="user_input", text="(cancelled)")
+                )
+            except Exception:
+                pass
+            return
+        if not result.strip():
+            return
+        # Echo the answer into the dialog pane so the user sees what was
+        # sent, then forward it via the same handler the Input widget
+        # uses. The echo is cosmetic; the handler call is what actually
+        # drives the next agent turn.
+        try:
+            self._pump.agent_sink(
+                AgentEvent(kind="user_input", text=result)
+            )
+        except Exception:
+            pass
+        if self._on_user_line is not None:
+            try:
+                inner = self._on_user_line(result)
+                if inner is not None and hasattr(inner, "__await__"):
+                    self.run_worker(inner, exclusive=False)
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "modal on_user_line forwarder raised; suppressing.",
                 )
 
     # ------------------------------------------------------------------
