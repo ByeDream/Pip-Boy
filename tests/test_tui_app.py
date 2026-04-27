@@ -70,6 +70,7 @@ async def test_app_mounts_and_renders_locked_widget_ids() -> None:
         assert app.query_one("#main")
         assert app.query_one("#agent-pane")
         assert app.query_one("#agent-log")
+        assert app.query_one("#agent-log-detail")
         assert app.query_one("#input")
         assert app.query_one("#side-pane")
         assert app.query_one("#side-top")
@@ -382,3 +383,114 @@ async def test_non_plan_tool_events_do_not_touch_state() -> None:
         pump.agent_sink(AgentEvent(kind="tool_use", name="Grep"))
         await pilot.pause()
         assert app._plan_entered_at is None
+
+
+# ---------------------------------------------------------------------------
+# Agent pane split: #agent-log (dialog) vs #agent-log-detail (detail)
+# ---------------------------------------------------------------------------
+
+
+def _log_text(widget: RichLog) -> str:
+    """Flatten a RichLog's visible lines into plain text for assertions.
+
+    RichLog stores rendered ``Strip`` objects in ``.lines``; each strip
+    exposes a ``text`` property. We join strips with newlines so a
+    single assertion can check "substring appears anywhere in pane"
+    without caring which strip it landed on.
+    """
+    return "\n".join(getattr(line, "text", str(line)) for line in widget.lines)
+
+
+@pytest.mark.asyncio
+async def test_user_input_lands_in_dialog_not_detail() -> None:
+    bundle = load_builtin_theme("wasteland")
+    pump = UiPump()
+    app = PipBoyTuiApp(theme=bundle, pump=pump)
+    async with app.run_test() as pilot:
+        pump.agent_sink(AgentEvent(kind="user_input", text="hello"))
+        await pilot.pause()
+        dialog = _log_text(app.query_one("#agent-log", RichLog))
+        detail = _log_text(app.query_one("#agent-log-detail", RichLog))
+        assert "hello" in dialog
+        assert "hello" not in detail
+
+
+@pytest.mark.asyncio
+async def test_markdown_lands_in_dialog_not_detail() -> None:
+    bundle = load_builtin_theme("wasteland")
+    pump = UiPump()
+    app = PipBoyTuiApp(theme=bundle, pump=pump)
+    async with app.run_test() as pilot:
+        pump.agent_sink(AgentEvent(kind="markdown", text="Some text"))
+        await pilot.pause()
+        dialog = _log_text(app.query_one("#agent-log", RichLog))
+        detail = _log_text(app.query_one("#agent-log-detail", RichLog))
+        assert "Some text" in dialog
+        assert "Some text" not in detail
+
+
+@pytest.mark.asyncio
+async def test_tool_use_lands_in_detail_not_dialog() -> None:
+    bundle = load_builtin_theme("wasteland")
+    pump = UiPump()
+    app = PipBoyTuiApp(theme=bundle, pump=pump)
+    async with app.run_test() as pilot:
+        pump.agent_sink(AgentEvent(kind="tool_use", name="Bash"))
+        await pilot.pause()
+        dialog = _log_text(app.query_one("#agent-log", RichLog))
+        detail = _log_text(app.query_one("#agent-log-detail", RichLog))
+        assert "[tool: Bash]" in detail
+        assert "[tool: Bash]" not in dialog
+
+
+@pytest.mark.asyncio
+async def test_finalize_footer_lands_in_detail_not_dialog() -> None:
+    bundle = load_builtin_theme("wasteland")
+    pump = UiPump()
+    app = PipBoyTuiApp(theme=bundle, pump=pump)
+    async with app.run_test() as pilot:
+        pump.agent_sink(AgentEvent(kind="text_delta", text="hi"))
+        pump.agent_sink(AgentEvent(
+            kind="finalize", num_turns=1, cost_usd=0.001,
+            usage={"input_tokens": 10}, elapsed_s=1.5,
+        ))
+        await pilot.pause()
+        dialog = _log_text(app.query_one("#agent-log", RichLog))
+        detail = _log_text(app.query_one("#agent-log-detail", RichLog))
+        # Dialog still has the assistant reply.
+        assert "hi" in dialog
+        # Footer with turn/cost/elapsed metadata belongs in detail.
+        # Theme templates vary ("turn"/"turns", "$"/"cost") — match any
+        # signature that proves the footer rendered here.
+        assert "turn" in detail or "$" in detail or "1.5s" in detail
+
+
+@pytest.mark.asyncio
+async def test_error_lands_in_detail_not_dialog() -> None:
+    bundle = load_builtin_theme("wasteland")
+    pump = UiPump()
+    app = PipBoyTuiApp(theme=bundle, pump=pump)
+    async with app.run_test() as pilot:
+        pump.agent_sink(AgentEvent(kind="error", text="oops"))
+        await pilot.pause()
+        dialog = _log_text(app.query_one("#agent-log", RichLog))
+        detail = _log_text(app.query_one("#agent-log-detail", RichLog))
+        assert "oops" in detail
+        assert "oops" not in dialog
+
+
+@pytest.mark.asyncio
+async def test_clear_log_action_clears_both_panes() -> None:
+    bundle = load_builtin_theme("wasteland")
+    pump = UiPump()
+    app = PipBoyTuiApp(theme=bundle, pump=pump)
+    async with app.run_test() as pilot:
+        pump.agent_sink(AgentEvent(kind="user_input", text="user1"))
+        pump.agent_sink(AgentEvent(kind="tool_use", name="Bash"))
+        await pilot.pause()
+        app.action_clear_log()
+        await pilot.pause()
+        dialog = app.query_one("#agent-log", RichLog)
+        detail = app.query_one("#agent-log-detail", RichLog)
+        assert len(dialog.lines) == 0
+        assert len(detail.lines) == 0

@@ -8,7 +8,8 @@ Layout:
     ├── #status-bar              1 row, dock top
     └── #main                    horizontal flex
         ├── #agent-pane          1fr — model dialog + input
-        │   ├── #agent-log
+        │   ├── #agent-log         1fr — user input + assistant text
+        │   ├── #agent-log-detail  10 rows — thinking / tool / finalize
         │   └── #input
         └── #side-pane           adaptive width (min 50, max 100 cols)
             ├── #side-top        auto height (art + clock)
@@ -251,6 +252,14 @@ class PipBoyTuiApp(App[None]):
                     min_width=0,
                     auto_scroll=True,
                 )
+                yield RichLog(
+                    id="agent-log-detail",
+                    highlight=False,
+                    markup=True,
+                    wrap=True,
+                    min_width=0,
+                    auto_scroll=True,
+                )
                 yield Input(
                     placeholder="Type and press Enter — /exit to quit",
                     id="input",
@@ -345,23 +354,55 @@ class PipBoyTuiApp(App[None]):
     # ------------------------------------------------------------------
 
     def on_agent_message(self, message: AgentMessage) -> None:
-        """Render one agent-pane event."""
+        """Render one agent-pane event.
+
+        Two stacked panes:
+
+        * ``#agent-log`` — *dialog* pane. User input (right-aligned) +
+          assistant text + markdown + ``plain`` blocks. This is what
+          a first-time viewer should see; conversational back-and-forth
+          reads top-to-bottom without wading through internals.
+        * ``#agent-log-detail`` — *detail* strip (10 rows, below
+          dialog). Thinking deltas, tool traces, finalize footer,
+          error frames. Dim styling, scrolls independently. Users
+          who want to "see what the agent is doing" look down; users
+          who only care about the conversation ignore this region.
+
+        Each terminal emission is followed by a blank line so messages
+        are visually separated without a border on every row.
+        """
         try:
             log_widget = self.query_one("#agent-log", RichLog)
         except Exception:
             return
+        try:
+            detail_widget = self.query_one("#agent-log-detail", RichLog)
+        except Exception:
+            detail_widget = None
         event = message.event
         if event.kind == "user_input":
             self._flush_stream_buffer(log_widget)
             self._streaming_open = False
-            log_widget.write(Text(f"> {event.text}", style="bold"))
+            # Right-align the user's line so conversation reads like
+            # a chat transcript: user on the right, assistant on the
+            # left. Chevron dropped — the justification + bold is
+            # already enough to distinguish it.
+            log_widget.write(
+                Text(event.text, justify="right", style="bold"),
+                expand=True,
+            )
+            log_widget.write(Text(""))  # blank separator row
         elif event.kind == "thinking_delta":
             self._streaming_open = False
+            target = detail_widget or log_widget
             self._think_buf += event.text
-            self._rewrite_think_tail(log_widget)
+            self._rewrite_think_tail(target)
         elif event.kind == "text_delta":
             if self._think_buf:
-                self._flush_think_buffer(log_widget)
+                # Thinking just ended — drop the tail into the detail
+                # pane (where it lived while streaming) and move on to
+                # the reply in the dialog pane.
+                self._flush_think_buffer(detail_widget or log_widget)
             self._streaming_open = True
             self._stream_buf += event.text
             self._rewrite_stream_tail(log_widget)
@@ -369,9 +410,11 @@ class PipBoyTuiApp(App[None]):
             self._flush_stream_buffer(log_widget)
             self._streaming_open = False
             log_widget.write(Text(event.text or ""), expand=True)
+            log_widget.write(Text(""))
         elif event.kind == "tool_use":
             self._flush_stream_buffer(log_widget)
             self._streaming_open = False
+            target = detail_widget or log_widget
             # Plan-mode bookkeeping: EnterPlanMode sets the stopwatch,
             # ExitPlanMode clears it, and the side-status renderer
             # injects a PLAN row while it's set. Done here (not in a
@@ -387,7 +430,7 @@ class PipBoyTuiApp(App[None]):
             if not summary and event.text:
                 summary = event.text
             args = f" {summary}" if summary else ""
-            log_widget.write(
+            target.write(
                 Text(f"[tool: {event.name}{args}]", style="cyan")
             )
             # Interactive tools (AskUserQuestion, ExitPlanMode) carry
@@ -397,13 +440,15 @@ class PipBoyTuiApp(App[None]):
             # trace so the content stays grouped with its tool header.
             detail = format_tool_detail(event.name, event.tool_input)
             if detail:
-                log_widget.write(Text(detail, style="bright_yellow"))
+                target.write(Text(detail, style="bright_yellow"))
+            target.write(Text(""))
         elif event.kind == "markdown":
             self._flush_stream_buffer(log_widget)
             self._streaming_open = False
             log_widget.write(
                 Markdown(event.text or "", justify="left"),
             )
+            log_widget.write(Text(""))
         elif event.kind == "finalize":
             # Streaming used ``Text`` for stable tail rewrites; swap the
             # finished buffer for ``Markdown`` once so ** / ` / lists
@@ -411,11 +456,17 @@ class PipBoyTuiApp(App[None]):
             self._flush_stream_buffer(log_widget, materialize_markdown=True)
             footer = self._format_footer(event)
             self._streaming_open = False
-            log_widget.write(Text(footer, style="dim"))
+            (detail_widget or log_widget).write(Text(footer, style="dim"))
+            # Blank line in dialog too — a finished assistant turn ends
+            # a "message" from the chat perspective, regardless of
+            # whether the footer lives in the detail strip.
+            log_widget.write(Text(""))
         elif event.kind == "error":
             self._flush_stream_buffer(log_widget)
             self._streaming_open = False
-            log_widget.write(Text(f"[error] {event.text}", style="bold red"))
+            target = detail_widget or log_widget
+            target.write(Text(f"[error] {event.text}", style="bold red"))
+            target.write(Text(""))
 
     def on_log_message(self, message: LogMessage) -> None:
         """Render one stdlib log record into the app-log pane."""
@@ -621,10 +672,11 @@ class PipBoyTuiApp(App[None]):
         self._stream_tail_strips = 0
         self._think_buf = ""
         self._think_tail_strips = 0
-        try:
-            self.query_one("#agent-log", RichLog).clear()
-        except Exception:
-            pass
+        for widget_id in ("#agent-log", "#agent-log-detail"):
+            try:
+                self.query_one(widget_id, RichLog).clear()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Helpers

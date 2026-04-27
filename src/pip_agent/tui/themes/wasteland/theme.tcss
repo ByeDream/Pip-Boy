@@ -6,7 +6,8 @@
  *     #status-bar              1 row at top
  *     #main                    horizontal
  *       #agent-pane            1fr
- *         #agent-log           expand
+ *         #agent-log           1fr (user + assistant dialog)
+ *         #agent-log-detail    10 rows (thinking / tool_use / finalize)
  *         #input               1 row
  *       #side-pane             width set dynamically by app (min 50, max 100)
  *         #side-top            auto height
@@ -47,6 +48,15 @@ Screen {
     background: $surface;
     color: $text;
     border: none;
+    padding: 0 1;
+    scrollbar-gutter: stable;
+}
+
+#agent-log-detail {
+    height: 10;
+    background: $surface;
+    color: $text-muted;
+    border-top: hkey $accent-darken-2;
     padding: 0 1;
     scrollbar-gutter: stable;
 }
