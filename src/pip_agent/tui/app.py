@@ -744,7 +744,6 @@ class PipBoyTuiApp(App[None]):
             ("agent", "AGENT"),
             ("model", "MODEL"),
             ("chans", "CHANS"),
-            ("theme", "THEME"),
             ("memory", "MEMORY"),
             ("reflect", "REFLECT"),
             ("dream", "DREAM"),

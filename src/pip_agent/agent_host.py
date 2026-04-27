@@ -2510,8 +2510,6 @@ def _build_side_snapshot(
     registry: "AgentRegistry",
     channel_mgr: ChannelManager,
     scheduler: "Any",
-    active_theme_name: str,
-    theme_manager: "Any",
     boot_time: float,
 ) -> dict[str, str]:
     """Snapshot local host state for the ``#side-status`` panel.
@@ -2524,8 +2522,10 @@ def _build_side_snapshot(
     field falls back to ``"—"`` and neighbouring fields still paint.
 
     Returns ``dict[str, str]`` with keys ``agent``, ``model``,
-    ``chans``, ``theme``, ``memory``, ``reflect``, ``dream``, ``cron``,
-    ``uptime``. The App's renderer tolerates missing keys.
+    ``chans``, ``memory``, ``reflect``, ``dream``, ``cron``,
+    ``uptime``. The App's renderer tolerates missing keys. Theme is
+    deliberately not included — the TUI header already shows the
+    active theme in its title bar.
     """
     from datetime import UTC, datetime
 
@@ -2592,15 +2592,6 @@ def _build_side_snapshot(
         cron_display = "—"
 
     try:
-        active_bundle = theme_manager.resolve(active_theme_name)
-        theme_display = (
-            f"{active_bundle.manifest.display_name} "
-            f"v{active_bundle.manifest.version}"
-        )
-    except Exception:  # noqa: BLE001
-        theme_display = active_theme_name or "—"
-
-    try:
         channels_display = ", ".join(channel_mgr.list_channels()) or "none"
     except Exception:  # noqa: BLE001
         channels_display = "—"
@@ -2615,7 +2606,6 @@ def _build_side_snapshot(
         "agent": agent_name,
         "model": model_display,
         "chans": channels_display,
-        "theme": theme_display,
         "memory": memory_display,
         "reflect": reflect_display,
         "dream": dream_display,
@@ -3001,8 +2991,6 @@ def run_host(*, force_no_tui: bool = False) -> None:
             registry=registry,
             channel_mgr=channel_mgr,
             scheduler=scheduler,
-            active_theme_name=active_theme_name,
-            theme_manager=theme_manager,
             boot_time=boot_time,
         )
 

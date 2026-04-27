@@ -28,7 +28,6 @@ _SNAPSHOT = {
     "agent": "pip-boy",
     "model": "t0 · claude-opus-4-7",
     "chans": "cli",
-    "theme": "Vault Amber v0.2.0",
     "memory": "12 obs · 3 mems",
     "reflect": "5m ago",
     "dream": "2h ago",
