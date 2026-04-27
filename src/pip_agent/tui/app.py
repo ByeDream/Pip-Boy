@@ -48,7 +48,7 @@ from pip_agent.tui.pump import UiPump
 from pip_agent.tui.sinks import AgentEvent
 from pip_agent.tui.textual_theme import textual_theme_from_bundle
 from pip_agent.tui.theme_api import ThemeBundle
-from pip_agent.tui.tool_format import format_tool_summary
+from pip_agent.tui.tool_format import format_tool_detail, format_tool_summary
 
 __all__ = ["PipBoyTuiApp"]
 
@@ -390,6 +390,14 @@ class PipBoyTuiApp(App[None]):
             log_widget.write(
                 Text(f"[tool: {event.name}{args}]", style="cyan")
             )
+            # Interactive tools (AskUserQuestion, ExitPlanMode) carry
+            # payloads the user genuinely wants to see — the summary
+            # truncates them to one line. Render the full question /
+            # plan body as a separate indented block right below the
+            # trace so the content stays grouped with its tool header.
+            detail = format_tool_detail(event.name, event.tool_input)
+            if detail:
+                log_widget.write(Text(detail, style="bright_yellow"))
         elif event.kind == "markdown":
             self._flush_stream_buffer(log_widget)
             self._streaming_open = False

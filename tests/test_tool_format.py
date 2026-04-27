@@ -6,7 +6,7 @@ white-listed tools plus the fall-through for unknown tools.
 
 from __future__ import annotations
 
-from pip_agent.tui.tool_format import format_tool_summary
+from pip_agent.tui.tool_format import format_tool_detail, format_tool_summary
 
 
 def test_empty_input_returns_empty_string() -> None:
@@ -180,3 +180,124 @@ def test_sensitive_content_not_leaked() -> None:
     )
     assert "AKIA" not in summary
     assert "size=" in summary
+
+
+# ---------------------------------------------------------------------------
+# format_tool_detail — multi-line preview for interactive tools
+# ---------------------------------------------------------------------------
+
+
+def test_detail_none_for_unsupported_tools() -> None:
+    assert format_tool_detail("Write", {"file_path": "/x"}) is None
+    assert format_tool_detail("Read", {"file_path": "/x"}) is None
+    assert format_tool_detail("Bash", {"command": "ls"}) is None
+    assert format_tool_detail("EnterPlanMode", {"_": "_"}) is None
+
+
+def test_detail_none_for_empty_input() -> None:
+    assert format_tool_detail("AskUserQuestion", None) is None
+    assert format_tool_detail("AskUserQuestion", {}) is None
+    assert format_tool_detail("ExitPlanMode", {}) is None
+
+
+def test_detail_askuserquestion_single_question() -> None:
+    detail = format_tool_detail(
+        "AskUserQuestion",
+        {
+            "questions": [
+                {
+                    "question": "Pick a color?",
+                    "header": "Color",
+                    "options": [
+                        {"label": "red", "description": "warm"},
+                        {"label": "blue"},
+                    ],
+                }
+            ]
+        },
+    )
+    assert detail is not None
+    assert "Q1" in detail
+    assert "Color" in detail
+    assert "Pick a color?" in detail
+    assert "- red" in detail
+    assert "warm" in detail  # option description preserved
+    assert "- blue" in detail
+
+
+def test_detail_askuserquestion_marks_multiselect() -> None:
+    detail = format_tool_detail(
+        "AskUserQuestion",
+        {
+            "questions": [
+                {
+                    "question": "Which?",
+                    "multiSelect": True,
+                    "options": [{"label": "a"}, {"label": "b"}],
+                }
+            ]
+        },
+    )
+    assert detail is not None
+    assert "(multi)" in detail
+
+
+def test_detail_askuserquestion_multiple_questions() -> None:
+    detail = format_tool_detail(
+        "AskUserQuestion",
+        {
+            "questions": [
+                {"question": "First?",  "options": [{"label": "x"}]},
+                {"question": "Second?", "options": [{"label": "y"}]},
+            ]
+        },
+    )
+    assert detail is not None
+    assert "Q1" in detail
+    assert "Q2" in detail
+    assert "First?" in detail
+    assert "Second?" in detail
+
+
+def test_detail_askuserquestion_ignores_non_dict_questions() -> None:
+    # Robustness: a malformed questions array shouldn't crash.
+    detail = format_tool_detail(
+        "AskUserQuestion", {"questions": [None, {"question": "Ok?"}]}
+    )
+    assert detail is not None
+    assert "Ok?" in detail
+
+
+def test_detail_exitplanmode_shows_plan_body() -> None:
+    plan = (
+        "# Plan\n"
+        "1. Do thing A\n"
+        "2. Do thing B\n"
+    )
+    detail = format_tool_detail("ExitPlanMode", {"plan": plan})
+    assert detail is not None
+    assert "# Plan" in detail
+    assert "1. Do thing A" in detail
+    assert "2. Do thing B" in detail
+
+
+def test_detail_exitplanmode_clips_long_plans() -> None:
+    huge = "\n".join(f"step {i}" for i in range(60))
+    detail = format_tool_detail("ExitPlanMode", {"plan": huge})
+    assert detail is not None
+    assert "more line" in detail
+    assert detail.count("\n") <= 30  # capped
+
+
+def test_detail_exitplanmode_clips_long_lines() -> None:
+    plan = "x" * 500
+    detail = format_tool_detail("ExitPlanMode", {"plan": plan})
+    assert detail is not None
+    # One long line → truncated (ends with ellipsis), not overflowing.
+    assert any(len(ln) <= 105 for ln in detail.splitlines())
+    assert "…" in detail
+
+
+def test_detail_exitplanmode_empty_plan_returns_none() -> None:
+    assert format_tool_detail("ExitPlanMode", {"plan": ""}) is None
+    assert format_tool_detail("ExitPlanMode", {"plan": None}) is None

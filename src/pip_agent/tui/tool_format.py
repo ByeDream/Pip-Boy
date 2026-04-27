@@ -19,11 +19,17 @@ from __future__ import annotations
 
 from typing import Any
 
-__all__ = ["format_tool_summary"]
+__all__ = ["format_tool_detail", "format_tool_summary"]
 
 
 _MAX_VALUE_LEN = 60
 _MAX_TOTAL_LEN = 120
+# Cap for the multi-line detail block (AskUserQuestion questions,
+# ExitPlanMode plan preview). Anything past this is replaced with a
+# "… (N more lines)" summary row so a giant plan doesn't push the
+# agent pane off-screen.
+_DETAIL_MAX_LINES = 24
+_DETAIL_MAX_LINE_LEN = 100
 
 
 def _truncate(s: str, n: int = _MAX_VALUE_LEN) -> str:
@@ -162,3 +168,84 @@ def format_tool_summary(name: str, tool_input: dict[str, Any] | None) -> str:
     if len(summary) > _MAX_TOTAL_LEN:
         summary = summary[: _MAX_TOTAL_LEN - 1] + "…"
     return summary
+
+
+def format_tool_detail(name: str, tool_input: dict[str, Any] | None) -> str | None:
+    """Return a multi-line preview for tools whose content deserves its own
+    block in the agent pane, or ``None`` when the one-line summary is
+    enough.
+
+    Covers two cases where the summary is too terse to be useful:
+
+    * ``AskUserQuestion`` — the user needs to see every question and its
+      options to know what's being asked; the summary only shows Q1's
+      text truncated.
+    * ``ExitPlanMode`` — the plan body is what the user cares about; the
+      summary just says ``plan=Nb``.
+
+    Output is capped at ``_DETAIL_MAX_LINES`` lines and each line at
+    ``_DETAIL_MAX_LINE_LEN`` chars so a huge plan cannot flood the pane.
+    Returned text has no trailing newline; the renderer is expected to
+    indent each line to visually nest under the ``[tool: X]`` trace
+    that precedes it.
+    """
+    if not tool_input:
+        return None
+
+    if name == "AskUserQuestion":
+        questions = tool_input.get("questions")
+        if not isinstance(questions, list) or not questions:
+            return None
+        lines: list[str] = []
+        for idx, q in enumerate(questions, 1):
+            if not isinstance(q, dict):
+                continue
+            q_text = _str(q.get("question"))
+            header = _str(q.get("header"))
+            multi = bool(q.get("multiSelect"))
+            label = f"Q{idx}"
+            if header:
+                label = f"{label} [{_truncate(header, 20)}]"
+            tag = " (multi)" if multi else ""
+            lines.append(_truncate(f"  {label}: {q_text}{tag}",
+                                   _DETAIL_MAX_LINE_LEN))
+            options = q.get("options")
+            if isinstance(options, list):
+                for opt in options:
+                    if not isinstance(opt, dict):
+                        continue
+                    opt_label = _str(opt.get("label"))
+                    opt_desc = _str(opt.get("description"))
+                    if opt_desc:
+                        line = f"    - {opt_label} — {opt_desc}"
+                    else:
+                        line = f"    - {opt_label}"
+                    lines.append(_truncate(line, _DETAIL_MAX_LINE_LEN))
+        return _clip_block(lines)
+
+    if name == "ExitPlanMode":
+        plan = tool_input.get("plan")
+        if not isinstance(plan, str) or not plan:
+            return None
+        lines = [_truncate(ln, _DETAIL_MAX_LINE_LEN)
+                 for ln in plan.splitlines()]
+        return _clip_block(["  " + ln for ln in lines])
+
+    return None
+
+
+def _clip_block(lines: list[str]) -> str | None:
+    """Cap a multi-line block at ``_DETAIL_MAX_LINES`` rows.
+
+    Returns ``None`` for an empty list, otherwise joins the (possibly
+    truncated) lines with ``\\n`` and appends a ``… (N more lines)``
+    tail when content was dropped.
+    """
+    if not lines:
+        return None
+    if len(lines) <= _DETAIL_MAX_LINES:
+        return "\n".join(lines)
+    kept = lines[: _DETAIL_MAX_LINES - 1]
+    dropped = len(lines) - len(kept)
+    kept.append(f"  … ({dropped} more line{'s' if dropped != 1 else ''})")
+    return "\n".join(kept)
