@@ -331,3 +331,175 @@ class TestTruncation:
         assert result["ok"] is True
         assert result["truncated"] is False
         assert result["content"] == body
+
+
+# ---------------------------------------------------------------------------
+# Web search — Tavily primary, DuckDuckGo fallback
+# ---------------------------------------------------------------------------
+
+
+def _tavily_response(results: list[dict]) -> httpx.Response:
+    """Shape a Tavily-like JSON response for tests."""
+    return httpx.Response(
+        200,
+        json={"query": "q", "results": results},
+        headers={"content-type": "application/json"},
+    )
+
+
+def _patch_ddg(monkeypatch, results=None, raises=None):
+    """Replace :func:`pip_agent.web._ddg_search` with a stub.
+
+    ``results`` → success payload; ``raises`` → failure payload.
+    Mutually exclusive — pass one. This is simpler than stubbing the
+    ``ddgs`` import (which may not be installed in CI) and lets each
+    test drive the fallback branch directly.
+    """
+    async def fake(query: str, *, max_results: int) -> dict:
+        if raises is not None:
+            return {"ok": False, "error": raises}
+        return {
+            "ok": True,
+            "provider": "duckduckgo",
+            "query": query,
+            "results": results or [],
+        }
+
+    monkeypatch.setattr("pip_agent.web._ddg_search", fake)
+
+
+class TestSearchEmptyQuery:
+    def test_empty_query_is_error_before_network(self, monkeypatch):
+        # No mocks installed — empty query must short-circuit without
+        # either provider being touched.
+        monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+        result = _run(web.search_web(""))
+        assert result["ok"] is False
+        assert "empty" in result["error"]
+
+    def test_whitespace_only_query_is_error(self, monkeypatch):
+        monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+        result = _run(web.search_web("   \n\t"))
+        assert result["ok"] is False
+
+
+class TestSearchTavilyPath:
+    def test_tavily_success_wins_when_key_is_set(self, monkeypatch):
+        """With a key configured and a healthy response, Tavily answers
+        and DDG is never consulted."""
+        monkeypatch.setenv("TAVILY_API_KEY", "tvly-test-key")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert str(request.url) == "https://api.tavily.com/search"
+            return _tavily_response([
+                {
+                    "title": "Result One",
+                    "url": "https://example.com/1",
+                    "content": "snippet one",
+                },
+                {
+                    "title": "Result Two",
+                    "url": "https://example.com/2",
+                    "content": "snippet two",
+                },
+            ])
+
+        _install_mock(monkeypatch, handler)
+
+        def _ddg_must_not_fire(*_a, **_kw):
+            raise AssertionError("DDG fallback must not be invoked on Tavily success")
+
+        monkeypatch.setattr("pip_agent.web._ddg_search", _ddg_must_not_fire)
+
+        result = _run(web.search_web("hello", max_results=2))
+
+        assert result["ok"] is True
+        assert result["provider"] == "tavily"
+        assert result["query"] == "hello"
+        titles = [r["title"] for r in result["results"]]
+        assert titles == ["Result One", "Result Two"]
+        # Snippet is normalised from Tavily's ``content`` key.
+        assert result["results"][0]["snippet"] == "snippet one"
+
+    def test_tavily_http_error_falls_back_to_ddg(self, monkeypatch):
+        """401 / 403 / 429 from Tavily should not poison the search —
+        the model still gets results via DuckDuckGo."""
+        monkeypatch.setenv("TAVILY_API_KEY", "tvly-bad")
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                429,
+                json={"detail": "rate limited"},
+                headers={"content-type": "application/json"},
+            )
+
+        _install_mock(monkeypatch, handler)
+        _patch_ddg(monkeypatch, results=[
+            {"title": "From DDG", "url": "https://ddg.example/x", "snippet": "ok"},
+        ])
+
+        result = _run(web.search_web("hello"))
+        assert result["ok"] is True
+        assert result["provider"] == "duckduckgo"
+        assert result["results"][0]["title"] == "From DDG"
+
+    def test_tavily_transport_error_falls_back(self, monkeypatch):
+        monkeypatch.setenv("TAVILY_API_KEY", "tvly-x")
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("network down")
+
+        _install_mock(monkeypatch, handler)
+        _patch_ddg(monkeypatch, results=[
+            {"title": "Backup", "url": "https://b.example/", "snippet": "s"},
+        ])
+
+        result = _run(web.search_web("q"))
+        assert result["ok"] is True
+        assert result["provider"] == "duckduckgo"
+
+
+class TestSearchNoKey:
+    def test_ddg_is_used_when_key_absent(self, monkeypatch):
+        monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+
+        # Tavily must not be called — asserting via a handler that would
+        # fail the test if it fired.
+        def handler(_request: httpx.Request) -> httpx.Response:
+            raise AssertionError("Tavily called despite no TAVILY_API_KEY")
+
+        _install_mock(monkeypatch, handler)
+        _patch_ddg(monkeypatch, results=[
+            {"title": "D1", "url": "https://d1/", "snippet": "x"},
+        ])
+
+        result = _run(web.search_web("q"))
+        assert result["ok"] is True
+        assert result["provider"] == "duckduckgo"
+
+    def test_blank_key_is_treated_as_unset(self, monkeypatch):
+        monkeypatch.setenv("TAVILY_API_KEY", "   ")
+        _patch_ddg(monkeypatch, results=[
+            {"title": "D", "url": "https://d/", "snippet": "x"},
+        ])
+        result = _run(web.search_web("q"))
+        assert result["ok"] is True
+        assert result["provider"] == "duckduckgo"
+
+
+class TestSearchBothFail:
+    def test_error_surfaces_both_providers(self, monkeypatch):
+        """When Tavily errors and DDG also errors, the returned error
+        should mention BOTH so a caller can tell which half broke."""
+        monkeypatch.setenv("TAVILY_API_KEY", "tvly-x")
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(500, text="boom")
+
+        _install_mock(monkeypatch, handler)
+        _patch_ddg(monkeypatch, raises="ddg rate limited")
+
+        result = _run(web.search_web("q"))
+        assert result["ok"] is False
+        assert "tavily" in result["error"]
+        assert "duckduckgo" in result["error"]

@@ -18,10 +18,21 @@ dependencies = [
     "anthropic>=0.49,<1",
     "claude-agent-sdk>=0.1.56",
     "pydantic-settings>=2.8,<3",
+    # Explicit dep: ``config.py`` imports ``dotenv.load_dotenv`` directly
+    # to prime ``os.environ`` from ``.env`` for sites that read via
+    # ``os.getenv`` (e.g. web search's ``TAVILY_API_KEY`` lookup).
+    # ``python-dotenv`` is also a transitive dep of ``pydantic-settings``
+    # but we declare it explicitly because we import it ourselves.
+    "python-dotenv>=1,<2",
     "pyreadline3>=3.5,<4; sys_platform == 'win32'",
     "pyyaml>=6,<7",
     "httpx>=0.27",
     "trafilatura>=1.12",
+    # DuckDuckGo search fallback for ``mcp__pip__web_search`` when
+    # ``TAVILY_API_KEY`` is unset or Tavily errors out. The library was
+    # renamed from ``duckduckgo-search`` to ``ddgs`` upstream; pin the
+    # new name. Import is ``from ddgs import DDGS``.
+    "ddgs>=9",
     "wecom-aibot-python-sdk>=1.0",
     "qrcode>=7",
     # TUI stack. ``textual<1`` is deliberately barred — 0.89.x has

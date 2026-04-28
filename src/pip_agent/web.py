@@ -1,26 +1,31 @@
-"""Local ``web_fetch`` implementation backing ``mcp__pip__web_fetch``.
+"""Local ``web_fetch`` / ``web_search`` backing the ``mcp__pip__web_*`` tools.
 
-Exposed as the canonical ``web_fetch`` tool for the agent — Claude Code's
-own ``WebFetch`` is shadowed via ``disallowed_tools`` (see
-:mod:`pip_agent.agent_runner`) so the agent only ever reaches for one
-implementation. This module is a thin async wrapper around
-:mod:`httpx` + :mod:`trafilatura`:
+Both Claude Code's ``WebFetch`` and ``WebSearch`` are shadowed via
+``disallowed_tools`` (see :mod:`pip_agent.agent_runner`) — the
+upstream gateway Pip-Boy is pointed at rejects the experimental-betas
+header those tools require, so we ship our own.
 
-* HTTP GET with redirects, a 30 s timeout, and a 5 MB hard response cap.
-* HTML / XHTML responses are reduced to article-body markdown via
-  :func:`trafilatura.extract`. JSON / plain-text / other text content
-  types are returned verbatim. Binary content types are refused.
-* Errors (timeout, non-2xx, oversized, transport failure) are returned
-  as ``{"ok": False, "error": ...}`` rather than raised — callers
-  surface the string to the model instead of crashing the turn.
+Implementations:
 
-Wrapped in :func:`pip_agent._profile.span` so every fetch shows up as a
-``web.fetch`` row in profile traces.
+* :func:`fetch_url` — HTTP GET with redirects, 30 s timeout, 5 MB cap.
+  HTML is reduced to article-body markdown via trafilatura; JSON /
+  plain-text / XML pass through verbatim; binaries are refused.
+* :func:`search_web` — Tavily first (when ``TAVILY_API_KEY`` is set),
+  falling back to DuckDuckGo (``ddgs`` library, no key required) when
+  Tavily is unconfigured, rate-limited, or erroring. Returns a uniform
+  result shape regardless of which provider answered.
+
+Both return ``{"ok": False, "error": ...}`` on failure rather than
+raising — callers surface the string to the model instead of crashing
+the turn. Both are wrapped in :func:`pip_agent._profile.span` so each
+call shows up as a ``web.fetch`` / ``web.search`` row in profile
+traces.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 import httpx
@@ -264,3 +269,196 @@ def _extract_html(html: str) -> str | None:
         # turn — fall back to the raw response.
         log.warning("trafilatura.extract failed: %s", exc)
         return None
+
+
+# ---------------------------------------------------------------------------
+# Web search — Tavily first, DuckDuckGo fallback
+# ---------------------------------------------------------------------------
+
+_TAVILY_URL: str = "https://api.tavily.com/search"
+_SEARCH_TIMEOUT_S: float = 15.0
+_DEFAULT_MAX_RESULTS: int = 5
+
+
+async def search_web(
+    query: str,
+    *,
+    max_results: int = _DEFAULT_MAX_RESULTS,
+    timeout: float = _SEARCH_TIMEOUT_S,
+) -> dict[str, Any]:
+    """Search the web via Tavily (preferred) or DuckDuckGo (fallback).
+
+    Parameters
+    ----------
+    query:
+        Free-text search query.
+    max_results:
+        Maximum number of result items to return. Providers are asked
+        for exactly this many; fewer may come back if the upstream
+        returns a short list.
+    timeout:
+        Per-provider request timeout in seconds.
+
+    Returns
+    -------
+    dict
+        Success::
+
+            {
+                "ok": True,
+                "provider": "tavily" | "duckduckgo",
+                "query": <str>,
+                "results": [
+                    {"title": <str>, "url": <str>, "snippet": <str>},
+                    ...
+                ],
+            }
+
+        Failure::
+
+            {
+                "ok": False,
+                "error": <str>,
+                "provider": <last-attempted or None>,
+            }
+    """
+    from pip_agent import _profile  # PROFILE
+
+    q = (query or "").strip()
+    if not q:
+        return {"ok": False, "error": "empty query", "provider": None}
+
+    async with _profile.span("web.search", query=q):
+        errors: list[str] = []
+        api_key = os.getenv("TAVILY_API_KEY", "").strip()
+
+        if api_key:
+            tav = await _tavily_search(
+                q, api_key=api_key, max_results=max_results, timeout=timeout,
+            )
+            if tav.get("ok"):
+                return tav
+            errors.append(f"tavily: {tav.get('error', 'unknown')}")
+
+        ddg = await _ddg_search(q, max_results=max_results)
+        if ddg.get("ok"):
+            return ddg
+        errors.append(f"duckduckgo: {ddg.get('error', 'unknown')}")
+
+        return {
+            "ok": False,
+            "error": "; ".join(errors) if errors else "no provider available",
+            "provider": "duckduckgo",
+        }
+
+
+async def _tavily_search(
+    query: str, *, api_key: str, max_results: int, timeout: float,
+) -> dict[str, Any]:
+    """One Tavily call. Any failure returns ``{"ok": False, "error": ...}``
+    so the outer ``search_web`` can decide whether to fall back."""
+    body = {
+        "api_key": api_key,
+        "query": query,
+        "max_results": max(1, min(max_results, 20)),
+        "search_depth": "basic",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(_TAVILY_URL, json=body)
+    except httpx.TimeoutException as exc:
+        return {"ok": False, "error": f"timeout after {timeout}s: {exc}"}
+    except httpx.HTTPError as exc:
+        return {"ok": False, "error": f"http error: {exc}"}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    if resp.status_code >= 400:
+        # Surface a compact error message. Tavily puts the reason under
+        # ``detail`` for auth / quota / validation errors; fall back to
+        # the bare status line when the body isn't JSON.
+        detail: str = f"HTTP {resp.status_code}"
+        try:
+            data = resp.json()
+            if isinstance(data, dict):
+                detail_msg = data.get("detail") or data.get("error") or ""
+                if detail_msg:
+                    detail = f"HTTP {resp.status_code}: {detail_msg}"
+        except Exception:  # noqa: BLE001
+            pass
+        return {"ok": False, "error": detail}
+
+    try:
+        data = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"bad json: {exc}"}
+
+    raw_results = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(raw_results, list):
+        return {"ok": False, "error": "unexpected response shape (no results)"}
+
+    results: list[dict[str, str]] = []
+    for item in raw_results:
+        if not isinstance(item, dict):
+            continue
+        results.append({
+            "title": str(item.get("title") or ""),
+            "url": str(item.get("url") or ""),
+            "snippet": str(item.get("content") or ""),
+        })
+    return {
+        "ok": True,
+        "provider": "tavily",
+        "query": query,
+        "results": results,
+    }
+
+
+async def _ddg_search(query: str, *, max_results: int) -> dict[str, Any]:
+    """DuckDuckGo fallback via the :mod:`ddgs` library.
+
+    The library is sync-only; we dispatch to a thread so the host event
+    loop keeps serving other turns. Any import / runtime failure is
+    captured and returned as an ``error`` string rather than raised.
+    """
+    import asyncio
+
+    try:
+        from ddgs import DDGS  # type: ignore[import-untyped]
+    except ImportError:
+        return {
+            "ok": False,
+            "error": (
+                "'ddgs' not installed (pip install ddgs); "
+                "DuckDuckGo fallback unavailable"
+            ),
+        }
+
+    def _run_sync() -> list[dict[str, Any]]:
+        # ``DDGS`` is a context manager in recent versions; ``text``
+        # returns an iterable of dicts with ``title`` / ``href`` /
+        # ``body`` keys. We materialise it into a list inside the
+        # thread so the iterator's lifetime is bounded.
+        with DDGS() as ddgs:
+            return list(ddgs.text(query, max_results=max(1, min(max_results, 20))))
+
+    try:
+        raw_results = await asyncio.to_thread(_run_sync)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    results: list[dict[str, str]] = []
+    for item in raw_results:
+        if not isinstance(item, dict):
+            continue
+        results.append({
+            "title": str(item.get("title") or ""),
+            "url": str(item.get("href") or item.get("url") or ""),
+            "snippet": str(item.get("body") or ""),
+        })
+    return {
+        "ok": True,
+        "provider": "duckduckgo",
+        "query": query,
+        "results": results,
+    }

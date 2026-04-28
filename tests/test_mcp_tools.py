@@ -679,6 +679,7 @@ class TestBuildMcpServer:
         assert "plugin_list" in expected
         assert "plugin_install" in expected
         assert "web_fetch" in expected
+        assert "web_search" in expected
 
 
 # ---------------------------------------------------------------------------
@@ -985,3 +986,129 @@ class TestWebTools:
         assert schema["properties"]["url"]["type"] == "string"
         assert schema["required"] == ["url"]
         assert schema["properties"]["max_chars"]["type"] == "integer"
+
+
+class TestWebSearchTool:
+    """MCP wrapper around ``pip_agent.web.search_web``.
+
+    The provider-level fallback logic (Tavily → DDG) is covered in
+    ``test_web.py``; here we pin argument validation, the rendered
+    output shape the model receives, and the input schema.
+    """
+
+    def _patch_search(self, monkeypatch, result: dict) -> dict:
+        captured: dict = {}
+
+        async def fake(query: str, *, max_results: int = 5, **_kw):
+            captured["query"] = query
+            captured["max_results"] = max_results
+            return result
+
+        monkeypatch.setattr("pip_agent.web.search_web", fake)
+        return captured
+
+    def test_missing_query_is_error(self):
+        tool = _tool(_web_tools(McpContext()), "web_search")
+        result = _run(tool.handler({}))
+        assert result.get("is_error") is True
+        assert "query" in _text_of(result).lower()
+
+    def test_blank_query_is_error(self):
+        tool = _tool(_web_tools(McpContext()), "web_search")
+        result = _run(tool.handler({"query": "  "}))
+        assert result.get("is_error") is True
+
+    def test_non_integer_max_results_is_error(self):
+        tool = _tool(_web_tools(McpContext()), "web_search")
+        result = _run(tool.handler({
+            "query": "q", "max_results": "lots",
+        }))
+        assert result.get("is_error") is True
+
+    def test_non_positive_max_results_is_error(self):
+        tool = _tool(_web_tools(McpContext()), "web_search")
+        result = _run(tool.handler({
+            "query": "q", "max_results": 0,
+        }))
+        assert result.get("is_error") is True
+
+    def test_success_render_contains_header_and_numbered_hits(
+        self, monkeypatch,
+    ):
+        self._patch_search(monkeypatch, {
+            "ok": True,
+            "provider": "tavily",
+            "query": "NVDA stock",
+            "results": [
+                {
+                    "title": "NVIDIA Corp",
+                    "url": "https://example.com/nvda",
+                    "snippet": "NVDA is up.",
+                },
+                {
+                    "title": "NVDA News",
+                    "url": "https://news.example/nvda",
+                    "snippet": "Latest headlines.",
+                },
+            ],
+        })
+        tool = _tool(_web_tools(McpContext()), "web_search")
+        result = _run(tool.handler({"query": "NVDA stock"}))
+
+        assert result.get("is_error") is not True
+        body = _text_of(result)
+        assert "Provider: tavily" in body
+        assert "Query: NVDA stock" in body
+        assert "1. NVIDIA Corp" in body
+        assert "https://example.com/nvda" in body
+        assert "NVDA is up." in body
+        assert "2. NVDA News" in body
+
+    def test_empty_results_renders_placeholder(self, monkeypatch):
+        self._patch_search(monkeypatch, {
+            "ok": True,
+            "provider": "duckduckgo",
+            "query": "q",
+            "results": [],
+        })
+        tool = _tool(_web_tools(McpContext()), "web_search")
+        body = _text_of(_run(tool.handler({"query": "q"})))
+        assert "(no results)" in body
+        assert "Provider: duckduckgo" in body
+
+    def test_max_results_is_forwarded(self, monkeypatch):
+        captured = self._patch_search(monkeypatch, {
+            "ok": True, "provider": "tavily", "query": "q", "results": [],
+        })
+        tool = _tool(_web_tools(McpContext()), "web_search")
+        _run(tool.handler({"query": "q", "max_results": 10}))
+        assert captured["max_results"] == 10
+
+    def test_default_max_results_is_5(self, monkeypatch):
+        captured = self._patch_search(monkeypatch, {
+            "ok": True, "provider": "tavily", "query": "q", "results": [],
+        })
+        tool = _tool(_web_tools(McpContext()), "web_search")
+        _run(tool.handler({"query": "q"}))
+        assert captured["max_results"] == 5
+
+    def test_failure_becomes_is_error_with_reason(self, monkeypatch):
+        self._patch_search(monkeypatch, {
+            "ok": False,
+            "error": "tavily: HTTP 429; duckduckgo: rate limited",
+            "provider": "duckduckgo",
+        })
+        tool = _tool(_web_tools(McpContext()), "web_search")
+        result = _run(tool.handler({"query": "q"}))
+        assert result.get("is_error") is True
+        body = _text_of(result)
+        assert "web_search failed" in body
+        assert "tavily" in body and "duckduckgo" in body
+
+    def test_input_schema_is_well_formed(self):
+        tool = _tool(_web_tools(McpContext()), "web_search")
+        schema = tool.input_schema
+        assert schema["type"] == "object"
+        assert schema["properties"]["query"]["type"] == "string"
+        assert schema["required"] == ["query"]
+        assert schema["properties"]["max_results"]["type"] == "integer"

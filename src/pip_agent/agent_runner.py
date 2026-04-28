@@ -119,13 +119,14 @@ def _build_env() -> dict[str, str]:
 # trace logs and confusing failure modes.
 #
 # Currently shadowed:
-#   * ``WebFetch`` → ``mcp__pip__web_fetch`` (see :mod:`pip_agent.web`)
+#   * ``WebFetch``  → ``mcp__pip__web_fetch``  (see :mod:`pip_agent.web`)
+#   * ``WebSearch`` → ``mcp__pip__web_search`` (Tavily → DDG fallback)
 #
-# ``WebSearch`` is intentionally NOT in this list — we don't ship a
-# replacement, so the model is free to use it where available and
-# fall back to plugin-provided alternatives (``mcp__plugin_exa_*`` etc.)
-# elsewhere.
-_BUILTIN_DISALLOWED_TOOLS: tuple[str, ...] = ("WebFetch",)
+# Both are disabled because the corporate-proxy gateway Pip-Boy is
+# pointed at rejects the experimental-betas header Claude Code's
+# server-side web tools require. Shipping in-process replacements
+# sidesteps that entirely.
+_BUILTIN_DISALLOWED_TOOLS: tuple[str, ...] = ("WebFetch", "WebSearch")
 
 
 class _StderrBuffer:

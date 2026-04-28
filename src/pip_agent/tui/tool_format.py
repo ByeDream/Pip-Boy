@@ -152,7 +152,7 @@ def format_tool_summary(name: str, tool_input: dict[str, Any] | None) -> str:
         if url:
             frags.append(f"url={_oneline(url)}")
 
-    elif name == "WebSearch":
+    elif name in {"WebSearch", "mcp__pip__web_search"}:
         query = _str(tool_input.get("query"))
         if query:
             frags.append(f"q={_oneline(query)}")

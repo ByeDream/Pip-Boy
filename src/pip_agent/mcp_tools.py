@@ -16,8 +16,9 @@ Tools currently exposed:
   ``plugin_marketplace_add``, ``plugin_marketplace_list``
   (read + additive only — destructive ops live on the host
   ``/plugin`` slash command)
-* Web: ``web_fetch`` (canonical implementation; Claude Code's
-  built-in ``WebFetch`` is disabled so the namespace is single-source)
+* Web: ``web_fetch`` and ``web_search`` (canonical implementations;
+  Claude Code's built-in ``WebFetch`` / ``WebSearch`` are disabled so
+  the namespace is single-source)
 """
 
 from __future__ import annotations
@@ -954,15 +955,15 @@ def _plugin_tools(ctx: McpContext) -> list[SdkMcpTool]:
 
 
 # ---------------------------------------------------------------------------
-# Web tools — canonical ``web_fetch`` (shadows Claude Code's built-in)
+# Web tools — canonical ``web_fetch`` / ``web_search`` (shadow CC built-ins)
 # ---------------------------------------------------------------------------
 
 
 def _web_tools(ctx: McpContext) -> list[SdkMcpTool]:
-    """Expose ``web_fetch`` backed by :mod:`pip_agent.web`.
+    """Expose ``web_fetch`` and ``web_search`` backed by :mod:`pip_agent.web`.
 
     ``ctx`` is unused today — kept in the signature for parity with the
-    other tool groups so future fetches can be scoped to e.g.
+    other tool groups so future calls can be scoped to e.g.
     ``ctx.workdir`` for cache files without touching the call site.
     """
     del ctx  # unused
@@ -1002,6 +1003,48 @@ def _web_tools(ctx: McpContext) -> list[SdkMcpTool]:
         body = "\n".join(header_lines) + "\n\n" + (result.get("content") or "")
         return _text(body)
 
+    async def web_search(args: dict[str, Any]) -> dict[str, Any]:
+        from pip_agent.web import search_web
+
+        query = (args.get("query") or "").strip()
+        if not query:
+            return _error("'query' is required.")
+        try:
+            max_results = int(args.get("max_results", 5))
+        except (TypeError, ValueError):
+            return _error("'max_results' must be an integer.")
+        if max_results <= 0:
+            return _error("'max_results' must be > 0.")
+
+        result = await search_web(query, max_results=max_results)
+        if not result.get("ok"):
+            return _error(
+                f"web_search failed: {result.get('error', 'unknown error')}"
+            )
+
+        hits = result.get("results") or []
+        if not hits:
+            return _text(
+                f"Provider: {result.get('provider', '?')}\n"
+                f"Query: {query}\n\n(no results)"
+            )
+        lines = [
+            f"Provider: {result.get('provider', '?')}",
+            f"Query: {query}",
+            "",
+        ]
+        for i, hit in enumerate(hits, start=1):
+            title = hit.get("title") or "(untitled)"
+            url = hit.get("url") or ""
+            snippet = (hit.get("snippet") or "").strip()
+            lines.append(f"{i}. {title}")
+            if url:
+                lines.append(f"   {url}")
+            if snippet:
+                lines.append(f"   {snippet}")
+            lines.append("")
+        return _text("\n".join(lines).rstrip() + "\n")
+
     return [
         SdkMcpTool(
             name="web_fetch",
@@ -1034,5 +1077,35 @@ def _web_tools(ctx: McpContext) -> list[SdkMcpTool]:
                 "required": ["url"],
             },
             handler=web_fetch,
+        ),
+        SdkMcpTool(
+            name="web_search",
+            description=(
+                "Search the web and return a ranked list of "
+                "{title, url, snippet} results. Uses Tavily when "
+                "TAVILY_API_KEY is configured (richer, more relevant "
+                "results); falls back to DuckDuckGo (free, no key "
+                "required) when the key is absent or Tavily errors. "
+                "Follow up with web_fetch on the returned URLs when "
+                "snippets alone aren't enough."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Free-text search query.",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": (
+                            "Maximum number of results. Default 5, "
+                            "capped at 20."
+                        ),
+                    },
+                },
+                "required": ["query"],
+            },
+            handler=web_search,
         ),
     ]
