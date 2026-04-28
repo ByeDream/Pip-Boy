@@ -22,8 +22,6 @@ from typing import Any
 __all__ = ["format_tool_detail", "format_tool_summary"]
 
 
-_MAX_VALUE_LEN = 60
-_MAX_TOTAL_LEN = 120
 # Cap for the multi-line detail block (AskUserQuestion questions,
 # ExitPlanMode plan preview). Anything past this is replaced with a
 # "… (N more lines)" summary row so a giant plan doesn't push the
@@ -32,9 +30,18 @@ _DETAIL_MAX_LINES = 24
 _DETAIL_MAX_LINE_LEN = 100
 
 
-def _truncate(s: str, n: int = _MAX_VALUE_LEN) -> str:
-    """Shrink ``s`` to ``n`` chars, adding ``…`` when clipped."""
-    s = s.replace("\n", "\\n").replace("\r", "")
+def _oneline(s: str) -> str:
+    """Flatten newlines so a value renders on a single trace line."""
+    return s.replace("\n", "\\n").replace("\r", "")
+
+
+def _truncate(s: str, n: int) -> str:
+    """Shrink ``s`` to ``n`` chars, adding ``…`` when clipped.
+
+    Only used by the detail block — summary args render in full so the
+    reader can see what a tool call is actually doing.
+    """
+    s = _oneline(s)
     if len(s) <= n:
         return s
     return s[: max(1, n - 1)] + "…"
@@ -74,14 +81,14 @@ def format_tool_summary(name: str, tool_input: dict[str, Any] | None) -> str:
         content = tool_input.get("content")
         size = len(content) if isinstance(content, str) else 0
         if path:
-            frags.append(f"path={_truncate(path)}")
+            frags.append(f"path={_oneline(path)}")
         if size:
             frags.append(f"size={size}b")
 
     elif name == "Read":
         path = _str(tool_input.get("file_path"))
         if path:
-            frags.append(f"path={_truncate(path)}")
+            frags.append(f"path={_oneline(path)}")
         if "offset" in tool_input or "limit" in tool_input:
             frags.append(
                 f"range={_str(tool_input.get('offset', 0))}"
@@ -91,27 +98,27 @@ def format_tool_summary(name: str, tool_input: dict[str, Any] | None) -> str:
     elif name in {"Edit", "NotebookEdit"}:
         path = _str(tool_input.get("file_path") or tool_input.get("notebook_path"))
         if path:
-            frags.append(f"path={_truncate(path)}")
+            frags.append(f"path={_oneline(path)}")
         if tool_input.get("replace_all"):
             frags.append("replace_all=true")
 
     elif name in {"Bash", "PowerShell"}:
         cmd = _str(tool_input.get("command"))
         if cmd:
-            frags.append(_truncate(cmd, 90))
+            frags.append(_oneline(cmd))
 
     elif name == "Grep":
         pattern = _str(tool_input.get("pattern"))
         path = _str(tool_input.get("path"))
         if pattern:
-            frags.append(f"pattern={_truncate(pattern, 40)}")
+            frags.append(f"pattern={_oneline(pattern)}")
         if path:
-            frags.append(f"path={_truncate(path, 30)}")
+            frags.append(f"path={_oneline(path)}")
 
     elif name == "Glob":
         pattern = _str(tool_input.get("pattern"))
         if pattern:
-            frags.append(f"pattern={_truncate(pattern)}")
+            frags.append(f"pattern={_oneline(pattern)}")
 
     elif name == "AskUserQuestion":
         questions = tool_input.get("questions")
@@ -122,7 +129,7 @@ def format_tool_summary(name: str, tool_input: dict[str, Any] | None) -> str:
                 q_text = _str(first.get("question"))
             frags.append(f"{len(questions)} question(s)")
             if q_text:
-                frags.append(f"q1={_truncate(q_text, 50)}")
+                frags.append(f"q1={_oneline(q_text)}")
 
     elif name == "EnterPlanMode":
         frags.append("(entering plan mode)")
@@ -143,12 +150,12 @@ def format_tool_summary(name: str, tool_input: dict[str, Any] | None) -> str:
     elif name in {"WebFetch", "mcp__pip__web_fetch"}:
         url = _str(tool_input.get("url"))
         if url:
-            frags.append(f"url={_truncate(url, 70)}")
+            frags.append(f"url={_oneline(url)}")
 
     elif name == "WebSearch":
         query = _str(tool_input.get("query"))
         if query:
-            frags.append(f"q={_truncate(query, 70)}")
+            frags.append(f"q={_oneline(query)}")
 
     elif name == "Agent":
         desc = _str(tool_input.get("description"))
@@ -156,7 +163,7 @@ def format_tool_summary(name: str, tool_input: dict[str, Any] | None) -> str:
         if subtype:
             frags.append(f"type={subtype}")
         if desc:
-            frags.append(_truncate(desc, 60))
+            frags.append(_oneline(desc))
 
     # Unknown tool → no args shown. Better to render "[tool: X]" than
     # to leak an unbounded dict.
@@ -164,10 +171,7 @@ def format_tool_summary(name: str, tool_input: dict[str, Any] | None) -> str:
     if not frags:
         return ""
 
-    summary = " ".join(frags)
-    if len(summary) > _MAX_TOTAL_LEN:
-        summary = summary[: _MAX_TOTAL_LEN - 1] + "…"
-    return summary
+    return " ".join(frags)
 
 
 def format_tool_detail(name: str, tool_input: dict[str, Any] | None) -> str | None:

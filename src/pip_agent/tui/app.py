@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import inspect
 import logging
-import time
 from datetime import datetime
 from typing import Awaitable, Callable
 
@@ -143,14 +142,6 @@ class PipBoyTuiApp(App[None]):
         self._side_snapshot: dict[str, str] = dict(initial_side_snapshot or {})
         self._snapshot_provider = snapshot_provider
         self._snapshot_refresh_interval = snapshot_refresh_interval
-
-        # Plan-mode tracker. ``None`` = not in plan mode; otherwise the
-        # epoch time when EnterPlanMode fired. ``_render_side_status``
-        # injects a PLAN row while this is set so the user can see at a
-        # glance that the agent is drafting a plan instead of executing.
-        # Flipped by ``on_agent_message`` when it observes tool_use events
-        # with ``name == "EnterPlanMode"`` / ``"ExitPlanMode"``.
-        self._plan_entered_at: float | None = None
 
         # Art animation state.
         self._art_frames: tuple[str, ...] = theme.art_frames
@@ -416,17 +407,6 @@ class PipBoyTuiApp(App[None]):
             self._flush_stream_buffer(log_widget)
             self._streaming_open = False
             target = detail_widget or log_widget
-            # Plan-mode bookkeeping: EnterPlanMode sets the stopwatch,
-            # ExitPlanMode clears it, and the side-status renderer
-            # injects a PLAN row while it's set. Done here (not in a
-            # hook) so the App stays authoritative about its own UI
-            # state — no extra pump round-trip.
-            if event.name == "EnterPlanMode":
-                self._plan_entered_at = time.time()
-                self._refresh_side_status()
-            elif event.name == "ExitPlanMode":
-                self._plan_entered_at = None
-                self._refresh_side_status()
             summary = format_tool_summary(event.name, event.tool_input)
             if not summary and event.text:
                 summary = event.text
@@ -463,10 +443,7 @@ class PipBoyTuiApp(App[None]):
             self._flush_stream_buffer(log_widget, materialize_markdown=True)
             footer = self._format_footer(event)
             self._streaming_open = False
-            (detail_widget or log_widget).write(Text(footer, style="dim"))
-            # Blank line in dialog too — a finished assistant turn ends
-            # a "message" from the chat perspective, regardless of
-            # whether the footer lives in the detail strip.
+            log_widget.write(Text(footer, style="dim"))
             log_widget.write(Text(""))
         elif event.kind == "error":
             self._flush_stream_buffer(log_widget)
@@ -533,6 +510,14 @@ class PipBoyTuiApp(App[None]):
             pass
         if not text.strip():
             return
+        # Echo into the dialog pane so the transcript reads like a chat:
+        # user line right-aligned, assistant text left-aligned. Without
+        # this the user's own turn was invisible in #agent-log and only
+        # the assistant side of the conversation showed up.
+        try:
+            self._pump.agent_sink(AgentEvent(kind="user_input", text=text))
+        except Exception:
+            pass
         if self._on_user_line is not None:
             try:
                 result = self._on_user_line(text)
@@ -783,13 +768,19 @@ class PipBoyTuiApp(App[None]):
     def _flush_stream_buffer(
         self, log_widget: RichLog, *, materialize_markdown: bool = False,
     ) -> None:
-        """Drop streaming bookkeeping; optionally re-render the tail as Markdown."""
+        """Drop streaming bookkeeping; optionally re-render the tail as Markdown.
+
+        Trailing newlines in the buffer would render as a blank paragraph
+        below the Markdown block, pushing the turn footer one line away
+        from the reply. We ``rstrip`` so the footer sits flush against the
+        last line of the assistant's text.
+        """
         self._flush_think_buffer(log_widget)
         buf = self._stream_buf
         n = self._stream_tail_strips
         if materialize_markdown and buf.strip() and n > 0:
             _rich_log_strip_tail(log_widget, n)
-            log_widget.write(Markdown(buf, justify="left"))
+            log_widget.write(Markdown(buf.rstrip(), justify="left"))
         self._stream_buf = ""
         self._stream_tail_strips = 0
 
@@ -907,25 +898,9 @@ class PipBoyTuiApp(App[None]):
         Output uses Textual/Rich markup: ``[bold]LABEL[/]`` for field
         names, ``[dim]│[/]`` for the separator. The hosting ``Static``
         widget has ``markup=True`` by default.
-
-        When the agent is in plan mode (``self._plan_entered_at`` is
-        set), a ``PLAN`` row is prepended above the normal fields so
-        it's visible at a glance that the agent is drafting, not
-        executing.
         """
         s = self._side_snapshot
-        plan_row: str | None = None
-        if self._plan_entered_at is not None:
-            elapsed = max(0, int(time.time() - self._plan_entered_at))
-            if elapsed < 60:
-                age = f"{elapsed}s"
-            elif elapsed < 3600:
-                age = f"{elapsed // 60}m {elapsed % 60:02d}s"
-            else:
-                age = f"{elapsed // 3600}h {(elapsed % 3600) // 60:02d}m"
-            plan_row = f"[bold]PLAN[/]    [dim]│[/] [b yellow]active ({age})[/]"
-
-        if not s and plan_row is None:
+        if not s:
             return (
                 "[bold]STATUS[/]\n"
                 "[dim]─────[/]\n"
@@ -945,8 +920,6 @@ class PipBoyTuiApp(App[None]):
             ("uptime", "UPTIME"),
         )
         lines: list[str] = ["[bold]STATUS[/]", "[dim]─────[/]"]
-        if plan_row is not None:
-            lines.append(plan_row)
         for key, label in ordered:
             value = s.get(key)
             if value is None or value == "":

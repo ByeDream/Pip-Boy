@@ -55,17 +55,16 @@ def test_edit_replace_all_flag() -> None:
     assert "replace_all=true" in summary
 
 
-def test_bash_shows_command_truncated() -> None:
+def test_bash_shows_command() -> None:
     summary = format_tool_summary("Bash", {"command": "ls -la"})
     assert summary == "ls -la"
 
 
-def test_bash_command_is_clipped() -> None:
+def test_bash_long_command_is_not_clipped() -> None:
     long = "echo " + ("x" * 200)
     summary = format_tool_summary("Bash", {"command": long})
-    # _truncate with n=90 leaves 89 chars + ellipsis
-    assert summary.endswith("…")
-    assert len(summary) <= 90
+    assert summary == long
+    assert "…" not in summary
 
 
 def test_bash_newlines_are_flattened() -> None:
@@ -163,13 +162,13 @@ def test_agent_shows_subtype_and_description() -> None:
     assert "look for auth" in summary
 
 
-def test_total_length_clamped() -> None:
-    # Write with a monstrously long path gets clipped.
+def test_long_path_is_not_clipped() -> None:
     long_path = "/" + ("a" * 300)
     summary = format_tool_summary(
         "Write", {"file_path": long_path, "content": "x"}
     )
-    assert len(summary) <= 130  # _MAX_TOTAL_LEN + small slack for "path=" etc.
+    assert long_path in summary
+    assert "…" not in summary
 
 
 def test_sensitive_content_not_leaked() -> None:

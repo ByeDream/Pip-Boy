@@ -1,13 +1,13 @@
      ▓▒░  MEGADODO SIRIUS OS v42.∞  ·  UNIT MK.II  ░▒▓
   ╭──────────────────────────────────────────────────╮
-  │  [◍◯◯◯◯]   INITIALIZING ...                      │
+  │  [●●●●●]   READY · WELCOME HITCHHIKER            │
   │                                                  │
-  │   ▸ SUB-ETHA NETWORK       [▓▓░░░░░░]  _         │
-  │   ▸ BABEL FISH             [········]            │
-  │   ▸ TOWEL                  [········]            │
-  │   ▸ IMPROBABILITY DRIVE    [········]            │
-  │   ▸ ENTRY #42              [········]            │
+  │   ▸ SUB-ETHA NETWORK       [▓▓▓▓▓▓▓▓]  ✓         │
+  │   ▸ BABEL FISH             [▓▓▓▓▓▓▓▓]  ✓         │
+  │   ▸ TOWEL                  [▓▓▓▓▓▓▓▓]  ✓         │
+  │   ▸ IMPROBABILITY DRIVE    [▓▓▓▓▓▓▓▓]  ✓         │
+  │   ▸ ENTRY #42              [▓▓▓▓▓▓▓▓]  ✓         │
   │                                                  │
-  │                                                  │
+  │      ░▒▓█  D O N ' T   P A N I C  █▓▒░   [42]    │
   ╰──────────────────────────────────────────────────╯
         ☂  Always know where your towel is.

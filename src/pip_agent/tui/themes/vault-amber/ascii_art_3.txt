@@ -1,11 +1,11 @@
      ▓▒░  MEGADODO SIRIUS OS v42.∞  ·  UNIT MK.II  ░▒▓
   ╭──────────────────────────────────────────────────╮
-  │  [◍◯◯◯◯]   INITIALIZING ...                      │
+  │  [●●●◍◯]   LOADING ...                           │
   │                                                  │
-  │   ▸ SUB-ETHA NETWORK       [▓▓░░░░░░]  _         │
-  │   ▸ BABEL FISH             [········]            │
-  │   ▸ TOWEL                  [········]            │
-  │   ▸ IMPROBABILITY DRIVE    [········]            │
+  │   ▸ SUB-ETHA NETWORK       [▓▓▓▓▓▓▓▓]  ✓         │
+  │   ▸ BABEL FISH             [▓▓▓▓▓▓▓▓]  ✓         │
+  │   ▸ TOWEL                  [▓▓▓▓▓▓▓▓]  ✓         │
+  │   ▸ IMPROBABILITY DRIVE    [▓▓▓▓▓░░░]  _         │
   │   ▸ ENTRY #42              [········]            │
   │                                                  │
   │                                                  │

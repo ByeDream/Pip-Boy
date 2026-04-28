@@ -91,6 +91,20 @@ class AskUserModal(ModalScreen[str | None]):
         max-height: 10;
         margin-bottom: 1;
     }
+    /* Wasteland / vault-amber use foreground == accent, so Textual's
+       default highlighted row (accent-on-accent) renders unreadable.
+       Flip to background-on-accent for strong contrast in both focus
+       states. */
+    #ask-modal-body OptionList > .option-list--option-highlighted {
+        color: $background;
+        background: $accent;
+        text-style: bold;
+    }
+    #ask-modal-body OptionList:focus > .option-list--option-highlighted {
+        color: $background;
+        background: $accent;
+        text-style: bold;
+    }
     #ask-modal-body > Horizontal {
         height: 3;
         align: right middle;
@@ -137,8 +151,8 @@ class AskUserModal(ModalScreen[str | None]):
                     id=f"q{idx}-input",
                 )
             with Horizontal():
-                yield Button("Submit", variant="primary", id="ask-submit")
-                yield Button("Cancel", variant="default", id="ask-cancel")
+                yield Button("Submit", id="ask-submit")
+                yield Button("Cancel", id="ask-cancel")
 
     def _header_text(self) -> str:
         n = len(self._questions)
@@ -275,11 +289,10 @@ class PlanReviewModal(ModalScreen[str | None]):
                 id="plan-feedback",
             )
             with Horizontal():
-                yield Button("Approve (a)", variant="primary", id="plan-approve")
-                yield Button("Request changes (r)", variant="warning",
-                             id="plan-request")
-                yield Button("Reject (x)", variant="error", id="plan-reject")
-                yield Button("Cancel (esc)", variant="default", id="plan-cancel")
+                yield Button("Approve (a)", id="plan-approve")
+                yield Button("Request changes (r)", id="plan-request")
+                yield Button("Reject (x)", id="plan-reject")
+                yield Button("Cancel (esc)", id="plan-cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id
@@ -292,6 +305,21 @@ class PlanReviewModal(ModalScreen[str | None]):
         elif bid == "plan-cancel":
             self.action_cancel()
 
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Enter inside the feedback input submits `request changes: <msg>`.
+
+        Avoids the counter-intuitive "press r twice" flow — once the user
+        types feedback, Enter in the Input is the natural submit gesture.
+        Empty Enter still dismisses as plain ``"request changes"``.
+        """
+        if event.input.id != "plan-feedback":
+            return
+        feedback_text = event.value.strip()
+        if feedback_text:
+            self.dismiss(f"request changes: {feedback_text}")
+        else:
+            self.dismiss("request changes")
+
     def action_approve(self) -> None:
         self.dismiss("approve")
 
@@ -302,23 +330,16 @@ class PlanReviewModal(ModalScreen[str | None]):
         self.dismiss(None)
 
     def action_request_changes(self) -> None:
-        """Two-step: reveal the feedback input, then submit on second press."""
-        if not self._feedback_mode:
-            self._feedback_mode = True
-            try:
-                feedback = self.query_one("#plan-feedback", Input)
-                feedback.add_class("visible")
-                feedback.focus()
-            except Exception:
-                pass
+        """Reveal the feedback input and focus it. Submit happens via Enter
+        inside the input (see ``on_input_submitted``), not via a second r press.
+        Repeated r / button clicks are no-ops once the input is visible.
+        """
+        if self._feedback_mode:
             return
-        feedback_text = ""
+        self._feedback_mode = True
         try:
-            feedback_text = self.query_one("#plan-feedback", Input).value
+            feedback = self.query_one("#plan-feedback", Input)
+            feedback.add_class("visible")
+            feedback.focus()
         except Exception:
             pass
-        feedback_text = feedback_text.strip()
-        if feedback_text:
-            self.dismiss(f"request changes: {feedback_text}")
-        else:
-            self.dismiss("request changes")

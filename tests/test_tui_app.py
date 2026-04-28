@@ -283,107 +283,6 @@ async def test_apply_theme_is_idempotent() -> None:
         assert app.theme == "pipboy-wasteland"
 
 
-# ---------------------------------------------------------------------------
-# Plan-mode side-status tracking
-# ---------------------------------------------------------------------------
-
-
-def _render_status_plain(app: PipBoyTuiApp) -> str:
-    """Strip Rich markup so tests can assert on visible text."""
-    import re
-    return re.sub(r"\[/?[^\]]*\]", "", app._render_side_status())
-
-
-def test_side_status_without_plan_mode_has_no_plan_row() -> None:
-    """Smoke: a fresh App renders no PLAN row until EnterPlanMode fires."""
-    bundle = load_builtin_theme("wasteland")
-    pump = UiPump()
-    app = PipBoyTuiApp(
-        theme=bundle, pump=pump,
-        initial_side_snapshot={"agent": "pip-boy", "model": "t0"},
-    )
-    out = _render_status_plain(app)
-    assert "PLAN" not in out
-    assert "AGENT" in out
-
-
-def test_side_status_plan_mode_injects_row_with_elapsed() -> None:
-    """While _plan_entered_at is set, PLAN appears with a count-up age."""
-    import time as _time
-    bundle = load_builtin_theme("wasteland")
-    pump = UiPump()
-    app = PipBoyTuiApp(
-        theme=bundle, pump=pump,
-        initial_side_snapshot={"agent": "pip-boy", "model": "t0"},
-    )
-    app._plan_entered_at = _time.time() - 7  # 7 seconds ago
-    out = _render_status_plain(app)
-    assert "PLAN" in out
-    assert "active" in out
-    # 7s ago should render as "7s" (or close — we allow 6–8 for jitter).
-    assert any(f"{n}s" in out for n in range(5, 10))
-
-
-def test_side_status_plan_mode_row_above_agent() -> None:
-    """PLAN row is prepended before AGENT so it's the first thing users see."""
-    import time as _time
-    bundle = load_builtin_theme("wasteland")
-    pump = UiPump()
-    app = PipBoyTuiApp(
-        theme=bundle, pump=pump,
-        initial_side_snapshot={"agent": "pip-boy", "model": "t0 · claude"},
-    )
-    app._plan_entered_at = _time.time()
-    out = _render_status_plain(app)
-    plan_idx = out.find("PLAN")
-    agent_idx = out.find("AGENT")
-    assert plan_idx >= 0 and agent_idx >= 0
-    assert plan_idx < agent_idx
-
-
-def test_side_status_plan_mode_rendered_even_with_empty_snapshot() -> None:
-    """PLAN row renders even before the first snapshot arrives — otherwise
-    the 'initializing…' placeholder would hide the most useful signal."""
-    import time as _time
-    bundle = load_builtin_theme("wasteland")
-    pump = UiPump()
-    app = PipBoyTuiApp(theme=bundle, pump=pump)  # no initial_side_snapshot
-    app._plan_entered_at = _time.time()
-    out = _render_status_plain(app)
-    assert "PLAN" in out
-    assert "initializing" not in out
-
-
-@pytest.mark.asyncio
-async def test_enter_plan_mode_tool_event_sets_state() -> None:
-    """EnterPlanMode tool_use flips _plan_entered_at; ExitPlanMode clears it."""
-    bundle = load_builtin_theme("wasteland")
-    pump = UiPump()
-    app = PipBoyTuiApp(theme=bundle, pump=pump)
-    async with app.run_test() as pilot:
-        pump.agent_sink(AgentEvent(kind="tool_use", name="EnterPlanMode"))
-        await pilot.pause()
-        assert app._plan_entered_at is not None
-        pump.agent_sink(AgentEvent(kind="tool_use", name="ExitPlanMode"))
-        await pilot.pause()
-        assert app._plan_entered_at is None
-
-
-@pytest.mark.asyncio
-async def test_non_plan_tool_events_do_not_touch_state() -> None:
-    """Unrelated tool_use events (Bash, Read, Grep, …) must leave the
-    plan-mode tracker untouched."""
-    bundle = load_builtin_theme("wasteland")
-    pump = UiPump()
-    app = PipBoyTuiApp(theme=bundle, pump=pump)
-    async with app.run_test() as pilot:
-        assert app._plan_entered_at is None
-        pump.agent_sink(AgentEvent(kind="tool_use", name="Bash"))
-        pump.agent_sink(AgentEvent(kind="tool_use", name="Read"))
-        pump.agent_sink(AgentEvent(kind="tool_use", name="Grep"))
-        await pilot.pause()
-        assert app._plan_entered_at is None
-
 
 # ---------------------------------------------------------------------------
 # Agent pane split: #agent-log (dialog) vs #agent-log-detail (detail)
@@ -444,7 +343,10 @@ async def test_tool_use_lands_in_detail_not_dialog() -> None:
 
 
 @pytest.mark.asyncio
-async def test_finalize_footer_lands_in_detail_not_dialog() -> None:
+async def test_finalize_footer_trails_assistant_reply_in_dialog() -> None:
+    """Turn-stats footer belongs right after the assistant reply in the
+    main dialog pane — not tucked away in the detail strip — so the
+    reader can see tools/turns/time/cost without glancing sideways."""
     bundle = load_builtin_theme("wasteland")
     pump = UiPump()
     app = PipBoyTuiApp(theme=bundle, pump=pump)
@@ -457,12 +359,12 @@ async def test_finalize_footer_lands_in_detail_not_dialog() -> None:
         await pilot.pause()
         dialog = _log_text(app.query_one("#agent-log", RichLog))
         detail = _log_text(app.query_one("#agent-log-detail", RichLog))
-        # Dialog still has the assistant reply.
         assert "hi" in dialog
-        # Footer with turn/cost/elapsed metadata belongs in detail.
         # Theme templates vary ("turn"/"turns", "$"/"cost") — match any
-        # signature that proves the footer rendered here.
-        assert "turn" in detail or "$" in detail or "1.5s" in detail
+        # signature that proves the footer rendered in dialog.
+        assert "turn" in dialog or "$" in dialog or "1.5s" in dialog
+        # Detail strip should NOT carry a duplicate footer.
+        assert "turn" not in detail and "1.5s" not in detail
 
 
 @pytest.mark.asyncio
