@@ -476,6 +476,10 @@ class PipBoyTuiApp(App[None]):
             text = f"[!] {event.text}"
         elif event.kind == "shutdown":
             text = f"powering down — {event.text}".rstrip(" —")
+        elif event.kind == "tool_wait":
+            # Empty text is the "tool finished" sentinel — restore the
+            # bar to its default string rather than leaving it blank.
+            text = event.text or self._status_default_text()
         else:  # pragma: no cover — kind enum-checked at construction
             text = event.text
         try:

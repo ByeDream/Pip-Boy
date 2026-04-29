@@ -22,7 +22,9 @@ from claude_agent_sdk import (
     SystemMessage,
     TextBlock,
     ThinkingBlock,
+    ToolResultBlock,
     ToolUseBlock,
+    UserMessage,
     query,
 )
 
@@ -37,8 +39,12 @@ from pip_agent.mcp_tools import McpContext, build_mcp_server
 #
 # * ``thinking_delta``  — kwargs: ``text`` (raw partial)
 # * ``text_delta``      — kwargs: ``text``
-# * ``tool_use``        — kwargs: ``name``, ``input`` (raw tool-call
-#                          argument dict, as sent by the SDK)
+# * ``tool_use``        — kwargs: ``id`` (tool_use_id), ``name``,
+#                          ``input`` (raw tool-call argument dict, as
+#                          sent by the SDK)
+# * ``tool_result``     — kwargs: ``tool_use_id``, ``is_error`` (the
+#                          matching result for a prior ``tool_use``;
+#                          emitted from the subsequent ``UserMessage``)
 # * ``finalize``        — kwargs: ``final_text``, ``num_turns``,
 #                          ``cost_usd``, ``usage``, ``elapsed_s``
 #                          (wall seconds from stream open to result)
@@ -256,7 +262,7 @@ async def run_query(
     on_stream_event:
         Optional async callback fed semantic streaming events
         (``text_delta`` / ``thinking_delta`` / ``tool_use`` /
-        ``finalize``). When supplied, the SDK is asked for partial
+        ``tool_result`` / ``finalize``). When supplied, the SDK is asked for partial
         content-block messages so deltas land character-by-character;
         the callback drives :class:`pip_agent.channels.stream_render.\
 WecomStreamRenderer` (or any other progressive-reply consumer). When
@@ -529,8 +535,26 @@ async def _run_one_attempt(
                             if on_stream_event is not None:
                                 await on_stream_event(
                                     "tool_use",
+                                    id=block.id,
                                     name=block.name,
                                     input=block.input,
+                                )
+
+                elif isinstance(message, UserMessage):
+                    # Surface tool-result arrivals so consumers can track
+                    # lifecycle (e.g. status-bar "tool in flight" indicator).
+                    # Only ``ToolResultBlock`` is interesting here; the
+                    # agent pane's transcript of the next AssistantMessage
+                    # already covers what the model does with the result.
+                    if on_stream_event is not None and isinstance(
+                        message.content, list
+                    ):
+                        for block in message.content:
+                            if isinstance(block, ToolResultBlock):
+                                await on_stream_event(
+                                    "tool_result",
+                                    tool_use_id=block.tool_use_id,
+                                    is_error=bool(block.is_error),
                                 )
 
                 elif isinstance(message, SystemMessage):

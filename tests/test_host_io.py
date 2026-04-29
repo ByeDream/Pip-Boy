@@ -326,3 +326,166 @@ def test_double_install_warns_and_overwrites(
         assert host_io.active_pump() is pump2
     finally:
         host_io.uninstall_pump()
+
+
+# ---------------------------------------------------------------------------
+# Status-bar "blocking tool" indicator
+# ---------------------------------------------------------------------------
+
+
+import asyncio as _asyncio  # noqa: E402 — keep classes above import-free
+
+
+@pytest.fixture
+def tool_wait_state(monkeypatch: pytest.MonkeyPatch):
+    """Shrink the grace period and reset module state around each test."""
+    monkeypatch.setattr(host_io, "_TOOL_WAIT_THRESHOLD_S", 0.02)
+    host_io._tool_wait_in_flight.clear()
+    host_io._tool_wait_showing = False
+    if host_io._tool_wait_pending_task is not None:
+        host_io._tool_wait_pending_task.cancel()
+        host_io._tool_wait_pending_task = None
+    yield
+    host_io._tool_wait_in_flight.clear()
+    host_io._tool_wait_showing = False
+    if host_io._tool_wait_pending_task is not None:
+        host_io._tool_wait_pending_task.cancel()
+        host_io._tool_wait_pending_task = None
+
+
+def _tool_wait_events(pump: UiPump) -> list[object]:
+    """Collect all tool_wait StatusEvents posted to the pump's app."""
+    msgs = pump._app.messages  # type: ignore[attr-defined]
+    return [
+        m.event for m in msgs
+        if getattr(getattr(m, "event", None), "kind", "") == "tool_wait"
+    ]
+
+
+class TestToolWaitStatusBar:
+    """The status bar surfaces long-running tools after a grace period.
+
+    Covered:
+      * Tool that completes within the grace period never touches the
+        status bar (would just flicker).
+      * Tool still in flight past the grace period posts
+        ``tool_wait`` with non-empty text; matching ``tool_result``
+        posts an empty-text ``tool_wait`` (clear sentinel).
+      * Concurrent tools show a count. Clearing one while another is
+        still in flight updates the bar rather than collapsing it.
+      * ``finalize`` clears any leftover state so a stuck spinner
+        cannot leak across turns.
+    """
+
+    @pytest.mark.asyncio
+    async def test_fast_tool_under_threshold_never_posts(
+        self, attached_pump: UiPump, tool_wait_state,
+    ) -> None:
+        cb = host_io.build_cli_stream_event_cb()
+        assert cb is not None
+        await cb(
+            "tool_use",
+            id="tu-1",
+            name="Read",
+            input={"file_path": "/tmp/x.md"},
+        )
+        # Return well before the 20ms grace period.
+        await cb("tool_result", tool_use_id="tu-1", is_error=False)
+        # Let the (soon-to-be-cancelled) timer be scheduled/cancelled.
+        await _asyncio.sleep(0.04)
+        assert _tool_wait_events(attached_pump) == []
+
+    @pytest.mark.asyncio
+    async def test_slow_tool_posts_then_clears(
+        self, attached_pump: UiPump, tool_wait_state,
+    ) -> None:
+        cb = host_io.build_cli_stream_event_cb()
+        assert cb is not None
+        await cb(
+            "tool_use",
+            id="tu-1",
+            name="Bash",
+            input={"command": "sleep 10"},
+        )
+        await _asyncio.sleep(0.05)  # past threshold
+        shown = _tool_wait_events(attached_pump)
+        assert len(shown) == 1
+        assert "Bash" in shown[0].text
+        assert "sleep 10" in shown[0].text  # format_tool_summary included args
+        assert shown[0].text  # non-empty → "showing" state
+        await cb("tool_result", tool_use_id="tu-1", is_error=False)
+        cleared = _tool_wait_events(attached_pump)
+        assert len(cleared) == 2
+        assert cleared[-1].text == ""  # clear sentinel
+
+    @pytest.mark.asyncio
+    async def test_concurrent_tools_show_count(
+        self, attached_pump: UiPump, tool_wait_state,
+    ) -> None:
+        cb = host_io.build_cli_stream_event_cb()
+        assert cb is not None
+        await cb(
+            "tool_use", id="a", name="Bash", input={"command": "slow1"},
+        )
+        await cb(
+            "tool_use", id="b", name="Bash", input={"command": "slow2"},
+        )
+        await _asyncio.sleep(0.05)
+        events = _tool_wait_events(attached_pump)
+        # Expect: first post after timer fires (2 in flight → count=2),
+        # and the second tool_use before threshold didn't post anything.
+        # First non-empty post must mention "2 tools in flight".
+        assert events, "expected at least one tool_wait post"
+        non_empty = [e for e in events if e.text]
+        assert non_empty
+        assert "2 tools in flight" in non_empty[0].text
+
+        # End one — bar should update to a single-tool message, not clear.
+        await cb("tool_result", tool_use_id="a", is_error=False)
+        after_end_one = _tool_wait_events(attached_pump)
+        assert after_end_one[-1].text  # still non-empty
+        assert "2 tools" not in after_end_one[-1].text
+        assert "waiting on" in after_end_one[-1].text
+
+        # End the other — now bar should clear.
+        await cb("tool_result", tool_use_id="b", is_error=False)
+        after_end_both = _tool_wait_events(attached_pump)
+        assert after_end_both[-1].text == ""
+
+    @pytest.mark.asyncio
+    async def test_finalize_clears_leftover_state(
+        self, attached_pump: UiPump, tool_wait_state,
+    ) -> None:
+        """If the SDK / turn aborts mid-tool we must not leak a spinner."""
+        cb = host_io.build_cli_stream_event_cb()
+        assert cb is not None
+        await cb(
+            "tool_use", id="tu-1", name="Bash", input={"command": "x"},
+        )
+        await _asyncio.sleep(0.05)
+        assert any(
+            e.text for e in _tool_wait_events(attached_pump)
+        ), "spinner should be showing"
+        await cb(
+            "finalize", num_turns=1, cost_usd=0.0, usage={}, elapsed_s=1.0,
+        )
+        # Last tool_wait event must be the clear sentinel.
+        tw_events = _tool_wait_events(attached_pump)
+        assert tw_events[-1].text == ""
+        # And module state fully reset.
+        assert host_io._tool_wait_in_flight == {}
+        assert host_io._tool_wait_showing is False
+        assert host_io._tool_wait_pending_task is None
+
+    @pytest.mark.asyncio
+    async def test_missing_tool_id_is_tolerated(
+        self, attached_pump: UiPump, tool_wait_state,
+    ) -> None:
+        """A ``tool_use`` without an ``id`` must not crash the callback
+        and must not leave orphan state behind."""
+        cb = host_io.build_cli_stream_event_cb()
+        assert cb is not None
+        await cb("tool_use", name="Read", input={"file_path": "/tmp/x"})
+        await _asyncio.sleep(0.04)
+        assert _tool_wait_events(attached_pump) == []
+        assert host_io._tool_wait_in_flight == {}

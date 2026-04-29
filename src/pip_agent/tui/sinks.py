@@ -71,6 +71,8 @@ STATUS_EVENT_KINDS: frozenset[str] = frozenset(
         "scheduler",             # cron / heartbeat tick announcement
         "shutdown",              # "powering down" with reflect summary
         "ready",                 # "type and press Enter; /exit to quit"
+        "tool_wait",             # long-running tool indicator; empty text
+                                 # means "tool finished, restore default"
     }
 )
 
