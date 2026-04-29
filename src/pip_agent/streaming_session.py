@@ -485,6 +485,7 @@ class StreamingSession:
                                 if on_stream_event is not None:
                                     await on_stream_event(
                                         "tool_use",
+                                        id=block.id,
                                         name=block.name,
                                         input=block.input,
                                     )
