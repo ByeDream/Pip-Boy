@@ -842,14 +842,22 @@ class PipBoyTuiApp(App[None]):
         return "\n".join(lines)
 
     def _refresh_todo_pane(self) -> None:
-        """Redraw ``#todo-pane`` from the current ``_todos`` list."""
+        """Redraw ``#todo-pane`` from the current ``_todos`` list.
+
+        Hidden when empty OR when every item is completed/cancelled —
+        there's nothing actionable left to show.
+        """
         try:
             widget = self.query_one("#todo-pane", Static)
         except Exception:
             return
         content = self._render_todo_pane()
+        has_active = any(
+            t["status"] not in ("completed", "cancelled")
+            for t in self._todos
+        )
         widget.update(content)
-        show = bool(content) and self._theme.manifest.show_todo_pane
+        show = bool(content) and has_active and self._theme.manifest.show_todo_pane
         widget.display = show
 
     # ------------------------------------------------------------------

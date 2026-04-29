@@ -456,6 +456,41 @@ async def test_todo_write_merge_updates_existing() -> None:
 
 
 @pytest.mark.asyncio
+async def test_todo_write_all_completed_hides_pane() -> None:
+    bundle = load_builtin_theme("wasteland")
+    pump = UiPump()
+    app = PipBoyTuiApp(theme=bundle, pump=pump)
+    async with app.run_test() as pilot:
+        from textual.widgets import Static
+        pump.agent_sink(AgentEvent(
+            kind="tool_use",
+            name="TodoWrite",
+            tool_input={
+                "todos": [
+                    {"id": "a", "content": "Task A", "status": "in_progress"},
+                ],
+                "merge": False,
+            },
+        ))
+        await pilot.pause()
+        pane = app.query_one("#todo-pane", Static)
+        assert pane.display is True
+
+        pump.agent_sink(AgentEvent(
+            kind="tool_use",
+            name="TodoWrite",
+            tool_input={
+                "todos": [
+                    {"id": "a", "content": "Task A", "status": "completed"},
+                ],
+                "merge": True,
+            },
+        ))
+        await pilot.pause()
+        assert pane.display is False
+
+
+@pytest.mark.asyncio
 async def test_todo_write_empty_hides_pane() -> None:
     bundle = load_builtin_theme("wasteland")
     pump = UiPump()
