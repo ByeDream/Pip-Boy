@@ -8,8 +8,8 @@ specific built-in tools:
   Enter), the selection is dismissed as plain-text and forwarded
   to the chat via ``on_user_line``.
 
-* :class:`PlanReviewModal` — ``ExitPlanMode`` — shows the plan body,
-  user picks ``Approve`` / ``Request changes`` / ``Reject``. Selection
+* :class:`PlanReviewModal` — ``ExitPlanMode`` — shows the plan body
+  as Markdown, user picks ``Approve`` / ``Request changes`` / ``Reject``. Selection
   becomes the next user turn so the agent decides what to do with
   it (there's no SDK permission round-trip — see
   ``OVERNIGHT_REPORT.md`` for why this path rather than
@@ -32,7 +32,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, OptionList, Static
+from textual.widgets import Button, Input, Label, Markdown, OptionList, Static
 from textual.widgets.option_list import Option
 
 __all__ = ["AskUserModal", "PlanReviewModal", "format_ask_answers"]
@@ -216,7 +216,7 @@ class AskUserModal(ModalScreen[str | None]):
 class PlanReviewModal(ModalScreen[str | None]):
     """Approval UX for the ``ExitPlanMode`` tool call.
 
-    Shows the plan body in a scrollable block and three choice buttons.
+    Shows the plan body as Markdown in a scrollable block and three choice buttons.
     On select, dismisses with one of:
 
     * ``"approve"``                — user approves the plan as-is.
@@ -253,6 +253,9 @@ class PlanReviewModal(ModalScreen[str | None]):
         padding: 0 1;
         background: $surface;
     }
+    #plan-body Markdown {
+        height: auto;
+    }
     #plan-feedback {
         display: none;
         margin-top: 1;
@@ -283,7 +286,7 @@ class PlanReviewModal(ModalScreen[str | None]):
         with Vertical(id="plan-modal-body"):
             yield Label("Agent is requesting approval for a plan:")
             with ScrollableContainer(id="plan-body"):
-                yield Static(self._plan_text, markup=False)
+                yield Markdown(self._plan_text)
             yield Input(
                 placeholder="feedback for 'Request changes' (optional)",
                 id="plan-feedback",
