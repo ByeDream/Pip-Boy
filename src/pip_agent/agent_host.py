@@ -1553,6 +1553,7 @@ class AgentHost:
             user_id=user_id,
             scheduler=self._scheduler,
             account_id=account_id,
+            tui_app=self._tui_app,
         )
 
     async def process_inbound(self, inbound: InboundMessage) -> None:

@@ -12,6 +12,7 @@ Tools currently exposed:
   ``lookup_user``, ``reflect``
 * Cron: ``cron_add``, ``cron_remove``, ``cron_update``, ``cron_list``
 * Channel: ``send_file``
+* Editor: ``open_file`` (CLI channel only)
 * Plugin: ``plugin_list``, ``plugin_search``, ``plugin_install``,
   ``plugin_marketplace_add``, ``plugin_marketplace_list``
   (read + additive only — destructive ops live on the host
@@ -24,8 +25,12 @@ Tools currently exposed:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import os
+import shlex
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -72,6 +77,11 @@ class McpContext:
     # sends through ``send_image`` / ``send_file``. Empty for single-
     # identity channels (CLI, WeCom).
     account_id: str = ""
+    # Textual TUI app instance when running under the TUI — handlers that
+    # spawn TTY-taking subprocesses (``open_file`` launching vim/nano)
+    # need this to call ``app.suspend()``. ``Any`` avoids a TUI import
+    # cycle at module load; ``None`` in headless / remote-channel runs.
+    tui_app: Any | None = None
 
 
 def build_mcp_server(ctx: McpContext) -> McpSdkServerConfig:
@@ -80,6 +90,7 @@ def build_mcp_server(ctx: McpContext) -> McpSdkServerConfig:
         _memory_tools(ctx)
         + _cron_tools(ctx)
         + _channel_tools(ctx)
+        + _editor_tools(ctx)
         + _plugin_tools(ctx)
         + _web_tools(ctx)
     )
@@ -689,6 +700,252 @@ def _channel_tools(ctx: McpContext) -> list[SdkMcpTool]:
                 "required": ["path"],
             },
             handler=send_file,
+        ),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Editor tools — open_file
+#
+# Why this is an MCP tool and not a slash command
+# -----------------------------------------------
+# Same logic as ``send_file``: the LLM drives it based on the shape of
+# the conversation ("draft the config for me", "let me edit that plan
+# myself"), composing it with paths it got from Read/Write/Glob.
+#
+# Why CLI-only
+# ------------
+# Launching ``$VISUAL``/``$EDITOR`` only makes sense when the agent and
+# the user share a machine. Over a remote messaging channel (WeCom,
+# WeChat) the "editor on the host" would open on the host, not where
+# the user is sitting — surprising at best, confusing at worst. The
+# symmetric inverse of ``send_file``'s "remote channels only" rule.
+#
+# Why no timeout
+# --------------
+# SDK has no tool-response timeout (see ``streaming_session.py`` /
+# ``agent_runner.py``); handlers run as long as they need, matching
+# Bash contract. If the user walks off mid-edit, the turn sits on the
+# editor until they return.
+# ---------------------------------------------------------------------------
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        # Chunked read so a multi-GB file doesn't blow the heap. The
+        # editor path is unlikely to see huge files, but cheap defense.
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+# Editors that take over the terminal (curses / raw mode). Only these
+# need ``App.suspend()`` — GUI editors (notepad, code, subl, gedit …)
+# have their own window and must NOT trigger suspend, or the TUI
+# vanishes for no reason and confuses the user.
+_TTY_EDITORS = frozenset({"vim", "nvim", "vi", "nano", "pico"})
+
+
+def _needs_tty(argv: list[str]) -> bool:
+    """Return True if ``argv[0]`` is a TTY-taking editor.
+
+    ``emacs`` is special — the GUI build needs no TTY, but ``emacs -nw``
+    / ``--no-window-system`` / ``-t`` run in the terminal and do.
+    """
+    name = Path(argv[0]).stem.lower()
+    if name in _TTY_EDITORS:
+        return True
+    if name == "emacs":
+        return any(a in ("-nw", "-t", "--no-window-system") for a in argv[1:])
+    return False
+
+
+def _editor_tools(ctx: McpContext) -> list[SdkMcpTool]:
+
+    async def open_file(args: dict[str, Any]) -> dict[str, Any]:
+        ch = ctx.channel
+        # Inverse of ``send_file``: editor launch only works when the
+        # user is physically at the machine running Pip-Boy.
+        if ch is not None and ch.name != "cli":
+            return _error("open_file is only available on CLI.")
+
+        raw_path = args.get("path", "")
+        if not raw_path or not isinstance(raw_path, str):
+            return _error("'path' is required and must be a string.")
+
+        create_if_missing = bool(args.get("create_if_missing", False))
+
+        # ``expanduser()`` for ``~``; ``resolve(strict=False)`` for a
+        # canonical absolute path that still works when the file does
+        # not yet exist (we handle the missing case below).
+        try:
+            path = Path(raw_path).expanduser().resolve(strict=False)
+        except (OSError, RuntimeError) as exc:
+            return _error(f"Cannot resolve path {raw_path!r}: {exc}")
+
+        if not path.exists():
+            if create_if_missing:
+                try:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.touch()
+                except OSError as exc:
+                    return _error(
+                        f"Failed to create {path}: {exc}"
+                    )
+            else:
+                return _error(
+                    f"File does not exist: {path}. "
+                    "Pass create_if_missing=true to create it."
+                )
+        elif path.is_dir():
+            return _error(f"Path is a directory, not a file: {path}")
+
+        # Snapshot before. sha256 is the authoritative "did content
+        # change?" signal; mtime/size alone lie (some editors touch
+        # mtime without changing bytes, some update atomically with
+        # matching mtime). Reading twice is cheap.
+        stat_before = path.stat()
+        size_before = stat_before.st_size
+        mtime_before = stat_before.st_mtime
+        try:
+            hash_before = _sha256_file(path)
+        except OSError as exc:
+            return _error(f"Cannot read {path}: {exc}")
+
+        # Resolve editor. ``shlex.split`` lets users set
+        # ``EDITOR="code --wait"`` or ``VISUAL="vim -p"``.
+        editor_env = os.environ.get("VISUAL") or os.environ.get("EDITOR")
+        if editor_env:
+            try:
+                argv = shlex.split(editor_env) + [str(path)]
+            except ValueError as exc:
+                return _error(
+                    f"Malformed $VISUAL/$EDITOR {editor_env!r}: {exc}"
+                )
+        else:
+            default = "notepad" if sys.platform == "win32" else "nano"
+            argv = [default, str(path)]
+
+        # Launch. Two rules:
+        #
+        # 1. Use ``asyncio.create_subprocess_exec`` so the event loop
+        #    keeps running while we wait — ``subprocess.run`` in a
+        #    worker thread works for the wait itself, but ``suspend()``
+        #    mutates Textual driver state (signals, input pump, render
+        #    loop) that is only safe from the main event-loop thread.
+        #    Off-thread suspend drops the TUI and never recovers.
+        #
+        # 2. Only enter ``app.suspend()`` for TTY-taking editors
+        #    (vim/nano/…). GUI editors (notepad, code) have their own
+        #    window; suspending the TUI would just make it disappear
+        #    and look like a crash to the user.
+        async def _launch() -> int:
+            proc = await asyncio.create_subprocess_exec(*argv)
+            return await proc.wait()
+
+        tui_app = ctx.tui_app
+        want_suspend = (
+            tui_app is not None
+            and hasattr(tui_app, "suspend")
+            and _needs_tty(argv)
+        )
+        try:
+            if want_suspend:
+                with tui_app.suspend():
+                    returncode = await _launch()
+            else:
+                returncode = await _launch()
+        except FileNotFoundError:
+            return _error(
+                f"Editor not found: {argv[0]!r}. "
+                "Set $VISUAL or $EDITOR to an installed editor."
+            )
+        except OSError as exc:
+            return _error(f"Editor launch failed: {exc}")
+
+        # Snapshot after. File might have been deleted by the editor
+        # (some workflows rewrite via rename) — treat "gone" as error.
+        if not path.exists():
+            return _error(
+                f"File disappeared during edit: {path} "
+                f"(editor exit={returncode})"
+            )
+
+        stat_after = path.stat()
+        size_after = stat_after.st_size
+        mtime_after = stat_after.st_mtime
+        try:
+            hash_after = _sha256_file(path)
+        except OSError as exc:
+            return _error(f"Cannot read {path} after edit: {exc}")
+
+        status = (
+            "user_closed_with_modification"
+            if hash_after != hash_before
+            else "user_closed_without_modification"
+        )
+        payload = {
+            "status": status,
+            "path": str(path),
+            "size_before": size_before,
+            "size_after": size_after,
+            "mtime_before": mtime_before,
+            "mtime_after": mtime_after,
+        }
+        return _text(json.dumps(payload))
+
+    return [
+        SdkMcpTool(
+            name="open_file",
+            description=(
+                "Open a local text file in the user's editor "
+                "($VISUAL/$EDITOR, fallback notepad/nano) and wait "
+                "until they close it. Returns a status of "
+                "'user_closed_with_modification' or "
+                "'user_closed_without_modification' (content-hash "
+                "comparison) plus size/mtime before+after.\n\n"
+                "Use this when: you've drafted a plan/config/note "
+                "and want the user to review and tweak before you "
+                "proceed (prefer this over 'please check the file "
+                "and tell me what to change'); the user asks to "
+                "edit something themselves ('let me fix that', "
+                "'open X in my editor'); content is long enough "
+                "that in-chat iteration would be tedious (>~50 "
+                "lines, dense config, etc.).\n\n"
+                "Do NOT use for small edits you can make yourself "
+                "with Edit/Write, or files the user hasn't "
+                "expressed interest in reviewing.\n\n"
+                "After the user closes the editor and status is "
+                "'user_closed_with_modification', Read the file to "
+                "see what they wrote before continuing.\n\n"
+                "Set create_if_missing=true to create an empty file "
+                "(with parent directories) when the path doesn't "
+                "exist — useful for new drafts. Default false.\n\n"
+                "Only available on local CLI channel."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Absolute or ~-expandable path to the "
+                            "text file."
+                        ),
+                    },
+                    "create_if_missing": {
+                        "type": "boolean",
+                        "description": (
+                            "Create empty file (with parent dirs) "
+                            "if not exists. Default false."
+                        ),
+                        "default": False,
+                    },
+                },
+                "required": ["path"],
+            },
+            handler=open_file,
         ),
     ]
 
