@@ -162,6 +162,49 @@ def test_agent_shows_subtype_and_description() -> None:
     assert "look for auth" in summary
 
 
+def test_task_output_shows_task_id_and_nonblocking_flag() -> None:
+    summary = format_tool_summary("TaskOutput", {"task_id": "abc123"})
+    assert "task_id=abc123" in summary
+    assert "block=" not in summary  # blocking is default → suppressed
+
+    summary = format_tool_summary(
+        "TaskOutput", {"task_id": "abc123", "block": False},
+    )
+    assert "task_id=abc123" in summary
+    assert "block=false" in summary
+
+
+def test_task_stop_shows_task_id() -> None:
+    assert "task_id=abc" in format_tool_summary("TaskStop", {"task_id": "abc"})
+    # Deprecated alias ``shell_id`` — same surface.
+    assert "task_id=abc" in format_tool_summary("TaskStop", {"shell_id": "abc"})
+
+
+def test_schedule_wakeup_shows_delay_and_reason() -> None:
+    summary = format_tool_summary(
+        "ScheduleWakeup",
+        {"delaySeconds": 1200, "prompt": "...", "reason": "checking CI"},
+    )
+    assert "delay=1200s" in summary
+    assert "checking CI" in summary
+
+
+def test_monitor_shows_description_and_persistent_flag() -> None:
+    summary = format_tool_summary(
+        "Monitor",
+        {"description": "errors in deploy.log", "command": "...", "persistent": True},
+    )
+    assert "errors in deploy.log" in summary
+    assert "persistent=true" in summary
+
+    # Without persistent=True the flag is suppressed.
+    summary = format_tool_summary(
+        "Monitor",
+        {"description": "quick tail", "command": "...", "persistent": False},
+    )
+    assert "persistent=" not in summary
+
+
 def test_long_path_is_not_clipped() -> None:
     long_path = "/" + ("a" * 300)
     summary = format_tool_summary(

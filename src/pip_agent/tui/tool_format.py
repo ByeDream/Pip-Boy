@@ -165,6 +165,33 @@ def format_tool_summary(name: str, tool_input: dict[str, Any] | None) -> str:
         if desc:
             frags.append(_oneline(desc))
 
+    elif name == "TaskOutput":
+        tid = _str(tool_input.get("task_id"))
+        if tid:
+            frags.append(f"task_id={_oneline(tid)}")
+        if tool_input.get("block") is False:
+            frags.append("block=false")
+
+    elif name == "TaskStop":
+        tid = _str(tool_input.get("task_id") or tool_input.get("shell_id"))
+        if tid:
+            frags.append(f"task_id={_oneline(tid)}")
+
+    elif name == "ScheduleWakeup":
+        delay = tool_input.get("delaySeconds")
+        if isinstance(delay, int | float):
+            frags.append(f"delay={int(delay)}s")
+        reason = _str(tool_input.get("reason"))
+        if reason:
+            frags.append(_oneline(reason))
+
+    elif name == "Monitor":
+        desc = _str(tool_input.get("description"))
+        if desc:
+            frags.append(_oneline(desc))
+        if tool_input.get("persistent"):
+            frags.append("persistent=true")
+
     # Unknown tool → no args shown. Better to render "[tool: X]" than
     # to leak an unbounded dict.
 
