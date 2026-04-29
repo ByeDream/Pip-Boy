@@ -77,6 +77,7 @@ async def test_app_mounts_and_renders_locked_widget_ids() -> None:
         assert app.query_one("#pipboy-art")
         assert app.query_one("#pipboy-clock")
         assert app.query_one("#side-status")
+        assert app.query_one("#todo-pane")
         assert app.query_one("#app-log")
 
         # Pump must be attached at this point (on_mount ran).
@@ -379,6 +380,107 @@ async def test_error_lands_in_detail_not_dialog() -> None:
         detail = _log_text(app.query_one("#agent-log-detail", RichLog))
         assert "oops" in detail
         assert "oops" not in dialog
+
+
+# ---------------------------------------------------------------------------
+# TodoWrite → #todo-pane
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_todo_write_populates_todo_pane() -> None:
+    bundle = load_builtin_theme("wasteland")
+    pump = UiPump()
+    app = PipBoyTuiApp(theme=bundle, pump=pump)
+    async with app.run_test() as pilot:
+        from textual.widgets import Static
+        pane = app.query_one("#todo-pane", Static)
+        assert pane.display is False  # hidden when empty
+
+        pump.agent_sink(AgentEvent(
+            kind="tool_use",
+            name="TodoWrite",
+            tool_input={
+                "todos": [
+                    {"id": "a", "content": "First task", "status": "in_progress"},
+                    {"id": "b", "content": "Second task", "status": "pending"},
+                ],
+                "merge": False,
+            },
+        ))
+        await pilot.pause()
+
+        assert pane.display is True
+        rendered = str(pane.render())
+        assert "TODO" in rendered
+        assert "0/2" in rendered  # 0 completed out of 2
+        assert "[~]" in rendered
+        assert "First task" in rendered
+        assert "[ ]" in rendered
+        assert "Second task" in rendered
+
+
+@pytest.mark.asyncio
+async def test_todo_write_merge_updates_existing() -> None:
+    bundle = load_builtin_theme("wasteland")
+    pump = UiPump()
+    app = PipBoyTuiApp(theme=bundle, pump=pump)
+    async with app.run_test() as pilot:
+        pump.agent_sink(AgentEvent(
+            kind="tool_use",
+            name="TodoWrite",
+            tool_input={
+                "todos": [
+                    {"id": "a", "content": "Task A", "status": "pending"},
+                    {"id": "b", "content": "Task B", "status": "pending"},
+                ],
+                "merge": False,
+            },
+        ))
+        await pilot.pause()
+        assert len(app._todos) == 2
+
+        pump.agent_sink(AgentEvent(
+            kind="tool_use",
+            name="TodoWrite",
+            tool_input={
+                "todos": [
+                    {"id": "a", "content": "Task A", "status": "completed"},
+                ],
+                "merge": True,
+            },
+        ))
+        await pilot.pause()
+        assert app._todos[0]["status"] == "completed"
+        assert len(app._todos) == 2
+
+
+@pytest.mark.asyncio
+async def test_todo_write_empty_hides_pane() -> None:
+    bundle = load_builtin_theme("wasteland")
+    pump = UiPump()
+    app = PipBoyTuiApp(theme=bundle, pump=pump)
+    async with app.run_test() as pilot:
+        from textual.widgets import Static
+        pump.agent_sink(AgentEvent(
+            kind="tool_use",
+            name="TodoWrite",
+            tool_input={
+                "todos": [{"id": "a", "content": "X", "status": "pending"}],
+                "merge": False,
+            },
+        ))
+        await pilot.pause()
+        pane = app.query_one("#todo-pane", Static)
+        assert pane.display is True
+
+        pump.agent_sink(AgentEvent(
+            kind="tool_use",
+            name="TodoWrite",
+            tool_input={"todos": [], "merge": False},
+        ))
+        await pilot.pause()
+        assert pane.display is False
 
 
 @pytest.mark.asyncio

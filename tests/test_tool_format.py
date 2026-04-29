@@ -230,7 +230,6 @@ def test_sensitive_content_not_leaked() -> None:
 
 
 def test_detail_none_for_unsupported_tools() -> None:
-    assert format_tool_detail("Write", {"file_path": "/x"}) is None
     assert format_tool_detail("Read", {"file_path": "/x"}) is None
     assert format_tool_detail("Bash", {"command": "ls"}) is None
     assert format_tool_detail("EnterPlanMode", {"_": "_"}) is None
@@ -343,3 +342,119 @@ def test_detail_exitplanmode_clips_long_lines() -> None:
 def test_detail_exitplanmode_empty_plan_returns_none() -> None:
     assert format_tool_detail("ExitPlanMode", {"plan": ""}) is None
     assert format_tool_detail("ExitPlanMode", {"plan": None}) is None
+
+
+# ---------------------------------------------------------------------------
+# format_tool_detail — Edit diff preview
+# ---------------------------------------------------------------------------
+
+
+def test_detail_edit_shows_unified_diff() -> None:
+    detail = format_tool_detail(
+        "Edit",
+        {
+            "file_path": "/a/b.py",
+            "old_string": "def hello():\n    return 'hi'",
+            "new_string": "def hello():\n    return 'hello'",
+        },
+    )
+    assert detail is not None
+    assert "--- old" in detail
+    assert "+++ new" in detail
+    assert "-    return 'hi'" in detail
+    assert "+    return 'hello'" in detail
+
+
+def test_detail_edit_identical_strings_returns_none() -> None:
+    detail = format_tool_detail(
+        "Edit",
+        {"file_path": "/a.py", "old_string": "same", "new_string": "same"},
+    )
+    assert detail is None
+
+
+def test_detail_edit_missing_strings_returns_none() -> None:
+    assert format_tool_detail("Edit", {"file_path": "/a.py"}) is None
+    assert format_tool_detail(
+        "Edit", {"file_path": "/a.py", "old_string": "x"},
+    ) is None
+
+
+def test_detail_edit_clips_long_diffs() -> None:
+    old = "\n".join(f"line {i}" for i in range(50))
+    new = "\n".join(f"LINE {i}" for i in range(50))
+    detail = format_tool_detail(
+        "Edit", {"old_string": old, "new_string": new},
+    )
+    assert detail is not None
+    assert "more line" in detail
+
+
+# ---------------------------------------------------------------------------
+# format_tool_detail — Write content preview
+# ---------------------------------------------------------------------------
+
+
+def test_detail_write_shows_content_preview() -> None:
+    detail = format_tool_detail(
+        "Write",
+        {
+            "file_path": "/tmp/new.py",
+            "content": "from __future__ import annotations\nimport os\n",
+        },
+    )
+    assert detail is not None
+    assert "(file: /tmp/new.py)" in detail
+    assert "from __future__" in detail
+    assert "import os" in detail
+
+
+def test_detail_write_no_content_returns_none() -> None:
+    assert format_tool_detail("Write", {"file_path": "/x"}) is None
+    assert format_tool_detail("Write", {"file_path": "/x", "content": ""}) is None
+
+
+def test_detail_write_clips_long_content() -> None:
+    content = "\n".join(f"line {i}" for i in range(50))
+    detail = format_tool_detail(
+        "Write", {"file_path": "/big.txt", "content": content},
+    )
+    assert detail is not None
+    assert "more line" in detail
+
+
+# ---------------------------------------------------------------------------
+# format_tool_detail — NotebookEdit diff / new-cell preview
+# ---------------------------------------------------------------------------
+
+
+def test_detail_notebook_edit_diff_mode() -> None:
+    detail = format_tool_detail(
+        "NotebookEdit",
+        {
+            "notebook_path": "/nb.ipynb",
+            "old_string": "x = 1",
+            "new_string": "x = 2",
+        },
+    )
+    assert detail is not None
+    assert "--- old" in detail
+    assert "+++ new" in detail
+    assert "-x = 1" in detail
+    assert "+x = 2" in detail
+
+
+def test_detail_notebook_edit_new_cell() -> None:
+    detail = format_tool_detail(
+        "NotebookEdit",
+        {"notebook_path": "/nb.ipynb", "new_string": "print('hello')"},
+    )
+    assert detail is not None
+    assert "(new cell)" in detail
+    assert "print('hello')" in detail
+
+
+def test_detail_notebook_edit_no_new_string_returns_none() -> None:
+    assert format_tool_detail(
+        "NotebookEdit", {"notebook_path": "/nb.ipynb"},
+    ) is None

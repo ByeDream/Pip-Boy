@@ -14,6 +14,7 @@
  *           #pipboy-art        fixed height set dynamically (max 30)
  *           #pipboy-clock      fixed ~3 rows
  *         #side-status         auto height
+ *         #todo-pane           auto height (max 20)
  *         #app-log             1fr
  *
  * Theme owns: colors, borders, padding, font weight. Theme does NOT
@@ -107,6 +108,15 @@ Screen {
 
 #side-status {
     height: auto;
+    background: $surface;
+    color: $text;
+    padding: 1 0;
+    border-top: hkey $accent-darken-2;
+}
+
+#todo-pane {
+    height: auto;
+    max-height: 20;
     background: $surface;
     color: $text;
     padding: 1 0;

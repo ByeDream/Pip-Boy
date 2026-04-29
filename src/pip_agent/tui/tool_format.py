@@ -17,6 +17,7 @@ call from any thread.
 
 from __future__ import annotations
 
+import difflib
 from typing import Any
 
 __all__ = ["format_tool_detail", "format_tool_summary"]
@@ -206,13 +207,13 @@ def format_tool_detail(name: str, tool_input: dict[str, Any] | None) -> str | No
     block in the agent pane, or ``None`` when the one-line summary is
     enough.
 
-    Covers two cases where the summary is too terse to be useful:
+    Covered tools:
 
-    * ``AskUserQuestion`` — the user needs to see every question and its
-      options to know what's being asked; the summary only shows Q1's
-      text truncated.
-    * ``ExitPlanMode`` — the plan body is what the user cares about; the
-      summary just says ``plan=Nb``.
+    * ``AskUserQuestion`` — every question + options (summary only shows Q1).
+    * ``ExitPlanMode`` — the plan body (summary just says ``plan=Nb``).
+    * ``Edit`` — unified diff of ``old_string`` → ``new_string``.
+    * ``Write`` — first N lines of the file content.
+    * ``NotebookEdit`` — diff when both strings present, else new-cell preview.
 
     Output is capped at ``_DETAIL_MAX_LINES`` lines and each line at
     ``_DETAIL_MAX_LINE_LEN`` chars so a huge plan cannot flood the pane.
@@ -262,7 +263,52 @@ def format_tool_detail(name: str, tool_input: dict[str, Any] | None) -> str | No
                  for ln in plan.splitlines()]
         return _clip_block(["  " + ln for ln in lines])
 
+    if name == "Edit":
+        return _diff_detail(
+            tool_input.get("old_string"), tool_input.get("new_string"),
+        )
+
+    if name == "Write":
+        content = tool_input.get("content")
+        if not isinstance(content, str) or not content:
+            return None
+        path = _str(tool_input.get("file_path"))
+        header = f"(file: {path})" if path else "(file content)"
+        raw = content.splitlines()
+        lines = [f"  {header}"]
+        lines.extend("  " + _truncate(ln, _DETAIL_MAX_LINE_LEN) for ln in raw)
+        return _clip_block(lines)
+
+    if name == "NotebookEdit":
+        old = tool_input.get("old_string")
+        new = tool_input.get("new_string")
+        if isinstance(old, str) and isinstance(new, str):
+            return _diff_detail(old, new)
+        if isinstance(new, str) and new:
+            raw = new.splitlines()
+            lines = ["  (new cell)"]
+            lines.extend(
+                "  " + _truncate(ln, _DETAIL_MAX_LINE_LEN) for ln in raw
+            )
+            return _clip_block(lines)
+        return None
+
     return None
+
+
+def _diff_detail(old: Any, new: Any) -> str | None:
+    """Build a unified-diff detail block from old/new string pair."""
+    if not isinstance(old, str) or not isinstance(new, str):
+        return None
+    diff_lines = list(difflib.unified_diff(
+        old.splitlines(), new.splitlines(),
+        fromfile="old", tofile="new",
+        lineterm="", n=2,
+    ))
+    if not diff_lines:
+        return None
+    lines = ["  " + _truncate(ln, _DETAIL_MAX_LINE_LEN) for ln in diff_lines]
+    return _clip_block(lines)
 
 
 def _clip_block(lines: list[str]) -> str | None:

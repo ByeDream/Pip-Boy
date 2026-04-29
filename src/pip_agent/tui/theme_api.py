@@ -152,6 +152,7 @@ class ThemeManifest:
     show_art: bool = True
     show_app_log: bool = True
     show_status_bar: bool = True
+    show_todo_pane: bool = True
     footer_template: str = (
         "[{tools} tools - {turns} turns - {elapsed_s}s - ${cost}]"
     )
@@ -277,6 +278,7 @@ def validate_manifest_dict(
         - ``show_art`` (optional bool, default True)
         - ``show_app_log`` (optional bool, default True)
         - ``show_status_bar`` (optional bool, default True)
+        - ``show_todo_pane`` (optional bool, default True)
         - ``footer_template`` (optional string)
     * ``[palette]`` section: see :func:`validate_palette_dict`.
     """
@@ -309,6 +311,9 @@ def validate_manifest_dict(
     show_status_bar = _require_bool(
         theme, "show_status_bar", True, where=f"{where} [theme]"
     )
+    show_todo_pane = _require_bool(
+        theme, "show_todo_pane", True, where=f"{where} [theme]"
+    )
     footer_template = theme.get(
         "footer_template",
         "[{tools} tools - {turns} turns - {elapsed_s}s - ${cost}]",
@@ -332,6 +337,7 @@ def validate_manifest_dict(
         show_art=show_art,
         show_app_log=show_app_log,
         show_status_bar=show_status_bar,
+        show_todo_pane=show_todo_pane,
         footer_template=footer_template,
     )
 

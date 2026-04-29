@@ -16,6 +16,7 @@ Layout:
             │   ├── #pipboy-art
             │   └── #pipboy-clock
             ├── #side-status     auto height (snapshot of host state)
+            ├── #todo-pane       auto height (TodoWrite task list)
             └── #app-log         1fr — stdlib log mirror
 
 Three message handlers, one per sink, fed by
@@ -156,6 +157,11 @@ class PipBoyTuiApp(App[None]):
         self.register_theme(_tt)
         self.theme = _tt.name
 
+        # TodoWrite task list. Updated when the agent calls TodoWrite;
+        # rendered into ``#todo-pane`` in the side panel. Hidden when
+        # empty so the pane occupies zero vertical space until needed.
+        self._todos: list[dict[str, str]] = []
+
         # ``text_delta`` is often chunked per character. Buffer here and
         # rewrite the *tail* of ``#agent-log`` on each chunk so the reply
         # stays one growing block (no per-char rows; no extra pane jump).
@@ -258,10 +264,12 @@ class PipBoyTuiApp(App[None]):
                 )
             # The side pane is shown when *any* of its sub-widgets have
             # content the theme wants visible. A theme that disables
-            # both show_art and show_app_log effectively hides the
+            # all three (art, app_log, todo_pane) effectively hides the
             # pane entirely.
             side_has_art = manifest.show_art and bool(self._art_frames)
-            side_visible = bool(side_has_art or manifest.show_app_log)
+            side_visible = bool(
+                side_has_art or manifest.show_app_log or manifest.show_todo_pane
+            )
             if side_visible:
                 with Vertical(id="side-pane"):
                     with Vertical(id="side-top"):
@@ -275,6 +283,7 @@ class PipBoyTuiApp(App[None]):
                     yield Static(
                         self._render_side_status(), id="side-status"
                     )
+                    yield Static("", id="todo-pane")
                     if manifest.show_app_log:
                         yield RichLog(
                             id="app-log",
@@ -299,6 +308,10 @@ class PipBoyTuiApp(App[None]):
             self.query_one("#input", Input).focus()
         except Exception:  # pragma: no cover — input always present in v1
             pass
+
+        # #todo-pane starts hidden (empty todo list); _refresh_todo_pane
+        # will show it once a TodoWrite event arrives.
+        self._refresh_todo_pane()
 
         # Side-pane width: clamp(art_frame_width + 3, 50, 100).
         # +3 covers the pane's chrome: 1 col for `border-left: vkey` plus
@@ -423,6 +436,9 @@ class PipBoyTuiApp(App[None]):
             if detail:
                 target.write(Text(detail, style="bright_yellow"))
             target.write(Text(""))
+            # TodoWrite: update the side-panel todo list.
+            if event.name == "TodoWrite" and isinstance(event.tool_input, dict):
+                self._apply_todo_write(event.tool_input)
             # Interactive follow-up: for AskUserQuestion and
             # ExitPlanMode, pop a modal so the user can actually answer
             # / approve instead of staring at the dim trace. The modal
@@ -679,7 +695,7 @@ class PipBoyTuiApp(App[None]):
         self.refresh(layout=True)
 
     def _apply_visibility(self, bundle: ThemeBundle) -> None:
-        """Honour ``show_app_log`` / ``show_status_bar`` at runtime.
+        """Honour ``show_*`` flags at runtime.
 
         Widgets were composed once at mount; we toggle ``display``
         rather than unmounting so a later theme with the pane enabled
@@ -692,6 +708,7 @@ class PipBoyTuiApp(App[None]):
         for widget_id, visible in (
             ("#status-bar", m.show_status_bar),
             ("#app-log", m.show_app_log),
+            ("#todo-pane", m.show_todo_pane),
         ):
             try:
                 widget = self.query_one(widget_id)
@@ -705,7 +722,9 @@ class PipBoyTuiApp(App[None]):
             side_pane = None
         if side_pane is not None:
             side_pane.display = bool(
-                m.show_app_log or (m.show_art and bool(bundle.art_frames))
+                m.show_app_log
+                or m.show_todo_pane
+                or (m.show_art and bool(bundle.art_frames))
             )
 
     def _apply_art(self, bundle: ThemeBundle) -> None:
@@ -763,6 +782,76 @@ class PipBoyTuiApp(App[None]):
 
     # ------------------------------------------------------------------
     # Helpers
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Todo pane
+    # ------------------------------------------------------------------
+
+    def _apply_todo_write(self, tool_input: dict[str, object]) -> None:
+        """Merge or replace ``_todos`` from a TodoWrite tool_input."""
+        todos = tool_input.get("todos")
+        if not isinstance(todos, list):
+            return
+        merge = bool(tool_input.get("merge", False))
+        parsed: list[dict[str, str]] = []
+        for item in todos:
+            if not isinstance(item, dict):
+                continue
+            parsed.append({
+                "id": str(item.get("id", "")),
+                "content": str(item.get("content", "")),
+                "status": str(item.get("status", "pending")),
+            })
+        if merge and self._todos:
+            idx = {t["id"]: t for t in self._todos}
+            for t in parsed:
+                if t["id"] in idx:
+                    idx[t["id"]].update(
+                        {k: v for k, v in t.items() if v},
+                    )
+                else:
+                    self._todos.append(t)
+        else:
+            self._todos = parsed
+        self._refresh_todo_pane()
+
+    def _render_todo_pane(self) -> str:
+        """Format the current todo list for the ``#todo-pane`` Static widget."""
+        if not self._todos:
+            return ""
+        _STATUS_GLYPH = {
+            "completed": "[x]",
+            "in_progress": "[~]",
+            "cancelled": "[-]",
+        }
+        done = sum(1 for t in self._todos if t["status"] == "completed")
+        lines: list[str] = [
+            f"[bold]TODO[/]  {done}/{len(self._todos)}",
+            "[dim]─────[/]",
+        ]
+        for t in self._todos:
+            glyph = _STATUS_GLYPH.get(t["status"], "[ ]")
+            text = t.get("content", "")
+            if t["status"] == "completed":
+                lines.append(f"[dim]{glyph} {text}[/]")
+            elif t["status"] == "in_progress":
+                lines.append(f"[bold bright_yellow]{glyph} {text}[/]")
+            else:
+                lines.append(f"{glyph} {text}")
+        return "\n".join(lines)
+
+    def _refresh_todo_pane(self) -> None:
+        """Redraw ``#todo-pane`` from the current ``_todos`` list."""
+        try:
+            widget = self.query_one("#todo-pane", Static)
+        except Exception:
+            return
+        content = self._render_todo_pane()
+        widget.update(content)
+        show = bool(content) and self._theme.manifest.show_todo_pane
+        widget.display = show
+
     # ------------------------------------------------------------------
 
     def _status_default_text(self) -> str:
