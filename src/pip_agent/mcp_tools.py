@@ -30,6 +30,7 @@ import json
 import logging
 import os
 import shlex
+import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -826,6 +827,20 @@ def _editor_tools(ctx: McpContext) -> list[SdkMcpTool]:
         else:
             default = "notepad" if sys.platform == "win32" else "nano"
             argv = [default, str(path)]
+
+        # Resolve the executable against PATH ourselves. On Windows,
+        # ``asyncio.create_subprocess_exec`` calls ``CreateProcess``
+        # directly, which does NOT honour ``PATHEXT`` — so a bare
+        # ``code`` fails with FileNotFoundError even though the real
+        # file is ``code.cmd`` sitting on PATH. ``shutil.which`` does
+        # the PATHEXT dance on Windows and is a no-op cost elsewhere.
+        resolved = shutil.which(argv[0])
+        if resolved is None:
+            return _error(
+                f"Editor not found: {argv[0]!r}. "
+                "Set $VISUAL or $EDITOR to an installed editor."
+            )
+        argv[0] = resolved
 
         # Launch. Two rules:
         #

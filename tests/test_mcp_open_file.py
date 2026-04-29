@@ -115,6 +115,19 @@ def _clear_editor_env(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("EDITOR", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _stub_which(monkeypatch: pytest.MonkeyPatch):
+    """Pass-through ``shutil.which`` so argv assertions keep seeing the
+    short name the handler built, not whatever absolute path the test
+    machine happens to resolve ``vim`` / ``code`` / ``notepad`` to.
+    Tests that want to exercise the "editor not on PATH" branch override
+    this with their own ``lambda _: None``."""
+    monkeypatch.setattr(
+        "pip_agent.mcp_tools.shutil.which",
+        lambda name: name,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Channel gate
 # ---------------------------------------------------------------------------
@@ -280,6 +293,31 @@ class TestEditorResolution:
             result = _run(_get_open_file(ctx)({"path": str(f)}))
         assert result.get("is_error") is True
         assert "not found" in _text_of(result).lower()
+
+    def test_editor_not_on_path_returns_error(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """Regression: on Windows, ``asyncio.create_subprocess_exec``
+        goes straight to ``CreateProcess`` and skips PATHEXT, so a bare
+        ``code`` never resolves to ``code.cmd``. The handler now pre-
+        resolves via ``shutil.which`` and must return a clean error
+        when that returns ``None`` (instead of the FileNotFoundError
+        surfacing from CreateProcess)."""
+        f = tmp_path / "x.txt"
+        f.write_text("hi")
+        monkeypatch.setenv("EDITOR", "ghost-editor")
+        monkeypatch.setattr(
+            "pip_agent.mcp_tools.shutil.which", lambda _: None
+        )
+        ctx = McpContext(workdir=tmp_path)
+        exec_mock = _exec_mock()
+        with patch(
+            "pip_agent.mcp_tools.asyncio.create_subprocess_exec", exec_mock
+        ):
+            result = _run(_get_open_file(ctx)({"path": str(f)}))
+        assert result.get("is_error") is True
+        assert "not found" in _text_of(result).lower()
+        exec_mock.assert_not_called()
 
     def test_malformed_editor_env_returns_error(
         self, tmp_path: Path, monkeypatch
