@@ -34,9 +34,8 @@ One Pip-Boy host, many surfaces. All channels feed into the same inbound message
 - **Headless** — `--headless` mode disables TUI, stdin, and the CLI channel entirely; only remote channels (WeCom/WeChat) are active. Suitable for unattended server deployments.
 
 <table align="center"><tr>
-  <td align="center"><strong>CLI (Textual TUI)</strong><br/><img src="docs/Imgs/TUI_Theme_Wasteland.jpg" width="420" alt="CLI — Textual TUI with Wasteland theme" /></td>
-  <td align="center"><strong>WeChat</strong><br/><img src="docs/Imgs/wechat.jpg" width="220" alt="WeChat — voice, image, and text" /></td>
-  <td align="center"><strong>WeCom</strong><br/><img src="docs/Imgs/wecom.jpg" width="220" alt="WeCom — text, file delivery, token stats" /></td>
+  <td align="center"><strong>WeChat</strong><br/><img src="docs/Imgs/wechat.jpg" width="280" alt="WeChat — voice, image, and text" /></td>
+  <td align="center"><strong>WeCom</strong><br/><img src="docs/Imgs/wecom.jpg" width="280" alt="WeCom — text, file delivery, token stats" /></td>
 </tr></table>
 
 ### User identity & ACL
