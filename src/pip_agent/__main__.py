@@ -100,6 +100,13 @@ def main(argv: list[str] | None = None) -> None:
         help="Skip TUI bootstrap and run in line mode regardless of "
              "terminal capability.",
     )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run without TUI, stdin, or CLI channel. "
+             "Only remote channels (WeCom/WeChat) are active. "
+             "Suitable for unattended server deployments.",
+    )
 
     # ``doctor`` is dispatched as a sub-parser instead of an action
     # flag because PipBoyCLITheme/design.md §C makes it a separate
@@ -157,7 +164,10 @@ def main(argv: list[str] | None = None) -> None:
 
     from pip_agent.agent_host import run_host
     _profile.cold_start("run_host_imported")
-    run_host(force_no_tui=args.no_tui)
+    run_host(
+        force_no_tui=args.no_tui,
+        headless=getattr(args, "headless", False),
+    )
 
 
 if __name__ == "__main__":

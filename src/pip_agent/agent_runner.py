@@ -124,12 +124,20 @@ def _builtin_disallowed_tools() -> list[str]:
     When ``USE_CUSTOM_WEB_TOOLS=true`` (default), our MCP ``web_search``
     / ``web_fetch`` replace CC's native ``WebSearch`` / ``WebFetch``
     whose schema some upstream proxies reject.
+
+    In headless mode (``--headless``), interactive tools that require a
+    human at the terminal are also disabled: ``TodoWrite``,
+    ``AskUserQuestion``, and ``ExitPlanMode``.
     """
+    import pip_agent.config as _cfg
     from pip_agent.config import settings
 
+    tools: list[str] = []
     if settings.use_custom_web_tools:
-        return ["WebFetch", "WebSearch"]
-    return []
+        tools.extend(["WebFetch", "WebSearch"])
+    if _cfg.headless:
+        tools.extend(["TodoWrite", "AskUserQuestion", "ExitPlanMode"])
+    return tools
 
 
 class _StderrBuffer:

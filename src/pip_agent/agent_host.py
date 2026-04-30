@@ -2760,7 +2760,7 @@ def _bootstrap_tui(
         return None, None, None
 
 
-def run_host(*, force_no_tui: bool = False) -> None:
+def run_host(*, force_no_tui: bool = False, headless: bool = False) -> None:
     """Blocking multi-channel entry point.
 
     Starts channel threads, then enters an asyncio event loop that processes
@@ -2773,9 +2773,15 @@ def run_host(*, force_no_tui: bool = False) -> None:
     if it fails — that's the user-visible meaning of "TUI is the
     default mode" from PipBoyCLITheme/design.md §5.
 
+    ``headless`` (default ``False``): when True the host runs without
+    any local interactive surface — no TUI, no stdin reader, no CLI
+    channel. Only remote channels (WeCom / WeChat) are active.
+    Interactive tools (TodoWrite, AskUserQuestion, ExitPlanMode) are
+    disabled. Intended for unattended server deployments (tmux / systemd).
+
     Channel enablement rules
     ------------------------
-    * **CLI** is always registered.
+    * **CLI** is registered unless ``headless`` is True.
     * **WeCom** is registered iff ``WECOM_BOT_ID`` + ``WECOM_BOT_SECRET``
       env vars are set.
     * **WeChat** is auto-registered at boot iff at least one *valid*
@@ -2790,6 +2796,9 @@ def run_host(*, force_no_tui: bool = False) -> None:
     :func:`pip_agent.console_io.force_utf8_console` is called from
     ``__main__.main()`` instead. See that module's docstring for why.
     """
+
+    import pip_agent.config as _cfg
+    _cfg.headless = headless
 
     from pip_agent import _profile
     from pip_agent.scaffold import ensure_claude_model_overrides, ensure_workspace
@@ -2832,14 +2841,9 @@ def run_host(*, force_no_tui: bool = False) -> None:
     _sweep_legacy_wechat(state_dir, binding_table, BINDINGS_PATH)
 
     channel_mgr = ChannelManager()
-    cli_channel = CLIChannel()
-    channel_mgr.register(cli_channel)
-    # Fine-grained cold-start markers inside the historical
-    # ``channels_ready`` block. v2 profiling showed a ~500 ms opaque
-    # gap here between ``registry_ready`` and ``channels_ready``; these
-    # sub-markers decompose it into (wechat import / wechat init /
-    # wechat login-check / wecom import / wecom init) so optimisation
-    # effort can target the actual tall bar instead of guessing.
+    if not headless:
+        cli_channel = CLIChannel()
+        channel_mgr.register(cli_channel)
     _profile.cold_start("cli_channel_registered")
 
     stop_event = threading.Event()
@@ -2942,41 +2946,42 @@ def run_host(*, force_no_tui: bool = False) -> None:
     _profile.cold_start("scheduler_ready")
 
     # ------------------------------------------------------------------
-    # Theme resolution (Phase B). Done before AgentHost construction so
-    # the host can carry the manager through to the slash-command
-    # context. Discovery is best-effort: a broken local theme is
-    # logged and skipped (validated in tests/test_theme_manager.py),
-    # never re-raised. The manager is still constructed when a runtime
-    # error somehow trips the walker, but the resolver falls back to
-    # the package-default ``wasteland`` so boot continues.
+    # Theme resolution (Phase B). Skipped entirely in headless mode —
+    # no TUI means no theme needed. The AgentHost still gets
+    # constructed with None/empty values for the theme fields.
     # ------------------------------------------------------------------
-    from pip_agent.host_state import (
-        HostState as _HostState,
-    )
-    from pip_agent.host_state import (
-        resolve_active_theme_name,
-    )
-    from pip_agent.tui import DEFAULT_THEME_NAME, ThemeManager
-
-    host_state = _HostState(workspace_pip_dir=state_dir)
-    theme_manager = ThemeManager(workdir=WORKDIR)
-    try:
-        theme_manager.discover()
-    except Exception:  # noqa: BLE001 — never crash boot on a theme walker bug
-        log.exception("ThemeManager.discover crashed; theme catalogue empty.")
-    requested_theme = resolve_active_theme_name(
-        state=host_state, default=DEFAULT_THEME_NAME,
-    )
-    try:
-        active_bundle = theme_manager.resolve(requested_theme)
-        active_theme_name = active_bundle.manifest.name
-    except LookupError:
-        log.error(
-            "No themes installed (default '%s' missing). "
-            "TUI will use the package's wasteland fallback.",
-            DEFAULT_THEME_NAME,
+    if headless:
+        host_state = None
+        theme_manager = None
+        active_theme_name = ""
+    else:
+        from pip_agent.host_state import (
+            HostState as _HostState,
         )
-        active_theme_name = DEFAULT_THEME_NAME
+        from pip_agent.host_state import (
+            resolve_active_theme_name,
+        )
+        from pip_agent.tui import DEFAULT_THEME_NAME, ThemeManager
+
+        host_state = _HostState(workspace_pip_dir=state_dir)
+        theme_manager = ThemeManager(workdir=WORKDIR)
+        try:
+            theme_manager.discover()
+        except Exception:  # noqa: BLE001 — never crash boot on a theme walker bug
+            log.exception("ThemeManager.discover crashed; theme catalogue empty.")
+        requested_theme = resolve_active_theme_name(
+            state=host_state, default=DEFAULT_THEME_NAME,
+        )
+        try:
+            active_bundle = theme_manager.resolve(requested_theme)
+            active_theme_name = active_bundle.manifest.name
+        except LookupError:
+            log.error(
+                "No themes installed (default '%s' missing). "
+                "TUI will use the package's wasteland fallback.",
+                DEFAULT_THEME_NAME,
+            )
+            active_theme_name = DEFAULT_THEME_NAME
 
     host = AgentHost(
         registry=registry,
@@ -2999,56 +3004,67 @@ def run_host(*, force_no_tui: bool = False) -> None:
     _profile.cold_start("channels_ready", channels=banner_transports)
 
     # ------------------------------------------------------------------
-    # TUI bootstrap (runs the capability ladder; sets host_io's active
-    # pump on success). Must happen BEFORE the banner emit so the
-    # banner is routed through the pump rather than printed onto a
-    # canvas the App is about to take over.
+    # TUI bootstrap. Skipped in headless mode — no interactive surface.
     # ------------------------------------------------------------------
-    boot_time = time.time()
+    tui_app = None
+    tui_pump = None
+    tui_log_handler = None
 
-    def _snapshot_provider() -> dict[str, str]:
-        return _build_side_snapshot(
-            host=host,
-            registry=registry,
-            channel_mgr=channel_mgr,
-            scheduler=scheduler,
-            boot_time=boot_time,
+    if not headless:
+        boot_time = time.time()
+
+        def _snapshot_provider() -> dict[str, str]:
+            return _build_side_snapshot(
+                host=host,
+                registry=registry,
+                channel_mgr=channel_mgr,
+                scheduler=scheduler,
+                boot_time=boot_time,
+            )
+
+        try:
+            initial_snapshot = _snapshot_provider()
+        except Exception:  # noqa: BLE001
+            log.exception("Initial side-status snapshot build failed.")
+            initial_snapshot = {}
+
+        tui_app, tui_pump, tui_log_handler = _bootstrap_tui(
+            workdir=WORKDIR,
+            force_no_tui=force_no_tui,
+            msg_queue=msg_queue,
+            q_lock=q_lock,
+            theme_manager=theme_manager,
+            active_theme_name=active_theme_name,
+            initial_side_snapshot=initial_snapshot,
+            snapshot_provider=_snapshot_provider,
         )
-
-    try:
-        initial_snapshot = _snapshot_provider()
-    except Exception:  # noqa: BLE001
-        log.exception("Initial side-status snapshot build failed.")
-        initial_snapshot = {}
-
-    tui_app, tui_pump, tui_log_handler = _bootstrap_tui(
-        workdir=WORKDIR,
-        force_no_tui=force_no_tui,
-        msg_queue=msg_queue,
-        q_lock=q_lock,
-        theme_manager=theme_manager,
-        active_theme_name=active_theme_name,
-        initial_side_snapshot=initial_snapshot,
-        snapshot_provider=_snapshot_provider,
-    )
-    host.set_tui_app(tui_app)
+        host.set_tui_app(tui_app)
 
     from pip_agent import __version__
-    from pip_agent.host_io import emit_banner
 
     agents_list = ", ".join(a.id for a in registry.list_agents())
-    emit_banner(
-        "============================================\n"
-        "  ROBCO INDUSTRIES (TM) TERMLINK PROTOCOL\n"
-        "  PIP-BOY 3000 MARK IV  [SDK HOST]\n"
-        f"  Personal Assistant Module v{__version__}\n"
-        "============================================\n"
-        "  Welcome, Vault Dweller. Type '/exit' to\n"
-        "  power down.\n"
-        f"  Channels: {', '.join(banner_transports) if banner_transports else 'none'}\n"
-        f"  Agents: {agents_list}\n"
-        "============================================"
-    )
+    if headless:
+        log.info(
+            "Pip-Boy v%s headless — channels: %s — agents: %s",
+            __version__,
+            ", ".join(banner_transports) if banner_transports else "none",
+            agents_list,
+        )
+    else:
+        from pip_agent.host_io import emit_banner
+
+        emit_banner(
+            "============================================\n"
+            "  ROBCO INDUSTRIES (TM) TERMLINK PROTOCOL\n"
+            "  PIP-BOY 3000 MARK IV  [SDK HOST]\n"
+            f"  Personal Assistant Module v{__version__}\n"
+            "============================================\n"
+            "  Welcome, Vault Dweller. Type '/exit' to\n"
+            "  power down.\n"
+            f"  Channels: {', '.join(banner_transports) if banner_transports else 'none'}\n"
+            f"  Agents: {agents_list}\n"
+            "============================================"
+        )
 
     # The scheduler and all remote channels push into ``msg_queue``, so the
     # main loop always drains that queue (even in CLI-only mode).
@@ -3089,25 +3105,23 @@ def run_host(*, force_no_tui: bool = False) -> None:
                             peer_id="cli-user",
                         ))
 
-        # Input source picker: line mode = stdin reader thread; TUI
-        # mode = the App's input box already enqueues via
-        # ``_tui_on_user_line`` (wired in ``_bootstrap_tui``). Spawning
-        # the stdin thread under a TUI would race the App for
-        # keystrokes and double-submit every line.
+        # Input source picker: headless = no local input at all; line
+        # mode = stdin reader thread; TUI mode = the App's input box
+        # already enqueues via ``_tui_on_user_line``. Spawning the
+        # stdin thread under a TUI would race the App for keystrokes.
         tui_app_task: asyncio.Task[Any] | None = None
-        if tui_app is None:
+        if headless:
+            pass  # no local input source
+        elif tui_app is None:
             stdin_t = threading.Thread(target=_stdin_reader, daemon=True)
             stdin_t.start()
         else:
-            # ``run_async`` returns when the App's loop exits (clean
-            # ``app.exit()``, Ctrl+C, driver crash). We schedule it as
-            # a task on this same asyncio loop so the existing message
-            # drain loop can co-exist with rendering.
             tui_app_task = loop.create_task(tui_app.run_async())
 
-        from pip_agent.host_io import emit_ready
+        if not headless:
+            from pip_agent.host_io import emit_ready
 
-        emit_ready("(type and press Enter; /exit to quit)")
+            emit_ready("(type and press Enter; /exit to quit)")
 
         # ``process_inbound`` tasks are fired and tracked, not awaited
         # each tick. Awaiting would re-introduce the head-of-line bug

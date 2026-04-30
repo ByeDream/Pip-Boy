@@ -249,3 +249,10 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# Runtime flag set by ``run_host(headless=True)``. NOT a pydantic field —
+# ``--headless`` is a CLI concern, not a ``.env`` knob. Read by
+# ``agent_runner._builtin_disallowed_tools`` and ``streaming_session``
+# to disable interactive tools (TodoWrite, AskUserQuestion, ExitPlanMode)
+# when no human is at the terminal.
+headless: bool = False
