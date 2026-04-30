@@ -384,3 +384,102 @@ def _check_git(workdir: Path) -> None:
             "Not a git repository: %s. Worktree features will be unavailable.",
             workdir,
         )
+
+
+# ---------------------------------------------------------------------------
+# Claude Code settings — modelOverrides auto-sync
+# ---------------------------------------------------------------------------
+
+_MODEL_FAMILIES: tuple[str, ...] = ("haiku", "sonnet", "opus")
+
+
+def _derive_model_override(name: str) -> tuple[str, str] | None:
+    """Derive a ``modelOverrides`` entry for a non-canonical model name.
+
+    Returns ``(canonical, actual)`` when *name* uses a non-canonical format
+    (e.g. Venus ``claude-4-5-haiku-20251001`` vs canonical
+    ``claude-haiku-4-5-20251001``). Returns ``None`` when the name is
+    already canonical or unrecognisable.
+    """
+    parts = name.split("-")
+    if not parts or parts[0] != "claude" or len(parts) < 3:
+        return None
+    for family in _MODEL_FAMILIES:
+        if family not in parts:
+            continue
+        fi = parts.index(family)
+        if fi == 1:
+            return None
+        without = parts[:fi] + parts[fi + 1 :]
+        canonical_parts = [without[0], family] + without[1:]
+        canonical = "-".join(canonical_parts)
+        return (canonical, name)
+    return None
+
+
+def ensure_claude_model_overrides() -> None:
+    """Sync ``modelOverrides`` in ``~/.claude/settings.json`` from ``.env``.
+
+    Venus uses non-canonical model names (e.g. ``claude-4-5-haiku-*``
+    instead of ``claude-haiku-4-5-*``). ``claude.exe`` cannot normalise
+    these, so capability detection (thinking / effort) and sub-agent
+    model resolution break.  ``modelOverrides`` is the native
+    ``claude.exe`` setting that fixes both by teaching it the mapping.
+
+    Only runs when ``ANTHROPIC_BASE_URL`` contains ``"venus"``; direct
+    Anthropic API users are unaffected.
+    """
+    from pip_agent.config import settings
+
+    base_url = (settings.anthropic_base_url or "").strip()
+    if "venus" not in base_url.lower():
+        return
+
+    overrides: dict[str, str] = {}
+    for model in (settings.model_t0, settings.model_t1, settings.model_t2):
+        name = (model or "").strip()
+        if not name:
+            continue
+        pair = _derive_model_override(name)
+        if pair:
+            overrides[pair[0]] = pair[1]
+
+    if not overrides:
+        return
+
+    settings_path = Path.home() / ".claude" / "settings.json"
+    if settings_path.is_file():
+        try:
+            data = json.loads(settings_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            data = {}
+    else:
+        data = {}
+
+    if not isinstance(data, dict):
+        data = {}
+
+    existing = data.get("modelOverrides")
+    if not isinstance(existing, dict):
+        existing = {}
+
+    changed = False
+    for canonical, actual in overrides.items():
+        if existing.get(canonical) != actual:
+            existing[canonical] = actual
+            changed = True
+
+    if not changed:
+        return
+
+    data["modelOverrides"] = existing
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    logger.info(
+        "Synced modelOverrides to %s: %s",
+        settings_path,
+        overrides,
+    )

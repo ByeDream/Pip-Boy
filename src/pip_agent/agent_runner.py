@@ -77,7 +77,7 @@ class QueryResult:
 # author". See H6 in ``code_review_plan_133b34c7.plan.md``.
 
 
-def _build_env(model: str = "") -> dict[str, str]:
+def _build_env() -> dict[str, str]:
     """Collect env vars to forward to the Claude Code CLI subprocess.
 
     Credential resolution + the proxy rule live in
@@ -100,12 +100,8 @@ def _build_env(model: str = "") -> dict[str, str]:
     in the long-running host process, so we are intentionally the only cron
     provider the agent sees.
 
-    When *model* is provided, model-specific overrides (e.g. disabling
-    thinking / effort for Haiku on the Venus proxy) are merged in.
-    See :func:`pip_agent.models.model_env_overrides` for details.
     """
     from pip_agent.anthropic_client import resolve_anthropic_credential
-    from pip_agent.models import model_env_overrides
 
     env: dict[str, str] = {
         "CLAUDE_CODE_DISABLE_CRON": "1",
@@ -120,10 +116,6 @@ def _build_env(model: str = "") -> dict[str, str]:
             env["ANTHROPIC_BASE_URL"] = cred.base_url
             # Experimental betas are rejected by most corporate proxies.
             env["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] = "1"
-
-    if model:
-        env.update(model_env_overrides(model))
-
     return env
 
 
@@ -290,7 +282,7 @@ WecomStreamRenderer` (or any other progressive-reply consumer). When
     crashed").
     """
     from pip_agent import _profile  # PROFILE
-    from pip_agent.models import is_model_invalid_error, thinking_param
+    from pip_agent.models import is_model_invalid_error
 
     # ``[""]`` means "no tier-resolved candidate, let the SDK pick its
     # own default". Keeping at least one element through the loop means
@@ -327,7 +319,7 @@ WecomStreamRenderer` (or any other progressive-reply consumer). When
                 # are silently absent on a fresh checkout — that's fine,
                 # the SDK skips missing sources.
                 setting_sources=["user", "project", "local"],
-                env=_build_env(candidate_model),
+                env=_build_env(),
                 disallowed_tools=list(_BUILTIN_DISALLOWED_TOOLS),
                 mcp_servers={"pip": mcp_server},
                 hooks=hooks,
@@ -341,9 +333,15 @@ WecomStreamRenderer` (or any other progressive-reply consumer). When
                 # the typewriter effect. Off by default so callers that
                 # don't care don't pay the per-token framing cost.
                 include_partial_messages=on_stream_event is not None,
-                # Extended thinking — ``adaptive`` for Sonnet / Opus;
-                # ``None`` for Haiku (suppressed via env var instead).
-                thinking=thinking_param(candidate_model),
+                # Adaptive extended thinking — without this the SDK
+                # leaves ``thinking`` unset and the gateway never asks
+                # the model to emit thinking blocks, so the WeCom
+                # cloud-icon block stays empty no matter how many
+                # ``content_block_delta`` we subscribe to. ``adaptive``
+                # lets the model decide turn-by-turn whether to think,
+                # which matches pipi's behaviour and avoids the
+                # always-on token cost of ``enabled``.
+                thinking={"type": "adaptive"},
             )
 
         result = await _run_one_attempt(

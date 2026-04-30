@@ -2773,11 +2773,12 @@ def run_host(*, force_no_tui: bool = False) -> None:
     """
 
     from pip_agent import _profile
-    from pip_agent.scaffold import ensure_workspace
+    from pip_agent.scaffold import ensure_claude_model_overrides, ensure_workspace
 
     _profile.cold_start("run_host_entered")
 
     ensure_workspace(WORKDIR)
+    ensure_claude_model_overrides()
     # File log is installed AFTER scaffold so ``.pip/`` is guaranteed
     # to exist, but BEFORE anything else that might emit records we
     # want captured (settings check, plugin bootstrap, registry/binding
