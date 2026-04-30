@@ -198,10 +198,10 @@ class TestBlockListPromptWrapped:
         )
         assert "WebFetch" in disallowed
         assert "WebSearch" in disallowed
-        # And the module-level constant matches what got wired through
+        # And the helper function matches what got wired through
         # — the seam other call sites import.
-        assert "WebFetch" in agent_runner._BUILTIN_DISALLOWED_TOOLS
-        assert "WebSearch" in agent_runner._BUILTIN_DISALLOWED_TOOLS
+        assert "WebFetch" in agent_runner._builtin_disallowed_tools()
+        assert "WebSearch" in agent_runner._builtin_disallowed_tools()
 
     def test_empty_block_list_still_wraps(self, tmp_path):
         # An empty list would be nonsense input but shouldn't crash —

@@ -1,10 +1,10 @@
 """Regression tests for ``WecomStreamRenderer``.
 
-Covers the tool_use-boundary visibility fix: before, text_delta chunks
-bracketing a tool call got concatenated into one opaque blob; now a
-one-line ``▸ <tool> <args>`` marker is injected and a force-flush
-breaks the 300ms throttle so the bubble updates immediately instead
-of appearing frozen during a slow tool call.
+Covers the stream rendering contract: text_delta and thinking_delta
+accumulate into the body, tool_use increments the footer counter and
+triggers an immediate flush (no marker injection into the body since
+commit 8c2b777), and finalize produces the closing snapshot with the
+stats footer.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ def _make(channel: _FakeChannel) -> WecomStreamRenderer:
 
 
 @pytest.mark.asyncio
-async def test_tool_use_injects_marker_into_body() -> None:
+async def test_text_and_tool_use_both_land_in_final_body() -> None:
     ch = _FakeChannel()
     r = _make(ch)
     await r.handle_event("text_delta", text="before tool ")
@@ -63,37 +63,29 @@ async def test_tool_use_injects_marker_into_body() -> None:
         usage={"input_tokens": 100},
         elapsed_s=0.5,
     )
-    # Final snapshot should contain both narration chunks AND the
-    # marker with its formatted args.
     assert ch.finishes, "finalize must push at least one snapshot"
     final_body = ch.finishes[-1][2]
     assert "before tool" in final_body
     assert "after tool" in final_body
-    assert "▸ Write" in final_body
-    assert "/tmp/x.md" in final_body  # args surfaced via format_tool_summary
+    assert "1 tools" in final_body
 
 
 @pytest.mark.asyncio
 async def test_tool_use_force_flushes_past_rate_limit() -> None:
     """A text_delta that just flushed would normally block the next
     update for 300 ms. The tool_use handler must bypass that throttle
-    so the marker appears immediately instead of waiting on the next
-    delta (which may never arrive if the tool blocks for seconds)."""
+    so the update appears immediately."""
     ch = _FakeChannel()
     r = _make(ch)
     await r.handle_event("text_delta", text="hello")
     updates_after_text = len(ch.updates)
     await r.handle_event("tool_use", name="Bash", input={"command": "ls"})
-    # The tool_use call MUST have triggered an immediate flush,
-    # even though <300 ms has passed since the text_delta one.
     assert len(ch.updates) > updates_after_text
-    assert "▸ Bash" in ch.updates[-1][2]
-    assert "ls" in ch.updates[-1][2]
 
 
 @pytest.mark.asyncio
-async def test_tool_use_without_args_renders_bare_marker() -> None:
-    """Unknown tool without format_tool_summary support → '▸ Name' only."""
+async def test_tool_use_without_args_still_flushes() -> None:
+    """Unknown tool triggers a flush even without recognised args."""
     ch = _FakeChannel()
     r = _make(ch)
     await r.handle_event("tool_use", name="SomeMcpTool", input={"foo": 1})
@@ -104,13 +96,12 @@ async def test_tool_use_without_args_renders_bare_marker() -> None:
         usage={},
         elapsed_s=0.1,
     )
-    assert "▸ SomeMcpTool" in ch.finishes[-1][2]
+    assert "1 tools" in ch.finishes[-1][2]
 
 
 @pytest.mark.asyncio
 async def test_tool_use_still_increments_footer_count() -> None:
-    """The marker-injection change must NOT break the existing footer
-    tool counter — both behaviours are additive."""
+    """The footer tool counter tracks every tool_use event."""
     ch = _FakeChannel()
     r = _make(ch)
     await r.handle_event("tool_use", name="Read", input={"file_path": "/a"})
@@ -130,7 +121,7 @@ async def test_tool_use_still_increments_footer_count() -> None:
 async def test_tool_use_missing_input_does_not_crash() -> None:
     ch = _FakeChannel()
     r = _make(ch)
-    await r.handle_event("tool_use", name="Read")  # no kwargs.input
+    await r.handle_event("tool_use", name="Read")
     await r.handle_event("tool_use", name="Read", input=None)
     await r.handle_event("tool_use", name="Read", input="not-a-dict")
     await r.handle_event(
@@ -140,16 +131,13 @@ async def test_tool_use_missing_input_does_not_crash() -> None:
         usage={},
         elapsed_s=0.0,
     )
-    # Three bare markers all landed, no exceptions.
-    body = ch.finishes[-1][2]
-    assert body.count("▸ Read") == 3
+    assert "3 tools" in ch.finishes[-1][2]
 
 
 @pytest.mark.asyncio
-async def test_multiple_tool_boundaries_stay_visually_separated() -> None:
-    """The interleaving of narration + tool markers should preserve
-    boundaries — the concatenated body must not collapse back into
-    'chunkAchunkB' with no visible break."""
+async def test_multiple_tool_boundaries_preserve_narration_order() -> None:
+    """Narration chunks interleaved with tool_use events should appear
+    in the final body in the order they were emitted."""
     ch = _FakeChannel()
     r = _make(ch)
     await r.handle_event("text_delta", text="Now update TCSS for both themes")
@@ -169,8 +157,6 @@ async def test_multiple_tool_boundaries_stay_visually_separated() -> None:
         elapsed_s=0.0,
     )
     body = ch.finishes[-1][2]
-    # The three narration chunks are broken up by visible tool markers.
-    assert body.index("Now update TCSS for both themes") < body.index("▸ Edit")
-    assert body.index("▸ Edit") < body.index("Now update on_agent_message")
-    # There is at least one ▸ marker between every pair of narration chunks.
-    assert body.count("▸ Edit") == 2
+    assert body.index("Now update TCSS") < body.index("Now update on_agent_message")
+    assert body.index("Now update on_agent_message") < body.index("Now add split-routing")
+    assert "2 tools" in body
