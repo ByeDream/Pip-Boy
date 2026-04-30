@@ -53,11 +53,12 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 ART_FRAME_MIN_COLS: int = 50
-"""Minimum side-pane width (columns). The pane adapts to art content
-width + 2, but never goes below this."""
+"""Legacy minimum side-pane width (columns). Side-pane width is now
+fixed per-theme in TCSS; retained for backward compatibility."""
 
 ART_FRAME_MAX_COLS: int = 100
-"""Maximum side-pane width (columns)."""
+"""Legacy maximum side-pane width (columns). Side-pane width is now
+fixed per-theme in TCSS; retained for backward compatibility."""
 
 ART_FRAME_MAX_ROWS: int = 30
 """Maximum height of the ``#pipboy-art`` widget (rows). The widget
@@ -182,11 +183,9 @@ class ThemeBundle:
     files get an empty tuple and the side pane renders without art."""
 
     art_frame_width: int = 0
-    """Maximum line width (columns) across all frames. Used by the app
-    to set ``#side-pane`` width to
-    ``clamp(art_frame_width + 3, ART_FRAME_MIN_COLS, ART_FRAME_MAX_COLS)``.
-    The +3 covers the pane's chrome (1 col vkey border + 2 cols padding);
-    +2 leaves the widest line 1 cell short and Textual wraps it."""
+    """Maximum line width (columns) across all frames. Side-pane width
+    is fixed per-theme in TCSS; this field is informational (used by
+    ``/theme list`` and ``pip-boy doctor`` diagnostics)."""
 
     art_frame_height: int = 0
     """Maximum line count (rows) across all frames. Used by the app to

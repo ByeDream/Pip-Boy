@@ -7,9 +7,9 @@
  *     #main                    horizontal
  *       #agent-pane            1fr
  *         #agent-log           1fr (user + assistant dialog)
- *         #agent-log-detail    10 rows (thinking / tool_use / finalize)
+ *         #agent-log-detail    14 rows (thinking / tool_use / finalize)
  *         #input               1 row
- *       #side-pane             width set dynamically by app (min 50, max 100)
+ *       #side-pane             fixed 59 cols
  *         #side-top            auto height
  *           #pipboy-art        fixed height set dynamically (max 30)
  *           #pipboy-clock      fixed ~3 rows
@@ -58,7 +58,7 @@ Screen {
 }
 
 #agent-log-detail {
-    height: 10;
+    height: 14;
     background: $surface;
     color: $text-muted;
     border-top: hkey $accent-darken-2;
@@ -79,7 +79,7 @@ Screen {
 }
 
 #side-pane {
-    width: auto;
+    width: 59;
     height: 1fr;
     layout: vertical;
     border-left: vkey $accent-darken-2;

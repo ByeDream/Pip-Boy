@@ -8,10 +8,10 @@ Layout:
     ├── #status-bar              1 row, dock top
     └── #main                    horizontal flex
         ├── #agent-pane          1fr — model dialog + input
-        │   ├── #agent-log         1fr — user input + assistant text
-        │   ├── #agent-log-detail  10 rows — thinking / tool / finalize
+    │   ├── #agent-log         1fr — user input + assistant text
+    │   ├── #agent-log-detail  14 rows — thinking / tool / finalize
         │   └── #input
-        └── #side-pane           adaptive width (min 50, max 100 cols)
+        └── #side-pane           fixed width (set per-theme in TCSS)
             ├── #side-top        auto height (art + clock)
             │   ├── #pipboy-art
             │   └── #pipboy-clock
@@ -312,16 +312,6 @@ class PipBoyTuiApp(App[None]):
         # #todo-pane starts hidden (empty todo list); _refresh_todo_pane
         # will show it once a TodoWrite event arrives.
         self._refresh_todo_pane()
-
-        # Side-pane width: clamp(art_frame_width + 3, 50, 100).
-        # +3 covers the pane's chrome: 1 col for `border-left: vkey` plus
-        # 2 cols for `padding: 0 1`. With +2 the widest art line overflows
-        # by 1 cell and Textual wraps the trailing border char to a new row.
-        try:
-            pane = self.query_one("#side-pane")
-            pane.styles.width = max(50, min(100, self._theme.art_frame_width + 3))
-        except Exception:
-            pass
 
         # Art widget height: min(art_frame_height + 2, 30) — no lower
         # bound, so small art (e.g. 12 rows) sits in a 14-row frame
@@ -745,11 +735,6 @@ class PipBoyTuiApp(App[None]):
         except Exception:
             pass
 
-        try:
-            pane = self.query_one("#side-pane")
-            pane.styles.width = max(50, min(100, bundle.art_frame_width + 3))
-        except Exception:
-            pass
 
     def _apply_status_bar_text(self, bundle: ThemeBundle) -> None:
         """Reset the status bar's default text to the new theme's name.

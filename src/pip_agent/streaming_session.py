@@ -137,7 +137,7 @@ class StreamingSession:
         from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
         from pip_agent import _profile
-        from pip_agent.models import is_model_invalid_error
+        from pip_agent.models import is_model_invalid_error, thinking_param
 
         last_exc: BaseException | None = None
         for idx, candidate in enumerate(self._model_chain):
@@ -160,7 +160,7 @@ class StreamingSession:
                 ),
                 permission_mode="bypassPermissions",
                 setting_sources=["project", "user"],
-                env=_build_env(),
+                env=_build_env(candidate),
                 disallowed_tools=list(_BUILTIN_DISALLOWED_TOOLS),
                 mcp_servers={"pip": mcp_server},
                 hooks=hooks,
@@ -177,14 +177,10 @@ class StreamingSession:
                 # and reconnecting just to flip the flag would burn
                 # the ~400 ms tax this whole class exists to avoid.
                 include_partial_messages=True,
-                # Adaptive extended thinking. Same rationale as
-                # ``include_partial_messages``: frozen at connect
-                # time and the model decides per turn whether to
-                # actually emit thinking blocks, so the cost is
-                # only paid for turns that need it. Without this
-                # option the SDK leaves ``thinking`` unset and no
-                # ``thinking_delta`` events ever cross the wire.
-                thinking={"type": "adaptive"},
+                # Extended thinking — ``adaptive`` for Sonnet / Opus;
+                # ``None`` for Haiku (suppressed via env var instead).
+                # Frozen at connect time.
+                thinking=thinking_param(candidate),
             )
 
             client = ClaudeSDKClient(options=options)

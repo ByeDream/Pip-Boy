@@ -90,7 +90,7 @@ class Settings(BaseSettings):
 
     # Interval (seconds) between ASCII art animation frame advances.
     # Set to 0 to disable animation (single-frame themes are unaffected).
-    art_anim_interval: float = Field(default=3.0)
+    art_anim_interval: float = Field(default=2.0)
 
     # Idle-eviction window for cached streaming clients, in seconds.
     # Sweep runs on the host scheduler; clients idle longer than this

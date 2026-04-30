@@ -108,6 +108,68 @@ _SDK_DEFINITELY_MODEL: tuple[str, ...] = (
 )
 
 
+def is_haiku(model: str) -> bool:
+    """True when *model* belongs to the Haiku family.
+
+    Handles both the canonical Anthropic format (``claude-haiku-4-5-*``)
+    and the Venus proxy format (``claude-4-5-haiku-*``).
+    """
+    return "haiku" in (model or "").lower()
+
+
+def model_env_overrides(model: str) -> dict[str, str]:
+    """Return claude.exe env-var overrides required for *model*.
+
+    The Venus proxy model name ``claude-4-5-haiku-20251001`` uses a
+    non-canonical format that ``claude.exe`` v2.1.119 cannot recognise
+    (its normaliser expects ``claude-haiku-4-5-*``).  Unrecognised
+    models default to adaptive thinking + effort — both rejected by
+    the proxy for Haiku.
+
+    We fix this with two env vars discovered in the binary:
+
+    * ``CLAUDE_CODE_DISABLE_THINKING=1``  — suppresses the
+      ``thinking`` parameter entirely in the API request.
+    * ``CLAUDE_CODE_EFFORT_LEVEL=unset`` — makes the effort resolver
+      return *null*, so ``output_config.effort`` is never sent.
+    * ``CLAUDE_CODE_SUBAGENT_MODEL`` — routes CC's built-in Agent
+      tool to a model the proxy fully supports (Sonnet), fixing the
+      "model not found" error on sub-agent invocations.
+
+    Non-Haiku models (Sonnet, Opus) need no overrides: ``claude.exe``
+    correctly identifies them and ``adaptive`` thinking works on the
+    proxy.
+    """
+    if not is_haiku(model):
+        return {}
+
+    from pip_agent.config import settings
+
+    overrides: dict[str, str] = {
+        "CLAUDE_CODE_DISABLE_THINKING": "1",
+        "CLAUDE_CODE_EFFORT_LEVEL": "unset",
+    }
+    subagent = (
+        getattr(settings, "model_t1", "") or getattr(settings, "model_t2", "") or ""
+    ).strip()
+    if subagent:
+        overrides["CLAUDE_CODE_SUBAGENT_MODEL"] = subagent
+    return overrides
+
+
+def thinking_param(model: str) -> dict[str, str] | None:
+    """Return the ``thinking`` option appropriate for *model*.
+
+    Haiku on the Venus proxy rejects ``adaptive`` thinking; the env-var
+    override (``CLAUDE_CODE_DISABLE_THINKING``) handles suppression at
+    the CLI level, so we return ``None`` to avoid conflicting flags.
+    Sonnet / Opus work fine with adaptive thinking on the proxy.
+    """
+    if is_haiku(model):
+        return None
+    return {"type": "adaptive"}
+
+
 def is_model_invalid_error(exc: BaseException) -> bool:
     """True when ``exc`` indicates the requested model name is unusable.
 
