@@ -1088,12 +1088,13 @@ def _create_agent_on_disk(
     the registry records the mapping and the agent is reachable by
     either key. Defaults to ``agent_id`` when empty.
 
-    The new agent inherits the default (``pip-boy``) agent's **full**
-    persona body — Core Philosophy, System Communication, Tone,
-    Identity Recognition, Tool Calling, Memory guidance, etc. — so
-    it knows how to interpret the ``user_id`` carried on each
-    ``<user_query>`` and can call ``lookup_user`` to resolve it
-    against the shared addressbook on demand.
+    The new agent inherits the default (``pip-boy``) agent's **style**
+    sections (Identity, Core Philosophy, Tone And Style) from its
+    persona.  System rules (System Communication, Memory, Identity
+    Recognition) and work rules (Tool Calling, Making Code Changes,
+    Git) are **not** copied — they live in workspace-shared files
+    (``system_rules.md`` / ``work_rules.md``) and are injected at
+    prompt-compose time.
 
     Only the ``# Identity`` section is rewritten, to flag the
     sibling relationship with Pip-Boy. The identity body still

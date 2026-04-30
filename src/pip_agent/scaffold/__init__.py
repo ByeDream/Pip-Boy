@@ -6,7 +6,9 @@ The workspace root itself belongs to the default ``pip-boy`` agent:
 
     <workspace>/
       .pip/                 <- pip-boy's own state + workspace-shared state
-        persona.md          <- pip-boy persona
+        persona.md          <- pip-boy persona (Identity + Philosophy + Style)
+        system_rules.md     <- shared: System Communication, Memory, Identity Recognition
+        work_rules.md       <- shared: Tool Calling, Making Code Changes, Git
         HEARTBEAT.md
         addressbook/        <- shared contacts (all agents read/write)
         observations/
@@ -19,7 +21,7 @@ The workspace root itself belongs to the default ``pip-boy`` agent:
         .scaffold_manifest.json
       <sub-agent>/          <- 0..N sub-agents
         .pip/
-          persona.md
+          persona.md        <- agent-specific (Identity + Philosophy + Style)
           HEARTBEAT.md
           observations/
           incoming/
@@ -48,6 +50,8 @@ _MANIFEST_NAME = ".scaffold_manifest.json"
 # (target relative to workspace root, scaffold source file)
 _SCAFFOLD_FILES: list[tuple[str, str]] = [
     (".pip/persona.md", "pip-boy.md"),
+    (".pip/system_rules.md", "system_rules.md"),
+    (".pip/work_rules.md", "work_rules.md"),
     (".pip/HEARTBEAT.md", "heartbeat.md"),
     (".pip/themes/README.md", "themes_README.md"),
     (".env", "env.example"),

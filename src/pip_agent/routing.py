@@ -194,6 +194,14 @@ class AgentPaths:
         return self.pip_dir / "persona.md"
 
     @property
+    def system_rules_path(self) -> Path:
+        return self.workspace_pip_dir / "system_rules.md"
+
+    @property
+    def work_rules_path(self) -> Path:
+        return self.workspace_pip_dir / "work_rules.md"
+
+    @property
     def observations_dir(self) -> Path:
         return self.pip_dir / "observations"
 

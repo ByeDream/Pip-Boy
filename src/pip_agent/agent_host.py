@@ -543,6 +543,24 @@ def _materialize_attachments(
             )
 
 
+def _append_shared_rules(base_prompt: str, paths: AgentPaths) -> str:
+    """Append workspace-shared rules to the agent's persona prompt.
+
+    Reads ``system_rules.md`` and ``work_rules.md`` from the workspace
+    root ``.pip/`` and appends their contents. These files are scaffold-
+    managed and shared by all agents (root and sub-agents alike).
+    """
+    for rule_path in (paths.system_rules_path, paths.work_rules_path):
+        if rule_path.is_file():
+            try:
+                text = rule_path.read_text(encoding="utf-8").strip()
+                if text:
+                    base_prompt = base_prompt.rstrip() + "\n\n" + text
+            except OSError:
+                log.warning("Failed to read shared rules: %s", rule_path)
+    return base_prompt
+
+
 def _format_prompt(
     inbound: InboundMessage,
     memory_store: MemoryStore | None,
@@ -1696,6 +1714,7 @@ class AgentHost:
 
             agent_cwd = svc.paths.cwd
             base_prompt = eff.system_prompt(workdir=str(agent_cwd))
+            base_prompt = _append_shared_rules(base_prompt, svc.paths)
             user_text = (
                 prompt_inbound.text
                 if isinstance(prompt_inbound.text, str)
