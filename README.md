@@ -33,11 +33,11 @@ One Pip-Boy host, many surfaces. All channels feed into the same inbound message
 - **WeCom** — Enterprise WeCom bots via WebSocket SDK. Progressive streaming replies with thinking indicators and stats footer. Same multimodal path as WeChat.
 - **Headless** — `--headless` mode disables TUI, stdin, and the CLI channel entirely; only remote channels (WeCom/WeChat) are active. Suitable for unattended server deployments.
 
-<p align="center">
-  <img src="docs/Imgs/wechat.jpg" width="280" alt="WeChat — voice, image, and text" />
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="docs/Imgs/wecom.jpg" width="280" alt="WeCom — text, file delivery, token stats" />
-</p>
+<table align="center"><tr>
+  <td align="center"><strong>CLI (Textual TUI)</strong><br/><img src="docs/Imgs/TUI_Theme_Wasteland.jpg" width="420" alt="CLI — Textual TUI with Wasteland theme" /></td>
+  <td align="center"><strong>WeChat</strong><br/><img src="docs/Imgs/wechat.jpg" width="220" alt="WeChat — voice, image, and text" /></td>
+  <td align="center"><strong>WeCom</strong><br/><img src="docs/Imgs/wecom.jpg" width="220" alt="WeCom — text, file delivery, token stats" /></td>
+</tr></table>
 
 ### User identity & ACL
 
@@ -269,11 +269,10 @@ pip-boy doctor     # one-shot env + capability + theme report
 
 Themes are data-driven: a `theme.toml` manifest, a `theme.tcss` Textual CSS file, and `ascii_art_N.txt` frames for animation. Pip-Boy seeds example themes (`wasteland`, `vault-amber`) into `<workspace>/.pip/themes/` on first boot.
 
-<p align="center">
-  <img src="docs/Imgs/TUI_Theme_Vault_Amber.jpg" width="480" alt="Vault Amber theme" />
-  &nbsp;&nbsp;
-  <img src="docs/Imgs/TUI_Theme_Wasteland.jpg" width="480" alt="Wasteland Radiation theme" />
-</p>
+<table align="center">
+  <tr><td align="center"><strong>Vault Amber</strong><br/><img src="docs/Imgs/TUI_Theme_Vault_Amber.jpg" width="800" alt="Vault Amber theme" /></td></tr>
+  <tr><td align="center"><strong>Wasteland Radiation</strong><br/><img src="docs/Imgs/TUI_Theme_Wasteland.jpg" width="800" alt="Wasteland Radiation theme" /></td></tr>
+</table>
 
 ```text
 /theme list                # installed themes (active marked with *)
