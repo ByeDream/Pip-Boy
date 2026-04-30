@@ -40,10 +40,10 @@ from pathlib import Path
 from typing import Any
 
 from pip_agent.agent_runner import (
-    _builtin_disallowed_tools,
     QueryResult,
     StreamEventCallback,
     _build_env,
+    _builtin_disallowed_tools,
     _emit_stream_event_deltas,
     _enrich_with_stderr,
     _StderrBuffer,

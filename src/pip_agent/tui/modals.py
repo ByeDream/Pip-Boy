@@ -32,7 +32,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, Markdown, OptionList, Static
+from textual.widgets import Button, Input, Label, Markdown, OptionList
 from textual.widgets.option_list import Option
 
 __all__ = ["AskUserModal", "PlanReviewModal", "format_ask_answers"]
