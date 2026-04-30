@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from pip_agent.agent_runner import (
+    _builtin_disallowed_tools,
     QueryResult,
     StreamEventCallback,
     _build_env,
@@ -160,6 +161,7 @@ class StreamingSession:
                 permission_mode="bypassPermissions",
                 setting_sources=["project", "user"],
                 env=_build_env(),
+                disallowed_tools=_builtin_disallowed_tools(),
                 mcp_servers={"pip": mcp_server},
                 hooks=hooks,
                 # See :class:`pip_agent.agent_runner._StderrBuffer` —

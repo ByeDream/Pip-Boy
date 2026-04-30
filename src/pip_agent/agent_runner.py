@@ -114,11 +114,22 @@ def _build_env() -> dict[str, str]:
             env["ANTHROPIC_API_KEY"] = cred.token
         if cred.base_url:
             env["ANTHROPIC_BASE_URL"] = cred.base_url
-            # Experimental betas are rejected by most corporate proxies.
             env["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] = "1"
     return env
 
 
+def _builtin_disallowed_tools() -> list[str]:
+    """Tools to strip from Claude Code's built-in set.
+
+    When ``USE_CUSTOM_WEB_TOOLS=true`` (default), our MCP ``web_search``
+    / ``web_fetch`` replace CC's native ``WebSearch`` / ``WebFetch``
+    whose schema Venus rejects.
+    """
+    from pip_agent.config import settings
+
+    if settings.use_custom_web_tools:
+        return ["WebFetch", "WebSearch"]
+    return []
 
 
 class _StderrBuffer:
@@ -305,6 +316,7 @@ WecomStreamRenderer` (or any other progressive-reply consumer). When
                 # the SDK skips missing sources.
                 setting_sources=["user", "project", "local"],
                 env=_build_env(),
+                disallowed_tools=_builtin_disallowed_tools(),
                 mcp_servers={"pip": mcp_server},
                 hooks=hooks,
                 # Capture subprocess stderr so a non-zero exit (gateway

@@ -13,11 +13,12 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # pydantic-settings reads ``.env`` into the Settings model but does NOT
-# push values into ``os.environ``. Modules that bypass Settings and call
-# ``os.getenv`` directly would then see nothing. Priming ``os.environ``
-# here — before Settings instantiation below — makes ``.env`` the single
-# source of truth for both access patterns. ``override=False`` preserves
-# any value the operator exported in their shell.
+# push values into ``os.environ``. Tools that bypass Settings and call
+# ``os.getenv`` directly (e.g. ``pip_agent.web.search_web`` reading
+# ``TAVILY_API_KEY``) would then see nothing. Priming ``os.environ`` here
+# — before Settings instantiation below — makes ``.env`` the single source
+# of truth for both access patterns. ``override=False`` preserves any
+# value the operator exported in their shell.
 load_dotenv(override=False)
 
 WORKDIR: Path = Path.cwd()
@@ -86,6 +87,12 @@ class Settings(BaseSettings):
     # same client would pollute the user's transcript. Disable to force
     # every turn back to the one-shot path (useful for A/B comparison).
     enable_streaming_session: bool = Field(default=True)
+
+    # When True, register our own web_search / web_fetch MCP tools and
+    # disable Claude Code's native WebSearch / WebFetch (which Venus
+    # rejects with ``custom.input_schema: Field required``). Set to
+    # False to use CC's built-in web tools when the upstream supports them.
+    use_custom_web_tools: bool = Field(default=True)
 
     # Interval (seconds) between ASCII art animation frame advances.
     # Set to 0 to disable animation (single-frame themes are unaffected).
