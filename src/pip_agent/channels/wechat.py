@@ -34,9 +34,11 @@ behind a 40 s long-poll.
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import logging
+import os
 import random
 import threading
 import time
@@ -85,6 +87,17 @@ def _parse_ilink_aes_key(raw: str) -> bytes:
         return binascii.unhexlify(decoded)
     except (ValueError, binascii.Error):
         return decoded[:16]
+
+
+def _aes_ecb_encrypt(data: bytes, key: bytes) -> bytes:
+    """AES-128-ECB encrypt with PKCS7 padding."""
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    pad_len = 16 - (len(data) % 16)
+    padded = data + bytes([pad_len]) * pad_len
+    cipher = Cipher(algorithms.AES(key), modes.ECB())
+    encryptor = cipher.encryptor()
+    return encryptor.update(padded) + encryptor.finalize()
 
 
 def _aes_ecb_decrypt(data: bytes, key: bytes) -> bytes:
@@ -489,6 +502,78 @@ class WeChatChannel(Channel):
                 log.warning("wechat CDN download/decrypt failed: %s", exc)
                 return None
 
+    def _upload_media(
+        self, acc: _WeChatAccount, to_user_id: str,
+        data: bytes, media_type: int,
+    ) -> dict[str, str] | None:
+        """Upload media to WeChat CDN via the iLink 3-step pipeline.
+
+        ``media_type``: ``1`` = image, ``3`` = file (per protocol spec).
+
+        Returns a dict with ``encrypt_query_param`` and ``aes_key``
+        (base64-encoded hex string, as required by ``sendmessage``),
+        or ``None`` on failure.
+        """
+        aes_key_bytes = os.urandom(16)
+        aes_key_hex = aes_key_bytes.hex()
+        filekey = uuid.uuid4().hex
+
+        ciphertext = _aes_ecb_encrypt(data, aes_key_bytes)
+        raw_md5 = hashlib.md5(data).hexdigest()  # noqa: S324
+
+        body = {
+            "filekey": filekey,
+            "media_type": media_type,
+            "to_user_id": to_user_id,
+            "rawsize": len(data),
+            "rawfilemd5": raw_md5,
+            "filesize": len(ciphertext),
+            "no_need_thumb": True,
+            "aeskey": aes_key_hex,
+            "base_info": {"channel_version": "1.0.0"},
+        }
+        try:
+            resp = self._http.post(
+                f"{acc.base_url}/ilink/bot/getuploadurl",
+                headers=self._headers(acc),
+                json=body,
+                timeout=15.0,
+            )
+            resp.raise_for_status()
+            upload_param = resp.json().get("upload_param", "")
+            if not upload_param:
+                log.warning("wechat getuploadurl returned empty upload_param")
+                return None
+        except Exception as exc:  # noqa: BLE001
+            log.warning("wechat getuploadurl failed: %s", exc)
+            return None
+
+        try:
+            cdn_resp = self._http.post(
+                f"{self.ILINK_CDN}/upload",
+                params={
+                    "encrypted_query_param": upload_param,
+                    "filekey": filekey,
+                },
+                headers={"Content-Type": "application/octet-stream"},
+                content=ciphertext,
+                timeout=60.0,
+            )
+            cdn_resp.raise_for_status()
+            eqp = cdn_resp.headers.get("x-encrypted-param", "")
+            if not eqp:
+                log.warning("wechat CDN upload missing x-encrypted-param header")
+                return None
+        except Exception as exc:  # noqa: BLE001
+            log.warning("wechat CDN upload failed: %s", exc)
+            return None
+
+        return {
+            "encrypt_query_param": eqp,
+            "aes_key": base64.b64encode(aes_key_hex.encode()).decode(),
+            "filesize": len(ciphertext),
+        }
+
     def _collect_ilink_item(
         self, item: dict, texts: list[str], atts: list[Attachment],
     ) -> None:
@@ -598,6 +683,14 @@ class WeChatChannel(Channel):
 
         results: list[InboundMessage] = []
         for msg in data.get("msgs", []):
+            try:
+                log.info(
+                    "wechat raw inbound msg (account=%s): %s",
+                    account_id,
+                    json.dumps(msg, ensure_ascii=False, default=str),
+                )
+            except Exception:  # noqa: BLE001
+                log.info("wechat raw inbound msg (account=%s) repr=%r", account_id, msg)
             if msg.get("message_type") != 1:
                 continue
             if msg.get("message_state") not in (0, 2):
@@ -616,7 +709,11 @@ class WeChatChannel(Channel):
                     self._collect_ilink_item(item, texts, atts)
                     ref_item = (item.get("ref_msg") or {}).get("message_item")
                     if isinstance(ref_item, dict):
-                        self._collect_ilink_item(ref_item, [], atts)
+                        ref_text = (ref_item.get("text_item") or {}).get("text", "")
+                        if ref_text:
+                            texts.insert(0, f"[quote]\n{ref_text}\n[/quote]")
+                        else:
+                            self._collect_ilink_item(ref_item, [], atts)
 
                 text = "\n".join(texts)
                 if not text and not atts:
@@ -727,6 +824,161 @@ class WeChatChannel(Channel):
                     log.warning("wechat sendmessage error: %s", exc)
                     ok = False
             return ok
+
+    def _resolve_account_and_token(
+        self, to: str, account_id: str,
+    ) -> tuple[_WeChatAccount, str] | None:
+        """Shared account / context-token resolution for media sends."""
+        acc: _WeChatAccount | None
+        if account_id:
+            acc = self.get_account(account_id)
+        else:
+            with self._accounts_lock:
+                acc = (
+                    next(iter(self._accounts.values()))
+                    if len(self._accounts) == 1 else None
+                )
+        if acc is None:
+            _wechat_operator_print(
+                f"  [wechat] Cannot send to {to}: unknown account_id "
+                f"{account_id!r}",
+            )
+            return None
+        ctx_token = acc.context_tokens.get(to, "")
+        if not ctx_token:
+            _wechat_operator_print(
+                f"  [wechat] Cannot reply to {to} on account {acc.account_id}: "
+                "no context_token",
+            )
+            return None
+        return acc, ctx_token
+
+    def send_image(
+        self, to: str, image_data: bytes, caption: str = "",
+        *, account_id: str = "", **kw: Any,
+    ) -> bool:
+        log.info(
+            "wechat send_image called: to=%s account_id=%s bytes=%d caption_len=%d",
+            to, account_id, len(image_data), len(caption),
+        )
+        resolved = self._resolve_account_and_token(to, account_id)
+        if resolved is None:
+            log.warning(
+                "wechat send_image: _resolve_account_and_token returned None "
+                "(to=%s account_id=%s)", to, account_id,
+            )
+            return False
+        acc, ctx_token = resolved
+
+        result = self._upload_media(acc, to, image_data, media_type=1)
+        if result is None:
+            log.warning("wechat send_image: _upload_media returned None")
+            return False
+
+        client_id = f"pip:{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
+        body = {
+            "msg": {
+                "from_user_id": "",
+                "to_user_id": to,
+                "client_id": client_id,
+                "message_type": 2,
+                "message_state": 2,
+                "context_token": ctx_token,
+                "item_list": [{
+                    "type": 2,
+                    "image_item": {
+                        "media": {
+                            "encrypt_query_param": result["encrypt_query_param"],
+                            "aes_key": result["aes_key"],
+                            "encrypt_type": 1,
+                        },
+                        "mid_size": result["filesize"],
+                    },
+                }],
+            },
+            "base_info": {"channel_version": "1.0.0"},
+        }
+        try:
+            resp = self._http.post(
+                f"{acc.base_url}/ilink/bot/sendmessage",
+                headers=self._headers(acc),
+                json=body,
+            )
+            if resp.status_code != 200:
+                log.warning("wechat send_image sendmessage status=%s", resp.status_code)
+                return False
+        except Exception as exc:  # noqa: BLE001
+            log.warning("wechat send_image error: %s", exc)
+            return False
+
+        if caption:
+            self.send(to, caption, account_id=account_id)
+        return True
+
+    def send_file(
+        self, to: str, file_data: bytes, filename: str = "",
+        caption: str = "", *, account_id: str = "", **kw: Any,
+    ) -> bool:
+        log.info(
+            "wechat send_file called: to=%s account_id=%s filename=%s bytes=%d caption_len=%d",
+            to, account_id, filename, len(file_data), len(caption),
+        )
+        resolved = self._resolve_account_and_token(to, account_id)
+        if resolved is None:
+            log.warning(
+                "wechat send_file: _resolve_account_and_token returned None "
+                "(to=%s account_id=%s)", to, account_id,
+            )
+            return False
+        acc, ctx_token = resolved
+
+        result = self._upload_media(acc, to, file_data, media_type=3)
+        if result is None:
+            log.warning("wechat send_file: _upload_media returned None")
+            return False
+
+        raw_md5 = hashlib.md5(file_data).hexdigest()  # noqa: S324
+        client_id = f"pip:{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
+        body = {
+            "msg": {
+                "from_user_id": "",
+                "to_user_id": to,
+                "client_id": client_id,
+                "message_type": 2,
+                "message_state": 2,
+                "context_token": ctx_token,
+                "item_list": [{
+                    "type": 4,
+                    "file_item": {
+                        "media": {
+                            "encrypt_query_param": result["encrypt_query_param"],
+                            "aes_key": result["aes_key"],
+                            "encrypt_type": 1,
+                        },
+                        "file_name": filename or "file",
+                        "md5": raw_md5,
+                        "len": str(len(file_data)),
+                    },
+                }],
+            },
+            "base_info": {"channel_version": "1.0.0"},
+        }
+        try:
+            resp = self._http.post(
+                f"{acc.base_url}/ilink/bot/sendmessage",
+                headers=self._headers(acc),
+                json=body,
+            )
+            if resp.status_code != 200:
+                log.warning("wechat send_file sendmessage status=%s", resp.status_code)
+                return False
+        except Exception as exc:  # noqa: BLE001
+            log.warning("wechat send_file error: %s", exc)
+            return False
+
+        if caption:
+            self.send(to, caption, account_id=account_id)
+        return True
 
     def send_typing(self, to: str, *, account_id: str = "") -> None:
         """Send typing indicator via sendtyping API (fire-and-forget)."""
