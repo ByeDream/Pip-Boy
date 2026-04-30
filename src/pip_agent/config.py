@@ -89,9 +89,9 @@ class Settings(BaseSettings):
     enable_streaming_session: bool = Field(default=True)
 
     # When True, register our own web_search / web_fetch MCP tools and
-    # disable Claude Code's native WebSearch / WebFetch (which Venus
-    # rejects with ``custom.input_schema: Field required``). Set to
-    # False to use CC's built-in web tools when the upstream supports them.
+    # disable Claude Code's native WebSearch / WebFetch. Some upstream
+    # proxies reject the native tool schema. Set to False to use CC's
+    # built-in web tools when the upstream supports them.
     use_custom_web_tools: bool = Field(default=True)
 
     # Interval (seconds) between ASCII art animation frame advances.

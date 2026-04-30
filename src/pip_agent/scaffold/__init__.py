@@ -397,7 +397,7 @@ def _derive_model_override(name: str) -> tuple[str, str] | None:
     """Derive a ``modelOverrides`` entry for a non-canonical model name.
 
     Returns ``(canonical, actual)`` when *name* uses a non-canonical format
-    (e.g. Venus ``claude-4-5-haiku-20251001`` vs canonical
+    (e.g. ``claude-4-5-haiku-20251001`` vs canonical
     ``claude-haiku-4-5-20251001``). Returns ``None`` when the name is
     already canonical or unrecognisable.
     """
@@ -420,14 +420,14 @@ def _derive_model_override(name: str) -> tuple[str, str] | None:
 def ensure_claude_model_overrides() -> None:
     """Sync ``modelOverrides`` in ``~/.claude/settings.json`` from ``.env``.
 
-    Venus uses non-canonical model names (e.g. ``claude-4-5-haiku-*``
+    Some proxies use non-canonical model names (e.g. ``claude-4-5-haiku-*``
     instead of ``claude-haiku-4-5-*``). ``claude.exe`` cannot normalise
     these, so capability detection (thinking / effort) and sub-agent
     model resolution break.  ``modelOverrides`` is the native
     ``claude.exe`` setting that fixes both by teaching it the mapping.
 
-    Only runs when ``ANTHROPIC_BASE_URL`` contains ``"venus"``; direct
-    Anthropic API users are unaffected.
+    Only runs when the upstream proxy is detected; direct Anthropic API
+    users are unaffected.
     """
     from pip_agent.config import settings
 

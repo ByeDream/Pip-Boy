@@ -123,7 +123,7 @@ def _builtin_disallowed_tools() -> list[str]:
 
     When ``USE_CUSTOM_WEB_TOOLS=true`` (default), our MCP ``web_search``
     / ``web_fetch`` replace CC's native ``WebSearch`` / ``WebFetch``
-    whose schema Venus rejects.
+    whose schema some upstream proxies reject.
     """
     from pip_agent.config import settings
 
