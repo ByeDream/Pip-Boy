@@ -4,6 +4,7 @@
 [![PyPI](https://img.shields.io/pypi/v/pip-boy)](https://pypi.org/project/pip-boy/)
 [![Python](https://img.shields.io/pypi/pyversions/pip-boy)](https://pypi.org/project/pip-boy/)
 [![License](https://img.shields.io/github/license/ByeDream/Pip-Boy)](LICENSE)
+[![GitHub](https://img.shields.io/badge/source-GitHub-blue)](https://github.com/ByeDream/Pip-Boy)
 
 <p align="center">
   <img src="docs/Imgs/Pip-BoyAdArtPrint.jpg" width="480" alt="Pip-Boy 3000 Mark IV" />
