@@ -119,21 +119,6 @@ def _build_env() -> dict[str, str]:
     return env
 
 
-# Built-in Claude Code tools we deliberately shadow with our own
-# ``mcp__pip__*`` implementation. Listed here so the SDK strips them
-# from the model's option set — without that, the agent sees two
-# tools doing nearly the same thing and picks arbitrarily, splitting
-# trace logs and confusing failure modes.
-#
-# Currently shadowed:
-#   * ``WebFetch``  → ``mcp__pip__web_fetch``  (see :mod:`pip_agent.web`)
-#   * ``WebSearch`` → ``mcp__pip__web_search`` (Tavily → DDG fallback)
-#
-# Both are disabled because the corporate-proxy gateway Pip-Boy is
-# pointed at rejects the experimental-betas header Claude Code's
-# server-side web tools require. Shipping in-process replacements
-# sidesteps that entirely.
-_BUILTIN_DISALLOWED_TOOLS: tuple[str, ...] = ("WebFetch", "WebSearch")
 
 
 class _StderrBuffer:
@@ -320,7 +305,6 @@ WecomStreamRenderer` (or any other progressive-reply consumer). When
                 # the SDK skips missing sources.
                 setting_sources=["user", "project", "local"],
                 env=_build_env(),
-                disallowed_tools=list(_BUILTIN_DISALLOWED_TOOLS),
                 mcp_servers={"pip": mcp_server},
                 hooks=hooks,
                 # Capture subprocess stderr so a non-zero exit (gateway

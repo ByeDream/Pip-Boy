@@ -13,12 +13,11 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # pydantic-settings reads ``.env`` into the Settings model but does NOT
-# push values into ``os.environ``. Tools that bypass Settings and call
-# ``os.getenv`` directly (e.g. ``pip_agent.web.search_web`` reading
-# ``TAVILY_API_KEY``) would then see nothing. Priming ``os.environ`` here
-# — before Settings instantiation below — makes ``.env`` the single source
-# of truth for both access patterns. ``override=False`` preserves any
-# value the operator exported in their shell.
+# push values into ``os.environ``. Modules that bypass Settings and call
+# ``os.getenv`` directly would then see nothing. Priming ``os.environ``
+# here — before Settings instantiation below — makes ``.env`` the single
+# source of truth for both access patterns. ``override=False`` preserves
+# any value the operator exported in their shell.
 load_dotenv(override=False)
 
 WORKDIR: Path = Path.cwd()
