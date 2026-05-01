@@ -35,6 +35,7 @@ from pip_agent.channels import (
     InboundMessage,
     send_with_retry,
 )
+from pip_agent.channels.plan_forwarder import PlanForwarder
 from pip_agent.channels.stream_render import WecomStreamRenderer
 from pip_agent.config import WORKDIR, settings
 from pip_agent.host_scheduler import (
@@ -128,6 +129,50 @@ def _save_sessions(sessions: dict[str, str]) -> None:
         SESSION_STORE_PATH,
         json.dumps(sessions, indent=2, ensure_ascii=False),
     )
+
+
+# ---------------------------------------------------------------------------
+# Stream-event callback helpers
+# ---------------------------------------------------------------------------
+
+def _build_plan_forwarder_cb(
+    ch: Channel, inbound: InboundMessage, reply_peer: str,
+) -> Any:
+    """Bind a :class:`PlanForwarder` for this turn and return its sink."""
+    inbound_id = str(inbound.raw.get("_pip_inbound_id") or "")
+    return PlanForwarder(
+        channel=ch,
+        to=reply_peer,
+        account_id=inbound.account_id,
+        inbound_id=inbound_id,
+    ).handle_event
+
+
+def _compose_stream_callbacks(*cbs: Any) -> Any | None:
+    """Fan one ``on_stream_event`` invocation out to every live callback.
+
+    Drops ``None`` entries; returns the callback itself when only one
+    remains (zero wrapping overhead for the common single-sink case).
+    Each callback's exception is logged and swallowed so one broken sink
+    doesn't take the turn down.
+    """
+    live = [c for c in cbs if c is not None]
+    if not live:
+        return None
+    if len(live) == 1:
+        return live[0]
+
+    async def _fan_out(event_type: str, **kwargs: Any) -> None:
+        for cb in live:
+            try:
+                await cb(event_type, **kwargs)
+            except Exception:
+                log.exception(
+                    "composed stream callback %r failed for %s",
+                    cb, event_type,
+                )
+
+    return _fan_out
 
 
 # ---------------------------------------------------------------------------
@@ -1998,6 +2043,11 @@ class AgentHost:
                 # ``stream_renderer`` stays ``None`` for the bypass
                 # cases so the runner / session call sites take the
                 # zero-overhead path.
+                #
+                # Plan-mode forwarding (``ExitPlanMode`` → peer) is
+                # layered on top for remote channels and composed with
+                # the progressive renderer when both apply. See
+                # :class:`pip_agent.channels.plan_forwarder.PlanForwarder`.
                 stream_renderer: WecomStreamRenderer | None = None
                 stream_event_cb: Any | None = None
                 if (
@@ -2005,10 +2055,22 @@ class AgentHost:
                     and not is_heartbeat
                     and inbound.channel == "wecom"
                 ):
-                    stream_renderer, stream_event_cb = (
+                    stream_renderer, renderer_cb = (
                         await self._maybe_open_stream_renderer(
                             ch=ch, inbound=inbound, reply_peer=reply_peer,
                         )
+                    )
+                    plan_cb = _build_plan_forwarder_cb(ch, inbound, reply_peer)
+                    stream_event_cb = _compose_stream_callbacks(
+                        renderer_cb, plan_cb,
+                    )
+                elif (
+                    ch is not None
+                    and not is_heartbeat
+                    and inbound.channel == "wechat"
+                ):
+                    stream_event_cb = _build_plan_forwarder_cb(
+                        ch, inbound, reply_peer,
                     )
                 elif (
                     not is_heartbeat
@@ -2788,8 +2850,12 @@ def run_host(*, force_no_tui: bool = False, headless: bool = False) -> None:
     ``headless`` (default ``False``): when True the host runs without
     any local interactive surface — no TUI, no stdin reader, no CLI
     channel. Only remote channels (WeCom / WeChat) are active.
-    Interactive tools (TodoWrite, AskUserQuestion, ExitPlanMode) are
-    disabled. Intended for unattended server deployments (tmux / systemd).
+    ``AskUserQuestion`` is disabled (its structured-options UI has no
+    remote equivalent). Plan mode + ``TodoWrite`` stay available; plan
+    mode plans are forwarded to the peer via
+    :class:`pip_agent.channels.plan_forwarder.PlanForwarder` and the
+    peer's next reply becomes the approval turn. Intended for unattended
+    server deployments (tmux / systemd).
 
     Channel enablement rules
     ------------------------

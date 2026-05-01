@@ -715,18 +715,26 @@ class PipBoyTuiApp(App[None]):
         theme that started with ``show_app_log=False`` never rendered
         ``#app-log``) are simply skipped — Textual raises
         :class:`NoMatches` and we catch it.
+
+        ``#todo-pane`` is intentionally NOT toggled directly here: its
+        visibility is gated by both the manifest flag *and* the
+        empty-state of ``_todos`` (an empty list keeps the pane hidden
+        so its border + padding don't leave a phantom band between
+        ``#side-status`` and ``#app-log``). We delegate to
+        :meth:`_refresh_todo_pane`, which owns that combined rule.
         """
         m = bundle.manifest
         for widget_id, visible in (
             ("#status-bar", m.show_status_bar),
             ("#app-log", m.show_app_log),
-            ("#todo-pane", m.show_todo_pane),
         ):
             try:
                 widget = self.query_one(widget_id)
             except Exception:
                 continue
             widget.display = visible
+
+        self._refresh_todo_pane()
 
         try:
             side_pane = self.query_one("#side-pane")

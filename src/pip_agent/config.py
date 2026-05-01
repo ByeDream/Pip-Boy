@@ -265,7 +265,10 @@ settings = Settings()
 
 # Runtime flag set by ``run_host(headless=True)``. NOT a pydantic field —
 # ``--headless`` is a CLI concern, not a ``.env`` knob. Read by
-# ``agent_runner._builtin_disallowed_tools`` and ``streaming_session``
-# to disable interactive tools (TodoWrite, AskUserQuestion, ExitPlanMode)
-# when no human is at the terminal.
+# ``agent_runner._builtin_disallowed_tools`` to drop ``AskUserQuestion``
+# when no TUI is available to render its structured-options UI. Plan mode
+# (``EnterPlanMode`` / ``ExitPlanMode``) and ``TodoWrite`` stay enabled
+# in headless — the former is forwarded to remote channels via
+# :class:`pip_agent.channels.plan_forwarder.PlanForwarder`; the latter is
+# a model-internal scaffold that doesn't need a UI to be useful.
 headless: bool = False

@@ -519,6 +519,62 @@ async def test_todo_write_empty_hides_pane() -> None:
 
 
 @pytest.mark.asyncio
+async def test_apply_theme_keeps_empty_todo_pane_hidden() -> None:
+    """Regression: switching themes must not reveal an empty ``#todo-pane``.
+
+    Before the fix, ``_apply_visibility`` set ``#todo-pane.display`` from
+    the manifest's ``show_todo_pane`` flag alone — bypassing the
+    empty-state rule. The result was a phantom border + 2-row padding
+    band between ``#side-status`` and ``#app-log`` after every
+    ``/theme set`` even though no ``TodoWrite`` had ever fired.
+    """
+    bundle = load_builtin_theme("wasteland")
+    pump = UiPump()
+    app = PipBoyTuiApp(theme=bundle, pump=pump)
+    async with app.run_test() as pilot:
+        from textual.widgets import Static
+        pane = app.query_one("#todo-pane", Static)
+        assert pane.display is False
+
+        other = load_builtin_theme("vault-amber")
+        app.apply_theme(other)
+        await pilot.pause()
+        assert pane.display is False
+
+        back = load_builtin_theme("wasteland")
+        app.apply_theme(back)
+        await pilot.pause()
+        assert pane.display is False
+
+
+@pytest.mark.asyncio
+async def test_apply_theme_preserves_visible_todo_pane() -> None:
+    """A populated todo list must survive a theme swap — pane stays visible."""
+    bundle = load_builtin_theme("wasteland")
+    pump = UiPump()
+    app = PipBoyTuiApp(theme=bundle, pump=pump)
+    async with app.run_test() as pilot:
+        from textual.widgets import Static
+        pump.agent_sink(AgentEvent(
+            kind="tool_use",
+            name="TodoWrite",
+            tool_input={
+                "todos": [
+                    {"id": "a", "content": "Task A", "status": "in_progress"},
+                ],
+                "merge": False,
+            },
+        ))
+        await pilot.pause()
+        pane = app.query_one("#todo-pane", Static)
+        assert pane.display is True
+
+        app.apply_theme(load_builtin_theme("vault-amber"))
+        await pilot.pause()
+        assert pane.display is True
+
+
+@pytest.mark.asyncio
 async def test_clear_log_action_clears_both_panes() -> None:
     bundle = load_builtin_theme("wasteland")
     pump = UiPump()

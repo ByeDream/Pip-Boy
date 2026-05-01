@@ -131,9 +131,14 @@ def _builtin_disallowed_tools() -> list[str]:
     / ``web_fetch`` replace CC's native ``WebSearch`` / ``WebFetch``
     whose schema some upstream proxies reject.
 
-    In headless mode (``--headless``), interactive tools that require a
-    human at the terminal are also disabled: ``TodoWrite``,
-    ``AskUserQuestion``, and ``ExitPlanMode``.
+    In headless mode (``--headless``), only tools that genuinely need a
+    real-time user reply are disabled — ``AskUserQuestion``, whose
+    structured-options UI has no equivalent on remote channels and whose
+    reply shape would never arrive. ``TodoWrite`` is kept (the model
+    uses it as a structured-memory scaffold regardless of whether any UI
+    renders it). ``EnterPlanMode`` / ``ExitPlanMode`` are kept because
+    remote channels can approve a plan through a normal user turn — see
+    :class:`pip_agent.channels.plan_forwarder.PlanForwarder`.
     """
     import pip_agent.config as _cfg
     from pip_agent.config import settings
@@ -142,7 +147,7 @@ def _builtin_disallowed_tools() -> list[str]:
     if settings.use_custom_web_tools:
         tools.extend(["WebFetch", "WebSearch"])
     if _cfg.headless:
-        tools.extend(["TodoWrite", "AskUserQuestion", "ExitPlanMode"])
+        tools.append("AskUserQuestion")
     return tools
 
 
