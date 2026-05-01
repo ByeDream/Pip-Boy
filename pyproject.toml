@@ -32,7 +32,7 @@ dependencies = [
     # ``TAVILY_API_KEY`` is unset or Tavily errors out. The library was
     # renamed from ``duckduckgo-search`` to ``ddgs`` upstream; pin the
     # new name. Import is ``from ddgs import DDGS``.
-    "ddgs>=9",
+    "ddgs>=9.14.1",
     "wecom-aibot-python-sdk>=1.0",
     "qrcode>=7",
     # TUI stack. ``textual<1`` is deliberately barred — 0.89.x has
