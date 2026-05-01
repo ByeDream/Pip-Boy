@@ -103,7 +103,7 @@ Pip-Boy picks which channels to start from what it sees on disk and in the envir
 - **WeCom** — enabled iff both `WECOM_BOT_ID` and `WECOM_BOT_SECRET` are set in `.env` (or the process env).
 - **WeChat** — auto-started at boot iff at least one valid tier-3 `account_id=...` binding already exists. Each account gets its own poll thread and an isolated conversation context per peer, so one host can serve multiple WeChat identities concurrently. First-time scans go through `/wechat add <agent_id>` from the CLI.
 
-On first launch Pip-Boy scaffolds `.pip/` with defaults, including `.env` from the template. Fill in `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_BASE_URL`) and run again.
+On first launch Pip-Boy scaffolds `.pip/` with defaults, including `.env` from the template. Fill in `ANTHROPIC_API_KEY` (and `ANTHROPIC_BASE_URL` if you go through a proxy) and run again.
 
 ## Configuration
 
@@ -111,9 +111,8 @@ On first launch Pip-Boy scaffolds `.pip/` with defaults, including `.env` from t
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `ANTHROPIC_API_KEY` | Conditional | — | Direct Anthropic credential. |
-| `ANTHROPIC_AUTH_TOKEN` | Conditional | — | Proxy-style bearer token. Takes precedence over `ANTHROPIC_API_KEY`. |
-| `ANTHROPIC_BASE_URL` | No | — | Custom API endpoint. Promotes any credential to bearer mode for proxy gateways. |
+| `ANTHROPIC_API_KEY` | Conditional | — | Anthropic credential. Sent as `x-api-key` for direct calls; automatically promoted to `Authorization: Bearer` when `ANTHROPIC_BASE_URL` is set (so it works with OneAPI / claude-relay / corporate gateways out of the box). |
+| `ANTHROPIC_BASE_URL` | No | — | Custom API endpoint. Presence flips the auth header to bearer for proxy gateway compatibility. |
 | `MODEL_T0` / `MODEL_T1` / `MODEL_T2` | Yes | — | Three model tiers, strongest → cheapest. Every call site picks a tier and resolves through the table. Background tasks are pinned to fixed tiers in code. On model-invalid errors the chain steps DOWN; never up. |
 | `TAVILY_API_KEY` | No | — | Tavily search API key. When empty, `web_search` falls back to DuckDuckGo. |
 | `WECOM_BOT_ID` / `WECOM_BOT_SECRET` | No | — | WeCom enterprise bot credentials. |
@@ -122,7 +121,7 @@ On first launch Pip-Boy scaffolds `.pip/` with defaults, including `.env` from t
 | `BATCH_TEXT_INBOUNDS` | No | `true` | Fuse rapid-fire text messages from the same sender into a single LLM turn. |
 | `VERBOSE` | No | `false` | Open the internal log firehose: root at `INFO`, `pip_agent.*` at `DEBUG`. |
 
-At least one of `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` must be set, or Claude Code will fall back to its own auth (`claude login`).
+`ANTHROPIC_API_KEY` must be set, or Claude Code will fall back to its own auth (`claude login`).
 
 ### Heartbeat
 

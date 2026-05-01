@@ -6,13 +6,12 @@ SDK directly (``memory/reflect.py``, future ``dream`` / ``consolidate`` /
 any-other standalone LLM call) — MUST go through the helpers in this module
 so that the proxy rule stays consistent across all entry points.
 
-The rule (matching Claude Code's own behavior):
+Pip-Boy exposes a single user-facing credential variable, ``ANTHROPIC_API_KEY``.
+The auth header it goes out as is decided here, transparently:
 
-* ``ANTHROPIC_BASE_URL`` set → proxy mode. Any credential we have is sent as
-  ``Authorization: Bearer <token>`` because corporate LLM gateways only
-  accept bearer auth.
-* Explicit ``ANTHROPIC_AUTH_TOKEN`` set → bearer (wins over ``API_KEY``
-  when both are present; matches CC precedence).
+* ``ANTHROPIC_BASE_URL`` set → proxy mode. The key is sent as
+  ``Authorization: Bearer <token>`` (the de-facto standard most self-hosted
+  LLM gateways — OneAPI, claude-relay, corporate middlewares — accept).
 * Otherwise → direct to ``api.anthropic.com`` with ``x-api-key``.
 
 Credential lookup order for each variable: ``settings.*`` (pydantic-settings,
@@ -56,11 +55,6 @@ def resolve_anthropic_credential() -> AnthropicCredential | None:
     # Lazy import to avoid circular deps during config bootstrap.
     from pip_agent.config import settings
 
-    auth_token = (
-        settings.anthropic_auth_token
-        or os.getenv("ANTHROPIC_AUTH_TOKEN")
-        or ""
-    )
     api_key = (
         settings.anthropic_api_key
         or os.getenv("ANTHROPIC_API_KEY")
@@ -72,12 +66,10 @@ def resolve_anthropic_credential() -> AnthropicCredential | None:
         or ""
     )
 
-    token = auth_token or api_key
-    if not token:
+    if not api_key:
         return None
-    # Proxy rule: base_url presence OR explicit AUTH_TOKEN → bearer.
-    bearer = bool(base_url) or bool(auth_token)
-    return AnthropicCredential(token=token, bearer=bearer, base_url=base_url)
+    # Proxy rule: base_url presence → bearer; otherwise x-api-key.
+    return AnthropicCredential(token=api_key, bearer=bool(base_url), base_url=base_url)
 
 
 def build_anthropic_client() -> "anthropic.Anthropic | None":
@@ -93,8 +85,7 @@ def build_anthropic_client() -> "anthropic.Anthropic | None":
     cred = resolve_anthropic_credential()
     if cred is None:
         log.info(
-            "anthropic: no ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN configured; "
-            "direct-SDK call skipped",
+            "anthropic: no ANTHROPIC_API_KEY configured; direct-SDK call skipped",
         )
         return None
     try:

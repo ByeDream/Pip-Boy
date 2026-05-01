@@ -1465,7 +1465,7 @@ class AgentHost:
         if client is None:
             log.info(
                 "flush_and_rotate: rotating %d session(s) but skipping "
-                "reflect — no ANTHROPIC_API_KEY/AUTH_TOKEN configured",
+                "reflect — no ANTHROPIC_API_KEY configured",
                 len(snapshot),
             )
         else:

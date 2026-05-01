@@ -244,9 +244,9 @@ def _memory_tools(ctx: McpContext) -> list[SdkMcpTool]:
         client = build_anthropic_client()
         if client is None:
             return _text(
-                "Reflection skipped: no ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN "
-                "configured. Set one in `.env` (or as an environment variable) "
-                "so reflect can make direct Anthropic calls."
+                "Reflection skipped: no ANTHROPIC_API_KEY configured. "
+                "Set it in `.env` (or as an environment variable) so reflect "
+                "can make direct Anthropic calls."
             )
 
         try:

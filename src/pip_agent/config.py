@@ -6,6 +6,7 @@ and env vars — Pip-Boy does not proxy them.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -21,6 +22,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # value the operator exported in their shell.
 load_dotenv(override=False)
 
+# Pip-Boy exposes ``ANTHROPIC_API_KEY`` as the *only* user-facing credential
+# variable; the bearer-vs-x-api-key choice is an internal detail driven by
+# ``ANTHROPIC_BASE_URL`` (see ``pip_agent.anthropic_client``). The Anthropic
+# Python SDK, however, auto-reads ``ANTHROPIC_AUTH_TOKEN`` from the process
+# environment and silently *prefers* it over ``ANTHROPIC_API_KEY``. A stale
+# ``AUTH_TOKEN`` left in the operator's shell (from old Claude Code setups
+# or another tool) would therefore hijack the key the user just put in
+# ``.env`` with no warning. Scrub it here, before any SDK or subprocess sees
+# the env, so the single-credential contract actually holds.
+os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+
 WORKDIR: Path = Path.cwd()
 """Absolute path of the workspace Pip-Boy is running in.
 
@@ -35,13 +47,12 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # ``ANTHROPIC_API_KEY`` is the direct Anthropic credential;
-    # ``ANTHROPIC_AUTH_TOKEN`` is the proxy-style token Claude Code itself
-    # honours. Either works for reflect's direct LLM calls — we try them in
-    # order and fall back to ``os.environ`` for users who set them outside
-    # ``.env``.
+    # The single Anthropic credential. The header it goes out as
+    # (``x-api-key`` vs ``Authorization: Bearer``) is decided by whether
+    # ``anthropic_base_url`` is set — see ``pip_agent.anthropic_client``.
+    # Falls back to ``os.environ`` for users who export it from their shell
+    # rather than ``.env``.
     anthropic_api_key: str = Field(default="")
-    anthropic_auth_token: str = Field(default="")
     anthropic_base_url: str = Field(default="")
 
     # Three model tiers, ordered strongest to cheapest. Pip-Boy never uses
@@ -240,10 +251,12 @@ class Settings(BaseSettings):
     def check_required(self) -> None:
         """Host-level credential check.
 
-        Pip-Boy passes ``ANTHROPIC_API_KEY`` (or ``ANTHROPIC_AUTH_TOKEN`` under a
-        proxy) to the Claude Code CLI subprocess when set. If nothing is set,
-        CC falls back to its own auth (``claude login`` / system config), which
-        is fine — we only surface a warning, never fail.
+        Pip-Boy forwards ``ANTHROPIC_API_KEY`` to the Claude Code CLI
+        subprocess when set (translated internally to ``ANTHROPIC_AUTH_TOKEN``
+        under a proxy so CC sends bearer auth — transparent to the user).
+        If nothing is set, CC falls back to its own auth (``claude login`` /
+        system config), which is fine — we only surface a warning, never
+        fail.
         """
         return None
 

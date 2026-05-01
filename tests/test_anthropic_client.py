@@ -23,7 +23,6 @@ def _clean_env(monkeypatch):
     from pip_agent import config
 
     monkeypatch.setattr(config.settings, "anthropic_api_key", "")
-    monkeypatch.setattr(config.settings, "anthropic_auth_token", "")
     monkeypatch.setattr(config.settings, "anthropic_base_url", "")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
@@ -56,7 +55,15 @@ def _fake_sdk(monkeypatch):
 
 
 class TestResolveCredential:
-    """The proxy rule: BASE_URL set OR explicit AUTH_TOKEN → bearer."""
+    """The proxy rule: BASE_URL set → bearer; otherwise x-api-key.
+
+    There is exactly one user-facing credential variable now
+    (``ANTHROPIC_API_KEY``); the bearer-vs-x-api-key choice is an internal
+    detail driven by ``ANTHROPIC_BASE_URL``. Any historical
+    ``ANTHROPIC_AUTH_TOKEN`` is not honoured — the host process scrubs it
+    out of ``os.environ`` at import time (see ``pip_agent.config``) so a
+    stale shell var cannot hijack the SDK's credential pickup.
+    """
 
     def test_returns_none_when_nothing_set(self, _clean_env):
         from pip_agent.anthropic_client import resolve_anthropic_credential
@@ -88,17 +95,6 @@ class TestResolveCredential:
         assert cred.token == "proxy-bearer-token"
         assert cred.bearer is True
         assert cred.base_url == "https://proxy.example.com/anthropic"
-
-    def test_explicit_auth_token_wins_and_is_bearer(self, _clean_env):
-        from pip_agent.anthropic_client import resolve_anthropic_credential
-
-        _clean_env.settings.anthropic_api_key = "ignored"
-        _clean_env.settings.anthropic_auth_token = "winning-token"
-
-        cred = resolve_anthropic_credential()
-        assert cred is not None
-        assert cred.token == "winning-token"
-        assert cred.bearer is True
 
     def test_settings_wins_over_env(self, _clean_env, monkeypatch):
         from pip_agent.anthropic_client import resolve_anthropic_credential
@@ -305,15 +301,27 @@ class TestBuildEnv:
         assert env.get("ANTHROPIC_BASE_URL") == "https://proxy.example.com"
         assert env.get("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS") == "1"
 
-    def test_explicit_auth_token_promoted_without_base_url(self, _clean_env):
-        """``ANTHROPIC_AUTH_TOKEN`` alone → bearer, even without a proxy URL."""
-        from pip_agent.agent_runner import _build_env
+    def test_stale_auth_token_in_shell_env_is_purged_at_import(self, monkeypatch):
+        """A leftover ``ANTHROPIC_AUTH_TOKEN`` in the shell env must NOT
+        silently hijack our ``ANTHROPIC_API_KEY``.
 
-        _clean_env.settings.anthropic_auth_token = "bearer-direct"
+        The Anthropic Python SDK auto-reads ``ANTHROPIC_AUTH_TOKEN`` from
+        ``os.environ`` and *prefers* it over ``ANTHROPIC_API_KEY``. Without
+        the defensive pop in ``pip_agent.config``, an operator with a
+        leftover ``AUTH_TOKEN`` from a previous tool would have their
+        ``.env``-supplied ``API_KEY`` silently overridden, with no warning.
 
-        env = _build_env()
-        assert env.get("ANTHROPIC_AUTH_TOKEN") == "bearer-direct"
-        assert "ANTHROPIC_API_KEY" not in env
-        # No base_url → no override and no beta disable.
-        assert "ANTHROPIC_BASE_URL" not in env
-        assert "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS" not in env
+        This test reloads ``pip_agent.config`` so the import-time pop fires
+        against a freshly set ``AUTH_TOKEN``.
+        """
+        import importlib
+        import os
+
+        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "stale-from-shell")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "intended-key")
+
+        from pip_agent import config as _config
+        importlib.reload(_config)
+
+        assert "ANTHROPIC_AUTH_TOKEN" not in os.environ
+        assert os.environ.get("ANTHROPIC_API_KEY") == "intended-key"

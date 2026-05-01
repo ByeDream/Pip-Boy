@@ -86,6 +86,12 @@ def _build_env() -> dict[str, str]:
     the CC CLI expects. DO NOT duplicate the proxy rule here; if you need to
     change how bearer vs. x-api-key is decided, change it in one place.
 
+    Note: Pip-Boy's user-facing credential variable is ``ANTHROPIC_API_KEY``
+    only. Internally, when the resolver flags bearer mode (proxy), we forward
+    the same value to the subprocess as ``ANTHROPIC_AUTH_TOKEN`` because that
+    is what the CC CLI reads to emit the ``Authorization: Bearer`` header.
+    This translation is invisible from ``.env``.
+
     Pip-Boy does not forward any search or tool-specific keys — those are
     handled by Claude Code's own config.
 

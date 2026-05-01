@@ -113,21 +113,20 @@ async def run_spike() -> int:
 
     # Env for subprocess (mirrors pip_agent.agent_runner._build_env +
     # pip_agent.anthropic_client.resolve_anthropic_credential proxy rule).
+    # Single-credential model: ANTHROPIC_API_KEY only; bearer is decided by
+    # ANTHROPIC_BASE_URL presence.
     sdk_env: dict[str, str] = {
         "CLAUDE_CODE_DISABLE_CRON": "1",
         "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
     }
     base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
-    auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    token = auth_token or api_key
-    # Proxy rule: base_url set or explicit AUTH_TOKEN => bearer.
-    bearer = bool(base_url) or bool(auth_token)
-    if token:
+    bearer = bool(base_url)
+    if api_key:
         if bearer:
-            sdk_env["ANTHROPIC_AUTH_TOKEN"] = token
+            sdk_env["ANTHROPIC_AUTH_TOKEN"] = api_key
         else:
-            sdk_env["ANTHROPIC_API_KEY"] = token
+            sdk_env["ANTHROPIC_API_KEY"] = api_key
     if base_url:
         sdk_env["ANTHROPIC_BASE_URL"] = base_url
     print(f"(auth: bearer={bearer}  base_url={base_url or '<direct>'})")
@@ -259,8 +258,8 @@ async def run_spike() -> int:
 
 def main() -> int:
     _load_env(Path("D:/Workspace/pip-test/.env"))
-    if not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("ANTHROPIC_AUTH_TOKEN"):
-        print("[fatal] no ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN in env", file=sys.stderr)
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        print("[fatal] no ANTHROPIC_API_KEY in env", file=sys.stderr)
         return 2
     return asyncio.run(run_spike())
 

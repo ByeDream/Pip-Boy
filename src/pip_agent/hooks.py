@@ -105,7 +105,7 @@ def _pre_compact_hook(memory_store: MemoryStore | None):
                 if client is None:
                     log.info(
                         "PreCompact: reflect skipped for session=%s — "
-                        "no ANTHROPIC_API_KEY/AUTH_TOKEN configured",
+                        "no ANTHROPIC_API_KEY configured",
                         session_id[:8],
                     )
                     return {}
