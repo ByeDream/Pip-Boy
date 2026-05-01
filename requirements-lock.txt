@@ -85,7 +85,7 @@ pydantic==2.13.1
     #   pydantic-settings
 pydantic-core==2.46.1
     # via pydantic
-pydantic-settings==2.13.1
+pydantic-settings==2.14.0
     # via pip-boy (pyproject.toml)
 pyee==13.0.1
     # via wecom-aibot-python-sdk
