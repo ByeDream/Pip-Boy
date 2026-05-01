@@ -31,7 +31,22 @@ load_dotenv(override=False)
 # or another tool) would therefore hijack the key the user just put in
 # ``.env`` with no warning. Scrub it here, before any SDK or subprocess sees
 # the env, so the single-credential contract actually holds.
-os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+#
+# Exposed as a named function (and called once at import) so tests can
+# re-run the scrub against a freshly-set ``ANTHROPIC_AUTH_TOKEN`` without
+# resorting to ``importlib.reload(pip_agent.config)`` — a reload would
+# rebind ``settings`` to a brand-new instance while leaving every
+# downstream module that did ``from pip_agent.config import settings``
+# pinned to the *old* singleton. That orphaning pattern silently breaks
+# unrelated tests (``host_scheduler`` ones in particular) by making
+# their ``monkeypatch.setattr(config.settings, ...)`` patch the wrong
+# object. See ``tests/test_anthropic_client.py`` for the call site.
+def _purge_stale_anthropic_auth_token() -> None:
+    """Remove ``ANTHROPIC_AUTH_TOKEN`` from ``os.environ`` if present."""
+    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+
+
+_purge_stale_anthropic_auth_token()
 
 WORKDIR: Path = Path.cwd()
 """Absolute path of the workspace Pip-Boy is running in.

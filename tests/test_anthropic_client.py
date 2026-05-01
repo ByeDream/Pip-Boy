@@ -311,17 +311,20 @@ class TestBuildEnv:
         leftover ``AUTH_TOKEN`` from a previous tool would have their
         ``.env``-supplied ``API_KEY`` silently overridden, with no warning.
 
-        This test reloads ``pip_agent.config`` so the import-time pop fires
-        against a freshly set ``AUTH_TOKEN``.
+        We re-run the scrub via the named helper so the assertion fires
+        against a freshly set ``AUTH_TOKEN`` without ``importlib.reload``
+        rebinding ``config.settings`` to a new singleton — that would
+        orphan every consumer that did ``from pip_agent.config import
+        settings`` and silently break unrelated tests.
         """
-        import importlib
         import os
 
         monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "stale-from-shell")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "intended-key")
 
-        from pip_agent import config as _config
-        importlib.reload(_config)
+        from pip_agent.config import _purge_stale_anthropic_auth_token
+
+        _purge_stale_anthropic_auth_token()
 
         assert "ANTHROPIC_AUTH_TOKEN" not in os.environ
         assert os.environ.get("ANTHROPIC_API_KEY") == "intended-key"
