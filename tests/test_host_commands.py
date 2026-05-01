@@ -652,6 +652,29 @@ class TestSubagentCommand:
         assert cfg.id == "helperbot"
         assert cfg.name == "helperbot"
 
+    def test_create_lands_under_subagents_subdir(self, tmp_path: Path):
+        """Sub-agents materialise inside the hard-coded ``workspace/``
+        container, not directly under the workspace root. The user
+        still types a bare id — ``/subagent create helper`` — and the
+        prefix is added for them. This pins the layout so future
+        refactors can't silently flatten it back."""
+        from pip_agent.routing import SUBAGENTS_SUBDIR
+
+        ctx = _build_ctx(_cli_inbound("/subagent create helper"), tmp_path)
+        result = dispatch_command(ctx)
+        assert result.handled, result.response
+
+        paths = ctx.registry.paths_for("helper")
+        assert paths is not None
+        workspace_root = tmp_path / "workspace"
+        assert paths.cwd == workspace_root / SUBAGENTS_SUBDIR / "helper"
+        assert paths.pip_dir == (
+            workspace_root / SUBAGENTS_SUBDIR / "helper" / ".pip"
+        )
+        assert (paths.pip_dir / "persona.md").is_file()
+        # The workspace root itself stays free of tenant dirs.
+        assert not (workspace_root / "helper").exists()
+
     def test_create_honours_explicit_flags(self, tmp_path: Path):
         """``--id`` / ``--name`` / ``--model`` / ``--dm_scope`` all
         take precedence over the defaults derived from the positional

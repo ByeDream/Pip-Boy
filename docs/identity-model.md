@@ -13,7 +13,7 @@ layers; each inherits from the one above:
 | --- | --- | --- | --- |
 | System (lowest) | `~/.pip/` | Per-user system settings | Only CLI preferences and `settings.json` (logging / profiler / network defaults). No channel credentials, no bindings. |
 | Workspace | `<pip_boy_workspace>/.pip/` | The root `pip-boy` agent's home + shared runtime state | Holds `bindings.json`, `agents_registry.json`, `credentials/`, `sdk_sessions.json`. |
-| Sub-agent | `<pip_boy_workspace>/<id>/.pip/` | An individual sub-agent | Independent `persona.md`, `memory`, `observations/`. Contacts live in the shared workspace-level `addressbook/` (uuid-keyed, lazy-loaded) and are not duplicated per sub-agent. |
+| Sub-agent | `<pip_boy_workspace>/workspace/<id>/.pip/` | An individual sub-agent | Independent `persona.md`, `memory`, `observations/`. Contacts live in the shared workspace-level `addressbook/` (uuid-keyed, lazy-loaded) and are not duplicated per sub-agent. The `workspace/` container is hard-coded (`routing.SUBAGENTS_SUBDIR`) — `/subagent` commands take a bare id and the prefix is added for them. |
 
 Scalar settings from higher tiers override lower tiers; array-valued
 settings (like permission allow-lists) are unioned with dedup.
@@ -132,9 +132,9 @@ Two separate concerns with two separate verb surfaces:
 | `/unbind` | Clear this chat's binding so routing falls back to pip-boy. No-op when already on pip-boy. | open |
 | `/subagent` | **pip-boy only.** List known sub-agents (alias for `/subagent list`). | CLI-only |
 | `/subagent list` | **pip-boy only.** List known sub-agents. | CLI-only |
-| `/subagent create <id>` | **pip-boy only.** Scaffold `<workspace>/<id>/.pip/` with a cloned persona + HEARTBEAT and register it. | CLI-only |
-| `/subagent archive <id>` | **pip-boy only.** Move `<id>/.pip/` → `<workspace>/.pip/archived/<id>-<ts>/.pip/`, drop bindings. Project files in `<id>/` untouched. | CLI-only |
-| `/subagent delete <id> --yes` | **pip-boy only.** `rmtree(<id>/.pip/)` and drop bindings. Project files in `<id>/` untouched. | CLI-only |
+| `/subagent create <id>` | **pip-boy only.** Scaffold `<workspace>/workspace/<id>/.pip/` with a cloned persona + HEARTBEAT and register it. The `workspace/` container is hard-coded — the command takes a bare id. | CLI-only |
+| `/subagent archive <id>` | **pip-boy only.** Move `workspace/<id>/.pip/` → `<workspace>/.pip/archived/<id>-<ts>/.pip/`, drop bindings. Project files in `workspace/<id>/` untouched. | CLI-only |
+| `/subagent delete <id> --yes` | **pip-boy only.** `rmtree(workspace/<id>/.pip/)` and drop bindings. Project files in `workspace/<id>/` untouched. | CLI-only |
 | `/subagent reset <id>` | **pip-boy only.** Rebuild sub-agent `<id>`'s `.pip/` from a minimal backup (see below). Refused on the root agent. | CLI-only |
 
 "CLI-only" commands are refused outright on remote channels (WeCom,
@@ -145,8 +145,8 @@ commands run for anyone regardless of channel.
 There are no CLI flags for `model` / `dm_scope` / `description`. Edit
 the relevant file directly:
 
-- `<workspace>/<id>/.pip/persona.md` — YAML frontmatter for `model` and
-  `dm_scope`.
+- `<workspace>/workspace/<id>/.pip/persona.md` — YAML frontmatter for
+  `model` and `dm_scope`.
 - `<workspace>/.pip/agents_registry.json` — description and registry
   metadata.
 - `<workspace>/.pip/bindings.json` — channel → agent routing with

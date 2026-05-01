@@ -2,7 +2,9 @@
 
 Layout
 ------
-The workspace root itself belongs to the default ``pip-boy`` agent:
+The workspace root itself belongs to the default ``pip-boy`` agent.
+User-created sub-agents live one level deeper, inside a hard-coded
+``workspace/`` container (``routing.SUBAGENTS_SUBDIR``):
 
     <workspace>/
       .pip/                 <- pip-boy's own state + workspace-shared state
@@ -19,12 +21,14 @@ The workspace root itself belongs to the default ``pip-boy`` agent:
         agents_registry.json
         sdk_sessions.json
         .scaffold_manifest.json
-      <sub-agent>/          <- 0..N sub-agents
-        .pip/
-          persona.md        <- agent-specific (Identity + Philosophy + Style)
-          HEARTBEAT.md
-          observations/
-          incoming/
+      workspace/            <- hard-coded sub-agent container; created
+                               lazily by the first ``/subagent create``
+        <sub-agent>/        <- 0..N sub-agents, one dir each
+          .pip/
+            persona.md      <- agent-specific (Identity + Philosophy + Style)
+            HEARTBEAT.md
+            observations/
+            incoming/
       .env
 """
 

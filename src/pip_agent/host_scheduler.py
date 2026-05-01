@@ -11,7 +11,8 @@ Design:
 * **Per-agent cron store** at each agent's ``<pip_dir>/cron.json`` — a list
   of job dicts. Stored on disk so jobs survive restarts. ``<pip_dir>`` is
   resolved via :class:`AgentRegistry.paths_for`: ``WORKDIR/.pip/`` for the
-  root pip-boy agent and ``WORKDIR/<id>/.pip/`` for every sub-agent.
+  root pip-boy agent and ``WORKDIR/workspace/<id>/.pip/`` for every
+  sub-agent.
 * **Per-agent heartbeat source** at ``<pip_dir>/HEARTBEAT.md``. If the
   file exists, the agent receives a ``<heartbeat>`` inbound every
   ``settings.heartbeat_interval`` seconds during the active window.

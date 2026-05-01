@@ -742,7 +742,7 @@ def _cmd_subagent(ctx: CommandContext, args: str) -> CommandResult:
                                                   (alias for ``/subagent list``)
     * ``/subagent list``                      — list all known sub-agents
     * ``/subagent create <label> [flags]``    — materialise
-                                                  ``<workspace>/<id>/.pip/``.
+                                                  ``<workspace>/workspace/<id>/.pip/``.
                                                   Flags: ``--id``, ``--name``,
                                                   ``--model``, ``--dm_scope``.
     * ``/subagent archive <id>``              — move ``<id>/.pip/`` to
@@ -854,10 +854,12 @@ _VALID_DM_SCOPES = {"main", "per-guild", "per-guild-peer"}
 _CREATE_USAGE = (
     "Usage: /subagent create <label> [--id ID] [--name NAME] "
     "[--model {t0|t1|t2}] [--dm_scope SCOPE]\n"
-    "The positional <label> is the directory name under the workspace "
-    "root. --id is the agent's identity key (registry + session + bind "
-    "target); it defaults to <label> when omitted, so the two stay in "
-    "sync for the simple case. Provide --id to decouple them.\n"
+    "The positional <label> is the directory name; it is always created "
+    "inside the hard-coded `workspace/` container, so just pass a bare "
+    "name (`/subagent create foo` → `workspace/foo/`). --id is the "
+    "agent's identity key (registry + session + bind target); it "
+    "defaults to <label> when omitted, so the two stay in sync for the "
+    "simple case. Provide --id to decouple them.\n"
     "Defaults: --name <id>, --model t0, --dm_scope per-guild.\n"
     "--model picks a tier (t0 strongest, t2 cheapest); concrete model "
     "names live in MODEL_T0/MODEL_T1/MODEL_T2 in .env.\n"
@@ -955,16 +957,21 @@ def _agent_create(ctx: CommandContext, tail: list[str]) -> CommandResult:
         )
     # Also refuse if the directory exists on disk with a .pip/ we
     # haven't registered — that's a collision we can't silently
-    # overwrite.
+    # overwrite. The sub-agent container (SUBAGENTS_SUBDIR) is
+    # prepended here to match where `_build_paths` will actually
+    # create the agent tree.
     if ctx.registry.workspace_root is not None:
-        candidate = ctx.registry.workspace_root / dirname / ".pip"
+        from pip_agent.routing import SUBAGENTS_SUBDIR
+        candidate = (
+            ctx.registry.workspace_root / SUBAGENTS_SUBDIR / dirname / ".pip"
+        )
         if candidate.exists():
             return CommandResult(
                 handled=True,
                 response=(
-                    f"Directory '{dirname}/.pip' already exists on disk "
-                    "but isn't registered. Remove it manually or pick a "
-                    "different label."
+                    f"Directory '{SUBAGENTS_SUBDIR}/{dirname}/.pip' already "
+                    "exists on disk but isn't registered. Remove it "
+                    "manually or pick a different label."
                 ),
             )
 

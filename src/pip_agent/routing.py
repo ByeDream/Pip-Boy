@@ -8,9 +8,13 @@ Pip-Boy runs a single service process rooted at ``WORKDIR``
 * The default agent ``pip-boy`` lives *at the workspace root itself*,
   with its state under ``WORKDIR/.pip/`` (``persona.md``,
   ``memories.json``, ``observations/``, …).
-* User-created sub-agents live in subdirectories of the workspace:
-  ``WORKDIR/<agent_id>/.pip/<...>``. Their ``cwd`` (as seen by the
-  Claude Agent SDK subprocess) is ``WORKDIR/<agent_id>``.
+* User-created sub-agents live inside a hard-coded ``workspace/``
+  container one level below the root:
+  ``WORKDIR/workspace/<agent_id>/.pip/<...>``. Their ``cwd`` (as seen
+  by the Claude Agent SDK subprocess) is ``WORKDIR/workspace/<agent_id>``.
+  The container name is fixed by :data:`SUBAGENTS_SUBDIR` and is not
+  user-configurable — ``/subagent`` commands take a bare agent id and
+  the ``workspace/`` prefix is added for them.
 * Workspace-level state shared by all agents (``addressbook/``,
   ``bindings.json``, ``sdk_sessions.json``, ``agents_registry.json``,
   ``credentials/``) lives in ``WORKDIR/.pip/``.
@@ -45,6 +49,17 @@ PIP_DIRNAME = ".pip"
 REGISTRY_FILENAME = "agents_registry.json"
 BINDINGS_FILENAME = "bindings.json"
 
+# Hard-coded container directory that holds every sub-agent's working
+# tree. Pip-boy lives at the workspace root (``WORKDIR/.pip/``); every
+# sub-agent lives one level deeper at ``WORKDIR/<SUBAGENTS_SUBDIR>/<id>/``.
+# This keeps pip-boy's own files cleanly separated from user-created
+# sub-agent project trees, and frees the workspace root of N tenant
+# directories once you have more than a couple of sub-agents.
+#
+# ``/subagent`` commands take a bare agent id — the prefix is added
+# here, never typed by the user.
+SUBAGENTS_SUBDIR = "workspace"
+
 REGISTRY_SCHEMA_VERSION = 1
 
 
@@ -61,7 +76,15 @@ REGISTRY_SCHEMA_VERSION = 1
 _VALID_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _INVALID_CHARS_RE = re.compile(r"[^a-z0-9_-]+")
 
-_RESERVED_IDS = {"", ".", "..", PIP_DIRNAME, ".claude", ".git"}
+_RESERVED_IDS = {
+    "", ".", "..",
+    PIP_DIRNAME, ".claude", ".git",
+    # ``workspace`` is the hard-coded container dir for sub-agents
+    # (see :data:`SUBAGENTS_SUBDIR`); reserving the id prevents
+    # ``/subagent create workspace`` from trying to nest a sub-agent
+    # inside ``WORKDIR/workspace/workspace/``.
+    SUBAGENTS_SUBDIR,
+}
 
 
 def normalize_agent_id(value: str) -> str:
@@ -160,7 +183,7 @@ class AgentPaths:
     disk" — every subsystem (scaffold, memory, scheduler, SDK dispatch)
     asks the registry for an :class:`AgentPaths` and derives its own
     paths from it. That keeps the root-vs-sub layout asymmetry
-    (``WORKDIR/.pip`` vs ``WORKDIR/<id>/.pip``) in one place.
+    (``WORKDIR/.pip`` vs ``WORKDIR/workspace/<id>/.pip``) in one place.
     """
 
     agent_id: str
@@ -168,7 +191,8 @@ class AgentPaths:
     """Directory used as Claude Agent SDK ``cwd`` for this agent.
 
     For the root agent this is the workspace root itself; for sub-agents
-    it's ``<workspace>/<agent_id>``.
+    it's ``<workspace>/workspace/<agent_id>`` (the second ``workspace``
+    is :data:`SUBAGENTS_SUBDIR`, the hard-coded container dir).
     """
 
     pip_dir: Path
@@ -551,7 +575,11 @@ class AgentRegistry:
         else:
             if not dirname:
                 dirname = self._metadata.get(agent_id, {}).get("cwd") or agent_id
-            cwd = self._workspace_root / dirname
+            # The registry stores ``cwd`` as a single-segment dirname
+            # (e.g. ``"helper"``); the hard-coded ``SUBAGENTS_SUBDIR``
+            # container is prepended here — never in the registry — so
+            # the stored metadata stays short and relocatable.
+            cwd = self._workspace_root / SUBAGENTS_SUBDIR / dirname
             pip_dir = cwd / PIP_DIRNAME
         return AgentPaths(
             agent_id=agent_id,
@@ -635,7 +663,7 @@ class AgentRegistry:
             if meta.get("kind") == AGENT_KIND_ROOT:
                 continue
             dirname = str(meta.get("cwd") or aid)
-            agent_dir = root / dirname
+            agent_dir = root / SUBAGENTS_SUBDIR / dirname
             persona = agent_dir / PIP_DIRNAME / "persona.md"
             if not persona.is_file():
                 log.info(

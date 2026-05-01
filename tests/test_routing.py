@@ -6,6 +6,7 @@ from pip_agent.models import DEFAULT_TIER
 from pip_agent.routing import (
     DEFAULT_AGENT_ID,
     DEFAULT_DM_SCOPE,
+    SUBAGENTS_SUBDIR,
     AgentConfig,
     AgentRegistry,
     Binding,
@@ -44,6 +45,14 @@ class TestNormalizeAgentId:
     def test_long_id(self):
         result = normalize_agent_id("a" * 100)
         assert len(result) <= 64
+
+    def test_subagents_subdir_is_reserved(self):
+        # ``workspace`` is the hard-coded container dir for every
+        # sub-agent; creating one with that id would try to nest it
+        # inside ``WORKDIR/workspace/workspace/`` which is nonsense.
+        # The normaliser falls back to the default id so downstream
+        # create-flow refuses via the "reserved for root" check.
+        assert normalize_agent_id(SUBAGENTS_SUBDIR) == DEFAULT_AGENT_ID
 
 
 class TestAgentConfig:
@@ -319,14 +328,17 @@ class TestAgentRegistry:
     ):
         """Scaffold a registered sub-agent on disk.
 
-        Writes ``<workspace>/<dirname>/.pip/persona.md`` **and** a
-        registry entry — the registry is now the source of truth, so
-        both are required for the agent to be discovered on load.
+        Writes ``<workspace>/<SUBAGENTS_SUBDIR>/<dirname>/.pip/persona.md``
+        **and** a registry entry — the registry is now the source of
+        truth, so both are required for the agent to be discovered on
+        load. The ``SUBAGENTS_SUBDIR`` container is hard-coded in
+        ``routing``; test helpers mirror that layout rather than
+        hardcoding a string.
         """
         import json
 
         aid = agent_id or dirname
-        sub = workspace / dirname / ".pip"
+        sub = workspace / SUBAGENTS_SUBDIR / dirname / ".pip"
         sub.mkdir(parents=True)
         fm = f"id: {aid}\nname: {name or aid}\n{extra_fm}".rstrip()
         (sub / "persona.md").write_text(
@@ -355,14 +367,17 @@ class TestAgentRegistry:
         assert reg.get_agent("test-bot").name == "TestBot"
         paths = reg.paths_for("test-bot")
         assert paths is not None
-        assert paths.cwd == workspace / "test-bot"
+        assert paths.cwd == workspace / SUBAGENTS_SUBDIR / "test-bot"
         assert paths.pip_dir == sub
 
     def test_unregistered_directory_is_ignored(self, tmp_path):
         """A ``.pip/persona.md`` on disk without a registry entry is
-        invisible — the registry is authoritative."""
+        invisible — the registry is authoritative. The persona.md is
+        placed in the correct ``SUBAGENTS_SUBDIR`` location on purpose
+        so we're testing the ``no registry`` invariant and not just a
+        ``wrong directory`` fallthrough."""
         workspace = tmp_path / "workspace"
-        sub = workspace / "stray-bot" / ".pip"
+        sub = workspace / SUBAGENTS_SUBDIR / "stray-bot" / ".pip"
         sub.mkdir(parents=True)
         (sub / "persona.md").write_text(
             "---\nid: stray-bot\nname: Stray\n---\nBody.\n",
@@ -389,8 +404,8 @@ class TestDirnameDecoupling:
     """agent_id and dirname are distinct dimensions (see /subagent create --id)."""
 
     def _write_persona(self, workspace, dirname, *, agent_id, name):
-        """Helper: scaffold ``<workspace>/<dirname>/.pip/persona.md``."""
-        pip = workspace / dirname / ".pip"
+        """Helper: scaffold ``<workspace>/<SUBAGENTS_SUBDIR>/<dirname>/.pip/persona.md``."""
+        pip = workspace / SUBAGENTS_SUBDIR / dirname / ".pip"
         pip.mkdir(parents=True)
         (pip / "persona.md").write_text(
             f"---\nid: {agent_id}\nname: {name}\n---\nBody.\n",
@@ -415,8 +430,11 @@ class TestDirnameDecoupling:
         reg.register_agent(cfg, dirname="foo")
         paths = reg.paths_for("alice")
         assert paths is not None
-        assert paths.cwd == tmp_path / "foo"
-        assert paths.pip_dir == tmp_path / "foo" / ".pip"
+        assert paths.cwd == tmp_path / SUBAGENTS_SUBDIR / "foo"
+        assert paths.pip_dir == tmp_path / SUBAGENTS_SUBDIR / "foo" / ".pip"
+        # Registry ``cwd`` metadata stays as a single-segment dirname —
+        # the hard-coded container is added by ``_build_paths``, not
+        # stored on disk.
         assert reg.dirname_for("alice") == "foo"
 
     def test_register_agent_defaults_dirname_to_id(self, tmp_path):
@@ -425,7 +443,7 @@ class TestDirnameDecoupling:
         reg.register_agent(cfg)
         paths = reg.paths_for("bob")
         assert paths is not None
-        assert paths.cwd == tmp_path / "bob"
+        assert paths.cwd == tmp_path / SUBAGENTS_SUBDIR / "bob"
         assert reg.dirname_for("bob") == "bob"
 
     def test_get_by_dirname_finds_decoupled_agent(self, tmp_path):
@@ -459,7 +477,7 @@ class TestDirnameDecoupling:
         assert reg.get_by_dirname("foo") is not None
         assert reg.get_by_dirname("foo").id == "alice"
         paths = reg.paths_for("alice")
-        assert paths.cwd == workspace / "foo"
+        assert paths.cwd == workspace / SUBAGENTS_SUBDIR / "foo"
 
     def test_dirname_survives_save_and_reload(self, tmp_path):
         """Round-trip: create decoupled agent, save registry, reload — mapping preserved."""
