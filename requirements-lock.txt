@@ -57,7 +57,7 @@ httpx==0.28.1
     #   anthropic
     #   pip-boy (pyproject.toml)
     #   tavily-python
-idna==3.11
+idna==3.13
     # via
     #   anyio
     #   httpx
