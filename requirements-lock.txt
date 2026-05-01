@@ -65,7 +65,7 @@ idna==3.11
     #   yarl
 jiter==0.14.0
     # via anthropic
-lxml==6.0.4
+lxml==6.1.0
     # via ddgs
 multidict==6.7.1
     # via
