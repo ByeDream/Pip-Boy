@@ -2554,6 +2554,16 @@ _HANDLERS: dict[
     "/exit": _cmd_exit,
 }
 
+
+def list_slash_commands() -> list[str]:
+    """Public view of the registered slash commands, sorted.
+
+    Used by the TUI's :class:`pip_agent.tui.history_input.HistoryInput`
+    to seed an inline ``Suggester`` so typing ``/m`` surfaces ``/memory``.
+    Sorted for stable suggestion order across boots.
+    """
+    return sorted(_HANDLERS.keys())
+
 # Commands that are only valid at the local CLI. Remote channels
 # (WeCom / WeChat / ...) get a terse refusal AND the ``/help`` text
 # they see simply doesn't advertise these — remote peers never even

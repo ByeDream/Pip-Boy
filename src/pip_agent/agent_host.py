@@ -2710,6 +2710,14 @@ def _bootstrap_tui(
                     peer_id="cli-user",
                 ))
 
+        # Input affordances: ↑/↓ history persisted under .pip/, plus
+        # an inline suggester seeded with the host's slash-command
+        # registry so ``/m<TAB>`` autocompletes to ``/memory``. Both
+        # are wired here (not inside ``build_app``) so the App stays
+        # host-agnostic — the runner only forwards what the host gives it.
+        slash_commands = host_commands.list_slash_commands()
+        history_path = workdir / ".pip" / "tui_history.log"
+
         pump = UiPump()
         if theme_manager is not None and active_theme_name:
             # The manager already validated the bundle and resolved the
@@ -2721,6 +2729,8 @@ def _bootstrap_tui(
                 art_anim_interval=settings.art_anim_interval,
                 initial_side_snapshot=initial_side_snapshot,
                 snapshot_provider=snapshot_provider,
+                slash_commands=slash_commands,
+                history_path=history_path,
             )
         else:
             app, _ = build_app(
@@ -2730,6 +2740,8 @@ def _bootstrap_tui(
                 art_anim_interval=settings.art_anim_interval,
                 initial_side_snapshot=initial_side_snapshot,
                 snapshot_provider=snapshot_provider,
+                slash_commands=slash_commands,
+                history_path=history_path,
             )
         install_pump(pump)
 

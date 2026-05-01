@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Sequence
 
 from pip_agent.tui.app import PipBoyTuiApp, SnapshotProvider, UserLineHandler
 from pip_agent.tui.capability import (
@@ -81,6 +81,8 @@ def build_app(
     art_anim_interval: float = 3.0,
     initial_side_snapshot: dict[str, str] | None = None,
     snapshot_provider: SnapshotProvider | None = None,
+    slash_commands: Sequence[str] = (),
+    history_path: Path | None = None,
 ) -> tuple[PipBoyTuiApp, UiPump]:
     """Build (but do NOT run) a :class:`PipBoyTuiApp`.
 
@@ -89,6 +91,10 @@ def build_app(
     pump is the *same* one passed in (or a freshly created one if
     none was provided), so callers can wire producers against it
     before calling ``app.run()``.
+
+    ``slash_commands`` and ``history_path`` are forwarded to the
+    input widget; defaults preserve the historical no-history /
+    no-completion behaviour for unit tests that don't care.
     """
     bundle = load_builtin_theme(theme_name)
     if pump is None:
@@ -98,6 +104,8 @@ def build_app(
         art_anim_interval=art_anim_interval,
         initial_side_snapshot=initial_side_snapshot,
         snapshot_provider=snapshot_provider,
+        slash_commands=slash_commands,
+        history_path=history_path,
     )
     return app, pump
 

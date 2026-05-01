@@ -35,15 +35,18 @@ from __future__ import annotations
 import inspect
 import logging
 from datetime import datetime
-from typing import Awaitable, Callable
+from pathlib import Path
+from typing import Awaitable, Callable, Sequence
 
 from rich.markdown import Markdown
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.geometry import Size
+from textual.suggester import SuggestFromList
 from textual.widgets import Input, RichLog, Static
 
+from pip_agent.tui.history_input import HistoryInput
 from pip_agent.tui.messages import AgentMessage, LogMessage, StatusMessage
 from pip_agent.tui.modals import AskUserModal, PlanReviewModal
 from pip_agent.tui.pump import UiPump
@@ -129,6 +132,8 @@ class PipBoyTuiApp(App[None]):
         snapshot_provider: SnapshotProvider | None = None,
         snapshot_refresh_interval: float = 5.0,
         art_anim_interval: float = 3.0,
+        slash_commands: Sequence[str] = (),
+        history_path: Path | None = None,
     ) -> None:
         # The TCSS file isn't reachable from the package data path at
         # ``CSS_PATH`` time (Textual reads it before mount); we attach
@@ -148,6 +153,14 @@ class PipBoyTuiApp(App[None]):
         self._art_frames: tuple[str, ...] = theme.art_frames
         self._art_frame_idx: int = 0
         self._art_anim_interval: float = art_anim_interval
+
+        # Input affordances. Both wire into ``HistoryInput`` at compose
+        # time. ``slash_commands`` seeds the inline suggester (ghost
+        # text); ``history_path`` makes ↑/↓ history survive restarts.
+        # Empty / None preserves backwards-compatible behaviour: no
+        # completion, no on-disk persistence.
+        self._slash_commands: tuple[str, ...] = tuple(slash_commands)
+        self._history_path: Path | None = history_path
 
         # Map ``theme.toml`` palette onto Textual's design tokens. Without
         # this, ``$accent`` / ``$surface`` resolve from ``textual-dark``
@@ -258,9 +271,18 @@ class PipBoyTuiApp(App[None]):
                     min_width=0,
                     auto_scroll=True,
                 )
-                yield Input(
+                suggester = (
+                    SuggestFromList(
+                        self._slash_commands, case_sensitive=False,
+                    )
+                    if self._slash_commands
+                    else None
+                )
+                yield HistoryInput(
                     placeholder="Type and press Enter — /exit to quit",
                     id="input",
+                    suggester=suggester,
+                    history_path=self._history_path,
                 )
             # The side pane is shown when *any* of its sub-widgets have
             # content the theme wants visible. A theme that disables
