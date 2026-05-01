@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pip-boy"
-version = "0.4.4"
+version = "0.4.5"
 description = "Multi-channel, identity-aware, memory-rich host for Claude Code."
 readme = "README.md"
 license = "MIT"
@@ -65,7 +65,7 @@ Repository = "https://github.com/ByeDream/Pip-Boy"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"pip_agent.scaffold" = ["*.md", "*.json", "*.txt", "*.example"]
+"pip_agent.scaffold" = ["*.md", "*.json", "*.example"]
 "pip_agent.memory" = ["sops/*.md"]
 "pip_agent.tui" = ["themes/*/theme.toml", "themes/*/theme.tcss", "themes/*/art.txt"]
 

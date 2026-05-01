@@ -13,7 +13,6 @@ from pip_agent.scaffold import (
 
 
 def test_fresh_init(tmp_path: Path) -> None:
-    (tmp_path / ".git").mkdir()
     ensure_workspace(tmp_path)
 
     # v2 layout: pip-boy's state lives at .pip/ (no more nested agents/<id>/).
@@ -53,10 +52,9 @@ def test_fresh_init(tmp_path: Path) -> None:
     assert "pip-boy" in data.get("agents", {})
     assert data["agents"]["pip-boy"]["kind"] == "root"
 
-    gitignore = tmp_path / ".gitignore"
-    assert gitignore.exists()
-    lines = gitignore.read_text(encoding="utf-8").splitlines()
-    assert ".pip/" in lines
+    # Scaffold no longer touches .gitignore — that's the host workspace's
+    # responsibility, not pip-boy's.
+    assert not (tmp_path / ".gitignore").exists()
 
     manifest_path = tmp_path / ".pip" / _MANIFEST_NAME
     assert manifest_path.exists()
@@ -66,7 +64,6 @@ def test_fresh_init(tmp_path: Path) -> None:
 
 
 def test_idempotent(tmp_path: Path) -> None:
-    (tmp_path / ".git").mkdir()
     ensure_workspace(tmp_path)
 
     snapshots: dict[str, str] = {}
@@ -84,7 +81,6 @@ def test_idempotent(tmp_path: Path) -> None:
 
 def test_existing_agents_md_untouched(tmp_path: Path) -> None:
     """If the user has their own AGENTS.md, scaffold should not touch it."""
-    (tmp_path / ".git").mkdir()
     custom = "# My Project\n\nSome custom content.\n"
     (tmp_path / "AGENTS.md").write_text(custom, encoding="utf-8")
 
@@ -94,31 +90,23 @@ def test_existing_agents_md_untouched(tmp_path: Path) -> None:
     assert text == custom
 
 
-def test_gitignore_merge(tmp_path: Path) -> None:
-    (tmp_path / ".git").mkdir()
-    (tmp_path / ".gitignore").write_text("node_modules/\n.pip/\n", encoding="utf-8")
+def test_existing_gitignore_untouched(tmp_path: Path) -> None:
+    """Scaffold must NOT touch .gitignore — that's the workspace owner's call.
+
+    Pip-Boy used to seed ``.pip/`` / ``.env`` entries here, but ignore
+    rules belong to the host project, not the agent. We keep the
+    invariant pinned so a regression doesn't re-introduce the side
+    effect.
+    """
+    existing = "node_modules/\n"
+    (tmp_path / ".gitignore").write_text(existing, encoding="utf-8")
 
     ensure_workspace(tmp_path)
 
-    text = (tmp_path / ".gitignore").read_text(encoding="utf-8")
-    lines = text.splitlines()
-    assert lines.count(".pip/") == 1
-    assert "node_modules/" in lines
-    assert ".env" in lines
-
-
-def test_gitignore_create(tmp_path: Path) -> None:
-    (tmp_path / ".git").mkdir()
-    assert not (tmp_path / ".gitignore").exists()
-
-    ensure_workspace(tmp_path)
-
-    text = (tmp_path / ".gitignore").read_text(encoding="utf-8")
-    assert ".pip/" in text
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == existing
 
 
 def test_env_not_overwritten(tmp_path: Path) -> None:
-    (tmp_path / ".git").mkdir()
     (tmp_path / ".env").write_text("ANTHROPIC_API_KEY=sk-secret\n", encoding="utf-8")
 
     ensure_workspace(tmp_path)
@@ -131,7 +119,6 @@ def test_scaffold_migration_skips_modified(
     tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
     """If user modified a scaffold file, don't overwrite on migration."""
-    (tmp_path / ".git").mkdir()
     ensure_workspace(tmp_path)
 
     persona = tmp_path / ".pip" / "persona.md"
@@ -141,14 +128,6 @@ def test_scaffold_migration_skips_modified(
         ensure_workspace(tmp_path)
 
     assert persona.read_text(encoding="utf-8") == "# Custom persona\n"
-
-
-def test_no_git_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    with caplog.at_level(logging.WARNING, logger="pip_agent.scaffold"):
-        ensure_workspace(tmp_path)
-
-    assert any("Not a git repository" in r.message for r in caplog.records)
-    assert (tmp_path / ".pip").is_dir()
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +148,6 @@ def _seeded_theme_slugs() -> set[str]:
 
 
 def test_seed_themes_copied_on_first_boot(tmp_path: Path) -> None:
-    (tmp_path / ".git").mkdir()
     ensure_workspace(tmp_path)
 
     themes_root = tmp_path / ".pip" / "themes"
@@ -186,7 +164,6 @@ def test_seed_themes_copied_on_first_boot(tmp_path: Path) -> None:
 
 
 def test_deleted_seed_theme_is_not_re_created(tmp_path: Path) -> None:
-    (tmp_path / ".git").mkdir()
     ensure_workspace(tmp_path)
 
     slug = next(iter(_seeded_theme_slugs()))
@@ -205,7 +182,6 @@ def test_deleted_seed_theme_is_not_re_created(tmp_path: Path) -> None:
 def test_edited_seed_theme_is_not_overwritten(
     tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    (tmp_path / ".git").mkdir()
     ensure_workspace(tmp_path)
 
     slug = next(iter(_seeded_theme_slugs()))

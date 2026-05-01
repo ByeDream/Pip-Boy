@@ -26,7 +26,6 @@ The workspace root itself belongs to the default ``pip-boy`` agent:
           observations/
           incoming/
       .env
-      .gitignore
 """
 
 from __future__ import annotations
@@ -179,9 +178,6 @@ def ensure_workspace(workdir: Path, *, default_agent_id: str = "pip-boy") -> Non
     manifest["files"] = files_meta
     manifest["themes"] = themes_meta
     _save_manifest(workdir, manifest)
-
-    _ensure_gitignore(workdir)
-    _check_git(workdir)
 
 
 def _seed_themes(workdir: Path, themes_meta: dict) -> None:
@@ -347,47 +343,6 @@ def _ensure_registry(workdir: Path, *, default_agent_id: str) -> None:
         json.dumps(data, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
-
-
-def _ensure_gitignore(workdir: Path) -> None:
-    src = _SCAFFOLD_DIR / "gitignore_entries.txt"
-    if not src.is_file():
-        logger.warning("Scaffold resource missing: %s", src)
-        return
-    entries_text = src.read_text(encoding="utf-8")
-    required = [line for line in entries_text.splitlines() if line.strip()]
-
-    target = workdir / ".gitignore"
-    if target.exists():
-        existing = target.read_text(encoding="utf-8")
-        existing_lines = set(existing.splitlines())
-    else:
-        existing = ""
-        existing_lines = set()
-
-    missing = [e for e in required if e not in existing_lines]
-    if not missing:
-        logger.debug(".gitignore already contains all required entries")
-        return
-
-    addition = "\n# Pip-Boy\n" + "\n".join(missing) + "\n"
-    if not target.exists():
-        target.write_text(addition.lstrip("\n"), encoding="utf-8")
-        logger.info("Created %s", target)
-    else:
-        with target.open("a", encoding="utf-8") as f:
-            if not existing.endswith("\n"):
-                f.write("\n")
-            f.write(addition)
-        logger.info("Appended missing entries to %s", target)
-
-
-def _check_git(workdir: Path) -> None:
-    if not (workdir / ".git").is_dir():
-        logger.warning(
-            "Not a git repository: %s. Worktree features will be unavailable.",
-            workdir,
-        )
 
 
 # ---------------------------------------------------------------------------
