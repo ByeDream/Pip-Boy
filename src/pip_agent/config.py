@@ -62,6 +62,11 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    # Which backend to use: ``claude_code`` (default) or ``codex_cli``.
+    # Set via ``BACKEND=codex_cli`` in ``.env`` or env var.
+    # ``get_backend()`` in ``pip_agent.backends`` reads this value.
+    backend: str = Field(default="claude_code")
+
     # The single Anthropic credential. The header it goes out as
     # (``x-api-key`` vs ``Authorization: Bearer``) is decided by whether
     # ``anthropic_base_url`` is set — see ``pip_agent.anthropic_client``.

@@ -1,12 +1,17 @@
-"""Codex CLI backend — stub for ``codex-python`` SDK integration.
+"""Codex CLI backend — ``codex-python`` SDK integration for Pip-Boy.
 
-Phase 2+ will flesh out this module.  For now it exists so
-``get_backend("codex_cli")`` returns a well-typed object that
-raises ``NotImplementedError`` on every operation.
+Implements the ``AgentBackend`` protocol via the Codex persistent-connection
+model:
+
+    Codex() → start_thread() → thread.run() → (stream events) → close()
+
+Event translation is delegated to ``event_translator.translate_event``
+which maps SDK JSON-RPC notifications into the 5 Pip-Boy semantic events.
 """
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -17,9 +22,11 @@ from pip_agent.backends.base import (
     StreamingSessionProtocol,
 )
 
+log = logging.getLogger(__name__)
+
 
 class CodexBackend:
-    """``AgentBackend`` stub for Codex CLI (codex-python SDK)."""
+    """``AgentBackend`` implementation for Codex CLI (codex-python SDK)."""
 
     @property
     def name(self) -> str:
@@ -37,7 +44,15 @@ class CodexBackend:
         stream_text: bool = True,
         on_stream_event: StreamEventCallback | None = None,
     ) -> QueryResult:
-        raise NotImplementedError("Codex backend not yet implemented (Phase 2)")
+        from pip_agent.backends.codex_cli.runner import run_query as _run
+
+        return await _run(
+            prompt,
+            session_id=session_id,
+            system_prompt_append=system_prompt_append,
+            cwd=cwd,
+            on_stream_event=on_stream_event,
+        )
 
     async def open_streaming_session(
         self,
@@ -49,7 +64,16 @@ class CodexBackend:
         system_prompt_append: str,
         resume_session_id: str | None = None,
     ) -> StreamingSessionProtocol:
-        raise NotImplementedError("Codex backend not yet implemented (Phase 3)")
+        from pip_agent.backends.codex_cli.streaming import CodexStreamingSession
+
+        session = CodexStreamingSession(
+            session_key=session_key,
+            cwd=cwd,
+            system_prompt_append=system_prompt_append,
+            resume_session_id=resume_session_id,
+        )
+        await session.connect()
+        return session  # type: ignore[return-value]
 
     def supports(self, capability: Capability) -> bool:
         return capability in _SUPPORTED
@@ -57,7 +81,8 @@ class CodexBackend:
     async def health_check(self) -> tuple[bool, str]:
         try:
             import codex  # noqa: F401
-            return True, "codex-python SDK available"
+
+            return True, f"codex-python SDK {codex.__version__} available"
         except ImportError:
             return False, "codex-python not installed (pip install codex-python)"
 
