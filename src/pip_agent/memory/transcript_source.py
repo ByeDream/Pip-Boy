@@ -300,9 +300,13 @@ def locate_session_jsonl(
     """Return the JSONL file for ``session_id``, or ``None`` if not found.
 
     Scans every project directory under ``~/.claude/projects`` (or the override
-    passed via ``projects_root``). The lookup is by filename, so the cwd
-    encoding used by Claude Code is irrelevant — there should only be one
-    match across all project folders for a given session id.
+    passed via ``projects_root``).  Also checks the Codex transcript directory
+    at ``<WORKDIR>/.pip/codex_sessions/`` so Codex sessions are discoverable
+    by the same API.
+
+    The lookup is by filename, so the cwd encoding used by Claude Code is
+    irrelevant — there should only be one match across all project folders
+    for a given session id.
 
     Disambiguation (plan M10): if ``prefer_cwd`` is provided AND multiple
     matches exist, prefer the match whose parent directory name matches
@@ -316,14 +320,25 @@ def locate_session_jsonl(
     """
     if not session_id:
         return None
+
+    matches: list[Path] = []
+
     root = projects_root or DEFAULT_PROJECTS_ROOT
-    if not root.is_dir():
-        return None
+    if root.is_dir():
+        try:
+            matches.extend(root.glob(f"*/{session_id}.jsonl"))
+        except OSError as exc:
+            log.warning("Cannot scan %s: %s", root, exc)
+
     try:
-        matches = list(root.glob(f"*/{session_id}.jsonl"))
-    except OSError as exc:
-        log.warning("Cannot scan %s: %s", root, exc)
-        return None
+        from pip_agent.config import WORKDIR
+        codex_dir = WORKDIR / ".pip" / "codex_sessions"
+        codex_path = codex_dir / f"{session_id}.jsonl"
+        if codex_path.is_file():
+            matches.append(codex_path)
+    except Exception:  # noqa: BLE001
+        pass
+
     if not matches:
         return None
     if len(matches) == 1:

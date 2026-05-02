@@ -2248,6 +2248,79 @@ class AgentHost:
                     ),
                 )
 
+            if (
+                self._backend.name == "codex_cli"
+                and not is_ephemeral
+                and not result.error
+                and use_streaming
+            ):
+                await self._maybe_codex_reflect(
+                    session_key=sk,
+                    mcp_ctx=mcp_ctx,
+                )
+
+    async def _maybe_codex_reflect(
+        self,
+        *,
+        session_key: str,
+        mcp_ctx: McpContext,
+    ) -> None:
+        """Trigger reflect for Codex backend when turn count threshold is met.
+
+        Codex has no ``PreCompact`` hook, so the host must trigger reflect
+        periodically.  The threshold is every 10 turns — roughly matching
+        when Claude Code would auto-compact a mid-length session.
+        """
+        _REFLECT_EVERY_N_TURNS = 10
+
+        session = self._streaming_sessions.get(session_key)
+        if session is None:
+            return
+        turn_count = getattr(session, "turn_count", 0)
+        if turn_count == 0 or turn_count % _REFLECT_EVERY_N_TURNS != 0:
+            return
+
+        transcript_path = getattr(session, "transcript_path", None)
+        if transcript_path is None or not transcript_path.is_file():
+            return
+
+        session_id = getattr(session, "session_id", None)
+        if not session_id:
+            return
+
+        memory_store = mcp_ctx.memory_store
+        if memory_store is None:
+            return
+
+        log.info(
+            "Codex reflect trigger: key=%s turn=%d path=%s",
+            session_key, turn_count, transcript_path,
+        )
+        try:
+            from pip_agent.anthropic_client import build_anthropic_client
+            from pip_agent.memory.reflect import reflect_and_persist
+
+            client = build_anthropic_client()
+            if client is None:
+                log.info(
+                    "Codex reflect skipped — no ANTHROPIC_API_KEY configured",
+                )
+                return
+            start_offset, new_offset, obs_count = reflect_and_persist(
+                memory_store=memory_store,
+                session_id=session_id,
+                transcript_path=transcript_path,
+                client=client,
+            )
+            log.info(
+                "Codex reflect done: session=%s obs=%d offset=%d→%d",
+                session_id[:8], obs_count, start_offset, new_offset,
+            )
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "Codex reflect failed for session=%s", session_id[:8],
+            )
+
     async def _release_or_flush_session(self, sk: str) -> None:
         """Clear the Tier 2 active claim; flush leftover inbounds if any.
 
@@ -2917,6 +2990,15 @@ def run_host(*, force_no_tui: bool = False, headless: bool = False) -> None:
 
     ensure_workspace(WORKDIR)
     ensure_claude_model_overrides()
+
+    if settings.backend == "codex_cli":
+        try:
+            from pip_agent.backends.codex_cli.config_gen import ensure_codex_config
+            ensure_codex_config(WORKDIR)
+            _profile.cold_start("codex_config_ensured")
+        except Exception:  # noqa: BLE001
+            log.exception("Failed to ensure Codex MCP config; continuing")
+
     # File log is installed AFTER scaffold so ``.pip/`` is guaranteed
     # to exist, but BEFORE anything else that might emit records we
     # want captured (settings check, plugin bootstrap, registry/binding

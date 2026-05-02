@@ -64,25 +64,31 @@ def _get_status(item: Any) -> str:
 
 async def translate_event(
     event: Any,
-    callback: StreamEventCallback,
+    callback: StreamEventCallback | None,
     *,
     state: dict[str, Any],
 ) -> None:
     """Translate one SDK event into zero or more Pip-Boy stream events.
 
     ``state`` is a mutable dict carried across all events in a single
-    turn.  Used to track token usage, turn info, etc.
+    turn.  Used to track token usage, turn info, etc.  When ``callback``
+    is ``None``, state tracking still happens but no events are emitted.
 
     Callers should pass the same ``state`` dict for the lifetime of a
     ``thread.run()`` iteration.
     """
     etype = type(event).__name__
 
+    async def _noop(*_args: Any, **_kwargs: Any) -> None:
+        pass
+
+    cb = callback if callback is not None else _noop
+
     # -- Text delta (real incremental) -----------------------------------
     if etype == "ItemAgentMessageDeltaNotification":
         delta = getattr(event.params, "delta", "") or ""
         if delta:
-            await callback("text_delta", text=delta)
+            await cb("text_delta", text=delta)
         return
 
     # -- Reasoning / thinking delta --------------------------------------
@@ -92,7 +98,7 @@ async def translate_event(
     ):
         delta = getattr(event.params, "delta", "") or ""
         if delta:
-            await callback("thinking_delta", text=delta)
+            await cb("thinking_delta", text=delta)
         return
 
     # -- Item started (tool_use) -----------------------------------------
@@ -102,7 +108,7 @@ async def translate_event(
 
         if item_type == "command_execution":
             cmd = getattr(item, "command", "") or ""
-            await callback(
+            await cb(
                 "tool_use",
                 id=getattr(item, "id", ""),
                 name="Bash",
@@ -116,7 +122,7 @@ async def translate_event(
                     kind = kind.root
                 path = getattr(change, "path", "")
                 tool_name = _FILE_KIND_MAP.get(str(kind), "Edit")
-                await callback(
+                await cb(
                     "tool_use",
                     id=getattr(item, "id", ""),
                     name=tool_name,
@@ -131,7 +137,7 @@ async def translate_event(
                     arguments = json.loads(arguments)
                 except (ValueError, TypeError):
                     arguments = {"raw": arguments}
-            await callback(
+            await cb(
                 "tool_use",
                 id=getattr(item, "id", ""),
                 name=tool,
@@ -139,7 +145,7 @@ async def translate_event(
             )
         elif item_type == "web_search":
             query = getattr(item, "query", "") or ""
-            await callback(
+            await cb(
                 "tool_use",
                 id=getattr(item, "id", ""),
                 name="WebSearch",
@@ -163,26 +169,26 @@ async def translate_event(
         if item_type == "command_execution":
             exit_code = getattr(item, "exitCode", None)
             is_error = exit_code is not None and exit_code != 0
-            await callback(
+            await cb(
                 "tool_result",
                 tool_use_id=getattr(item, "id", ""),
                 is_error=is_error,
             )
         elif item_type == "file_change":
-            await callback(
+            await cb(
                 "tool_result",
                 tool_use_id=getattr(item, "id", ""),
                 is_error=_get_status(item) != "completed",
             )
         elif item_type == "mcp_tool_call":
             error = getattr(item, "error", None)
-            await callback(
+            await cb(
                 "tool_result",
                 tool_use_id=getattr(item, "id", ""),
                 is_error=bool(error),
             )
         elif item_type == "web_search":
-            await callback(
+            await cb(
                 "tool_result",
                 tool_use_id=getattr(item, "id", ""),
                 is_error=False,
@@ -204,13 +210,13 @@ async def translate_event(
                     "title": getattr(step, "title", ""),
                     "status": str(getattr(step, "status", "")),
                 })
-            await callback(
+            await cb(
                 "tool_use",
                 id="plan-update",
                 name="TodoWrite",
                 input={"plan": plan_data},
             )
-            await callback(
+            await cb(
                 "tool_result",
                 tool_use_id="plan-update",
                 is_error=False,
@@ -234,7 +240,7 @@ async def translate_event(
         final_text = state.get("final_text", "")
         cost_usd = None
 
-        await callback(
+        await cb(
             "finalize",
             final_text=final_text,
             num_turns=1,

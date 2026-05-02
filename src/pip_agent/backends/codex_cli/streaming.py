@@ -12,10 +12,20 @@ Lifecycle (matches ``StreamingSessionProtocol``):
     r2 = await session.run_turn(p2)  # second turn (same thread)
     ...
     await session.close("idle")      # tears down client
+
+Transcript capture
+------------------
+Each turn appends user + assistant lines to a JSONL file alongside the
+session_id so the reflect pipeline (``memory/transcript_source.py``) can
+read them with the same ``iter_transcript`` + ``normalize_line`` logic
+it uses for Claude Code sessions.  Lines use the flat
+``{"role": "...", "content": "..."}`` shape that ``normalize_line``
+already handles (Shape 2).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from pathlib import Path
@@ -56,6 +66,7 @@ class CodexStreamingSession:
         self.last_used_ns: int = time.monotonic_ns()
         self.created_ns: int = time.monotonic_ns()
         self.turn_count: int = 0
+        self.cumulative_tokens: int = 0
 
         self._cwd = str(cwd) if cwd else None
         self._sandbox = sandbox
@@ -63,6 +74,7 @@ class CodexStreamingSession:
         self._client: Any = None
         self._thread: Any = None
         self._closed = False
+        self._transcript_path: Path | None = None
 
     async def connect(self) -> None:
         """Start the Codex client and open (or resume) a thread."""
@@ -102,10 +114,12 @@ class CodexStreamingSession:
                 self._thread = self._client.start_thread(thread_opts)
                 self.session_id = self._thread.id
 
+            self._transcript_path = self._init_transcript_path()
             log.info(
-                "Codex session connected: key=%s thread=%s",
+                "Codex session connected: key=%s thread=%s transcript=%s",
                 self.session_key,
                 self.session_id[:12] if self.session_id else "?",
+                self._transcript_path,
             )
 
     async def close(self, reason: str = "idle") -> None:
@@ -150,6 +164,7 @@ class CodexStreamingSession:
             if isinstance(prompt, str)
             else _blocks_to_text(prompt)
         )
+        self._append_transcript("user", prompt_text)
 
         result = QueryResult()
         state: dict[str, Any] = {}
@@ -161,10 +176,9 @@ class CodexStreamingSession:
                 stream = self._thread.run(prompt_text)
 
                 for event in stream:
-                    if on_stream_event is not None:
-                        await translate_event(
-                            event, on_stream_event, state=state,
-                        )
+                    await translate_event(
+                        event, on_stream_event, state=state,
+                    )
 
                     etype = type(event).__name__
                     if etype == "ItemCompletedNotificationModel":
@@ -183,12 +197,22 @@ class CodexStreamingSession:
                 result.session_id = self.session_id
                 result.num_turns = self.turn_count
 
+                if result.text:
+                    self._append_transcript("assistant", result.text)
+
+                token_usage = state.get("token_usage", {})
+                if token_usage:
+                    self.cumulative_tokens = (
+                        token_usage.get("total_tokens", 0)
+                    )
+
                 log.info(
-                    "Codex turn done: key=%s turn=%d len=%d elapsed=%.1fs",
+                    "Codex turn done: key=%s turn=%d len=%d elapsed=%.1fs tokens=%d",
                     self.session_key,
                     self.turn_count,
                     len(result.text or ""),
                     elapsed_s,
+                    self.cumulative_tokens,
                 )
 
         except Exception as exc:
@@ -199,6 +223,44 @@ class CodexStreamingSession:
             result.error = f"{type(exc).__name__}: {exc}"
 
         return result
+
+    @property
+    def transcript_path(self) -> Path | None:
+        """Path to the JSONL transcript file, or None if not available."""
+        return self._transcript_path
+
+    def _init_transcript_path(self) -> Path | None:
+        """Create the JSONL transcript file for this session.
+
+        Stored in the same ``~/.claude/projects/`` tree that
+        ``transcript_source.locate_session_jsonl`` scans, so the
+        existing reflect pipeline finds them without changes.
+        """
+        if not self.session_id:
+            return None
+        try:
+            from pip_agent.config import WORKDIR
+
+            sessions_dir = WORKDIR / ".pip" / "codex_sessions"
+            sessions_dir.mkdir(parents=True, exist_ok=True)
+            return sessions_dir / f"{self.session_id}.jsonl"
+        except Exception:  # noqa: BLE001
+            log.debug("Failed to init transcript path", exc_info=True)
+            return None
+
+    def _append_transcript(self, role: str, text: str) -> None:
+        """Append one JSONL line in the flat shape transcript_source expects."""
+        if not self._transcript_path or not text.strip():
+            return
+        try:
+            line = json.dumps(
+                {"role": role, "content": text},
+                ensure_ascii=False,
+            )
+            with self._transcript_path.open("a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except Exception:  # noqa: BLE001
+            log.debug("transcript append failed", exc_info=True)
 
     @staticmethod
     def _resolve_api_key() -> str | None:
