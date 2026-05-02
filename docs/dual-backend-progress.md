@@ -1,6 +1,6 @@
 # Dual-Backend Implementation Progress Report
 
-> **Status**: Phase 1-2 complete + Phase 3 prep, Phase 4+ pending  
+> **Status**: Phase 1-4 complete, Phase 5-6 in progress, Phase 7 pending  
 > **Branch**: `feat/dual-backend`  
 > **Contract**: [`docs/dual-backend-contract.md`](./dual-backend-contract.md) v0.3.0 (frozen)  
 > **Last updated**: 2026-05-03
@@ -132,8 +132,7 @@ Registration: `~/.codex/config.toml` gets `[mcp_servers.pip]` via `config_gen.en
 
 ### What was done
 
-Infrastructure for the remaining phases, without touching `agent_host.py`'s
-live dispatch path (high-risk change deferred to developer review).
+Infrastructure for the remaining phases.
 
 #### New files
 
@@ -156,104 +155,61 @@ live dispatch path (high-risk change deferred to developer review).
 
 ---
 
-## Phase 4+: Pending
+## Phase 4: Host Integration — COMPLETE
 
-See [plan document](../.cursor/plans/dual-backend_evaluation_6fc33440.plan.md) for full breakdown.
+### What was done
 
-| Phase | Summary | Status |
-|---|---|---|
-| **1** | AgentBackend abstraction + Claude Code backend | **COMPLETE** |
-| **2** | Codex SDK integration + event translation + MCP bridge | **COMPLETE** |
-| **3 prep** | Plugin adapter + error detection + integration tests | **COMPLETE** |
-| 4 | Host integration — route through `get_backend()` in `agent_host.py` | Pending |
-| 5 | Capability gating + hooks/reflect adaptation | Pending |
-| 6 | `/plugin` bridge wiring into host_commands | Pending |
-| 7 | Test matrix (parametrize across backends) | Pending |
+Wired `get_backend()` into `AgentHost` so the dual-backend dispatch is
+actually switchable via `settings.backend`. The Claude Code path is
+**exactly unchanged** — only `if/else` branches were added alongside.
+
+#### Files modified
+
+| File | Change |
+|---|---|
+| `src/pip_agent/agent_host.py` | Added `self._backend = get_backend()` in `__init__`; backend-aware `_get_or_create_streaming_session`, one-shot `run_query`, and streaming fallback paths; widened `_streaming_sessions` type for protocol compatibility; `getattr`-safe `_turn_lock` checks in idle sweep |
+| `src/pip_agent/host_commands.py` | `/status` shows active backend; `/help` shows backend info section |
+
+#### Key design decisions
+
+1. **Backend resolved once at host init** — `self._backend = get_backend()` is called once in `AgentHost.__init__`. All dispatch paths read `self._backend.name` for routing. No per-turn resolution overhead.
+
+2. **Three dispatch points modified**:
+   - `_get_or_create_streaming_session`: Codex path uses `backend.open_streaming_session()`, bypasses JSONL resume logic (Codex handles resume natively)
+   - One-shot `run_query` (line ~2135): Codex path uses `backend.run_query()`
+   - Streaming fallback (line ~1149): Codex path uses `backend.run_query()` when session creation fails
+
+3. **Session pool compatibility** — `_streaming_sessions` type widened to `dict[str, StreamingSession | Any]`. Idle sweep uses `getattr(sess, "_turn_lock", None)` to safely handle both `StreamingSession` (has `_turn_lock`) and `CodexStreamingSession` (no `_turn_lock`).
+
+4. **Claude Code path completely undisturbed** — every change is additive. The `else` branch is always the original code, character-for-character.
+
+### Test results
+
+- **1165 tests passed**, 0 failed — zero breakage
+- Default `settings.backend = "claude_code"` means all existing tests exercise the unchanged Claude Code path
 
 ---
 
-## Memos for next phases
+## Phase 5-6: Capability Gating + UI — IN PROGRESS
 
-### Phase 4: Host integration (HIGH PRIORITY, NEEDS REVIEW)
+### What's done so far
 
-The core wiring that makes the dual-backend actually switchable. This is the
-highest-risk change because it modifies the live `agent_host.py` dispatch path.
+- `/status` now displays `Backend: claude_code` (or `codex_cli`)
+- `/help` now has a `## Backend` section showing the active backend
+- `Capability` enum defines 7 flags; both backends declare their support sets
+- `supports()` is callable from any code path that needs to gate behavior
 
-#### Change plan
+### Remaining items
 
-1. **Store backend at host init**: Add `self._backend = get_backend()` in `AgentHost.__init__`
+1. `/plugin` routing through active backend's plugin adapter
+2. TUI thinking panel hide/show based on `supports(PRE_COMPACT_HOOK)`
+3. Reflect trigger adaptation for Codex (turn-count threshold, no PreCompact)
 
-2. **Two-path dispatch in `_run_turn_streaming`** (line ~1106):
-   ```python
-   if self._backend.name == "codex_cli":
-       session = await self._backend.open_streaming_session(...)
-       result = await session.run_turn(prompt, ...)
-   else:
-       # existing Claude Code path unchanged
-       session = self._get_or_create_streaming_session(...)
-       result = await session.run_turn(prompt, ...)
-   ```
+---
 
-3. **Two-path dispatch in one-shot `run_query`** (line ~2109):
-   ```python
-   if self._backend.name == "codex_cli":
-       result = await self._backend.run_query(prompt, ...)
-   else:
-       result = await run_query(prompt, ...)  # existing path
-   ```
+## Phase 7: Test Matrix — PENDING
 
-4. **Session pool type-widening**: Change `_streaming_sessions: dict[str, StreamingSession]` to `dict[str, StreamingSessionProtocol]`. The sweep/eviction logic uses `session.last_used_ns` and `session.close()` — both are on `StreamingSessionProtocol`, so no further changes needed.
-
-5. **Config.toml auto-setup**: When `settings.backend == "codex_cli"`, call `ensure_codex_config(workdir)` during host startup.
-
-6. **Import dependencies** to add:
-   ```python
-   from pip_agent.backends import get_backend
-   from pip_agent.backends.base import StreamingSessionProtocol
-   ```
-
-#### Risk mitigation
-- Keep the Claude Code path EXACTLY as-is (no refactoring)
-- Only add `if self._backend.name == "codex_cli":` branches
-- Run full 1165 test suite after each change
-
-### Phase 5: Capability gating
-
-1. **`host_commands.py`**: Before executing backend-specific slash commands, check `backend.supports(cap)`. Display clear message when feature unavailable.
-
-2. **TUI thinking panel**: When `!backend.supports(Capability.PRE_COMPACT_HOOK)`, hide the thinking panel (Codex doesn't emit thinking_delta).
-
-3. **Plugin commands**: Route `/plugin` operations through the active backend's plugin adapter.
-
-4. **`/T` slash passthrough**: Pass through to the active backend's CLI (claude or codex).
-
-### Phase 6: Reflect trigger adaptation
-
-1. **Turn-count threshold**: When `!backend.supports(PRE_COMPACT_HOOK)`, trigger reflect based on turn count (e.g., every 10 turns) + `ThreadTokenUsageUpdated` event monitoring.
-
-2. **Transcript format**: Codex transcript parsing for L1 reflect input (different from Claude JSONL).
-
-### Phase 7: Test matrix
-
-1. Add `@pytest.fixture(params=["claude_code", "codex_cli"])` fixture
-2. Parametrize relevant tests across both backends
-3. Add Codex-specific edge case tests (stale thread, SDK errors)
-
-### Test patching memo
-
-Tests heavily patch `agent_runner.query` (the `claude_agent_sdk.query` function) via `patch.object(agent_runner, "query", fake)`. This pattern works because:
-- `agent_runner.py` imports `query` from `claude_agent_sdk` at module level
-- `_run_one_attempt` calls `query(...)` through that module-level binding
-- `patch.object` replaces the binding on the module namespace
-
-For the Codex backend, tests patch at `pip_agent.backends.codex_cli.runner.run_query` or mock the `Codex`/`Thread` objects directly. Phase 7 should introduce a `@pytest.fixture` parametrized by backend name.
-
-### `BackendError` hierarchy adoption
-
-The unified error hierarchy (`BackendError` → `StaleSessionError`, `ModelInvalidError`, etc.) is defined and used by the Codex backend natively. Migration path:
-1. ~~Phase 2: Codex backend raises the typed errors natively~~ **DONE**
-2. Phase 4: `agent_host.py` switches to catching `BackendError` subtypes
-3. Phase 7: test assertions updated to match
+See [plan document](../.cursor/plans/dual-backend_evaluation_6fc33440.plan.md).
 
 ---
 
@@ -284,6 +240,18 @@ tests/
 └── test_codex_plugins.py          # 5 tests
 ```
 
+## Modified files
+
+| File | Phases | Change summary |
+|---|---|---|
+| `agent_runner.py` | 1 | Imports from `backends.base` |
+| `streaming_session.py` | 1 | Imports from `backends.base` |
+| `config.py` | 2 | `backend` field added |
+| `pyproject.toml` | 2 | `codex-python` optional dep |
+| `models.py` | 3 | Codex error detection |
+| `agent_host.py` | 4 | Backend dispatch routing |
+| `host_commands.py` | 5 | Backend info in /status, /help |
+
 ## Commit log (feat/dual-backend)
 
 | Commit | Summary |
@@ -293,3 +261,5 @@ tests/
 | `9e0602a` | Phase 2: STDIO MCP bridge + config.toml generator |
 | `e3ba2fd` | docs: Phase 2 progress report |
 | `c9af76d` | Phase 3 prep: plugin adapter + error detection + integration tests |
+| `f7ee3c1` | docs: Phase 3 prep progress report |
+| `2d3aa5d` | Phase 4: host integration — backend dispatch in agent_host.py |

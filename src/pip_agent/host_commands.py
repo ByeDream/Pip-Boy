@@ -443,14 +443,14 @@ _HELP_CLI_EXTRA = (
 
 
 def _cmd_help(ctx: CommandContext, _args: str) -> CommandResult:
+    from pip_agent.config import settings as _settings
+
     text = _HELP_COMMON
     if ctx.inbound.channel == "cli":
         text = text + "\n" + _HELP_CLI_EXTRA
-    # Surface what ``/T <slash>`` will actually dispatch in the current
-    # SDK session. Cached lazily on the first ``SystemMessage(init)``
-    # (see :mod:`pip_agent.sdk_caps`); absent before any agent turn has
-    # run, so we render a placeholder explaining the lazy-fill instead
-    # of silently omitting the section.
+
+    text = f"{text}\n\n## Backend\n\nActive: `{_settings.backend}`"
+
     caps = sdk_caps.get()
     if caps:
         slashes = ", ".join(f"`/{n}`" for n in sorted(caps))
@@ -499,8 +499,11 @@ def _cmd_status(ctx: CommandContext, _args: str) -> CommandResult:
     tier = effective.tier
     resolved = primary_model(tier)  # type: ignore[arg-type]
     model_display = f"{tier} ({resolved})" if resolved else f"{tier} (no model configured)"
+    from pip_agent.config import settings as _settings
+
     lines = [
         f"Agent: {agent.name or agent.id} ({agent.id})",
+        f"Backend: {_settings.backend}",
         f"Model: {model_display}",
         f"Scope: {effective.effective_dm_scope}",
         f"Session: {sk}",
