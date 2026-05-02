@@ -102,9 +102,12 @@ _SDK_NEVER_MODEL: tuple[str, ...] = (
     "ratelimit",
     "authentication",
     "permission",
+    # Codex SDK equivalents
+    "codexautherror",
 )
 _SDK_DEFINITELY_MODEL: tuple[str, ...] = (
     "notfound",
+    "modelinvaliderror",
 )
 
 
