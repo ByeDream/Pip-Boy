@@ -3,13 +3,20 @@
 The SDK manages the full agent loop — tool dispatch, context compaction, and
 session persistence — while Pip-Boy's unique capabilities are exposed via an
 in-process MCP server (see ``mcp_tools.py``).
+
+.. note::
+
+   Phase 1 dual-backend refactoring extracted shared types
+   (``QueryResult``, ``StreamEventCallback``) into
+   ``pip_agent.backends.base`` and introduced the ``AgentBackend``
+   protocol.  This module keeps its implementation (the Claude Code
+   runner) and re-exports the shared types for backward compatibility.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -29,52 +36,11 @@ from claude_agent_sdk import (
 )
 
 from pip_agent import sdk_caps
+from pip_agent.backends.base import QueryResult, StreamEventCallback
 from pip_agent.hooks import build_hooks
 from pip_agent.mcp_tools import McpContext, build_mcp_server
 
-# Type alias for the per-turn streaming callback. Callers receive a
-# small set of semantic event names so the runner can swap its source
-# between ``StreamEvent`` (partial deltas) and ``AssistantMessage``
-# (whole blocks) without breaking the contract:
-#
-# * ``thinking_delta``  — kwargs: ``text`` (raw partial)
-# * ``text_delta``      — kwargs: ``text``
-# * ``tool_use``        — kwargs: ``id`` (tool_use_id), ``name``,
-#                          ``input`` (raw tool-call argument dict, as
-#                          sent by the SDK)
-# * ``tool_result``     — kwargs: ``tool_use_id``, ``is_error`` (the
-#                          matching result for a prior ``tool_use``;
-#                          emitted from the subsequent ``UserMessage``)
-# * ``finalize``        — kwargs: ``final_text``, ``num_turns``,
-#                          ``cost_usd``, ``usage``, ``elapsed_s``
-#                          (wall seconds from stream open to result)
-#
-# ``await``ed inline with the SDK message loop, so a slow callback
-# directly throttles delta consumption — keep handlers lean.
-StreamEventCallback = Callable[..., Awaitable[None]]
-
 log = logging.getLogger(__name__)
-
-
-@dataclass
-class QueryResult:
-    """Return value from :func:`run_query`."""
-
-    text: str | None = None
-    session_id: str | None = None
-    error: str | None = None
-    cost_usd: float | None = None
-    num_turns: int = 0
-
-
-# No hardcoded allowed-tools list: the Host deliberately does NOT
-# customise CC's tool surface. The SDK treats an empty ``allowed_tools``
-# (the default) as "use the CLI's built-in default set", and the
-# ``mcp_servers`` wiring registers our ``mcp__pip__*`` tools alongside
-# those automatically. Maintaining a whitelist here meant CC silently
-# losing access to any tool CC itself added after this list was last
-# edited — a clear violation of "Pip is a host, not a CC policy
-# author". See H6 in ``code_review_plan_133b34c7.plan.md``.
 
 
 def _build_env() -> dict[str, str]:

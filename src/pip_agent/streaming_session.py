@@ -28,6 +28,16 @@ Design summary
   ``StaleSessionError`` so AgentHost can drop the cached client, wipe
   the persisted ``session_id``, and retry once with a fresh client.
   See ``tier4.2`` in the plan (borrowed from NanoClaw issue #1216).
+
+.. note::
+
+   Phase 1 dual-backend refactoring:
+
+   * ``StaleSessionError`` is now defined in ``pip_agent.backends.base``
+     (shared across backends) and re-exported here for backward
+     compatibility.
+   * ``QueryResult`` and ``StreamEventCallback`` are likewise imported
+     from ``pip_agent.backends.base``.
 """
 
 from __future__ import annotations
@@ -40,7 +50,6 @@ from pathlib import Path
 from typing import Any
 
 from pip_agent.agent_runner import (
-    QueryResult,
     StreamEventCallback,
     _build_env,
     _builtin_disallowed_tools,
@@ -48,6 +57,7 @@ from pip_agent.agent_runner import (
     _enrich_with_stderr,
     _StderrBuffer,
 )
+from pip_agent.backends.base import QueryResult, StaleSessionError
 from pip_agent.hooks import build_hooks
 from pip_agent.mcp_tools import McpContext, build_mcp_server
 
@@ -66,12 +76,6 @@ _STALE_SESSION_MARKERS = (
     "unknown session",
     "session_id is invalid",
 )
-
-
-class StaleSessionError(RuntimeError):
-    """Raised by :meth:`StreamingSession.run_turn` when the CC server lost
-    the session id we resumed against. AgentHost handles recovery.
-    """
 
 
 class StreamingSession:
