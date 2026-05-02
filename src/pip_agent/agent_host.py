@@ -22,6 +22,8 @@ from typing import Any
 
 from pip_agent import host_commands
 from pip_agent.agent_runner import QueryResult, run_query
+from pip_agent.backends import get_backend
+from pip_agent.backends.base import AgentBackend
 
 # Tier 3 cold-start: only import the light channel primitives at module
 # import time. Wechat / wecom pull ``aibot`` and ``aiohttp`` (~450 ms +
@@ -802,6 +804,7 @@ class AgentHost:
 
         self._sessions = _load_sessions()
         self._agents: dict[str, _PerAgent] = {}
+        self._backend: AgentBackend = get_backend()
 
         # Concurrency-control layers (post-Tier-1). Three distinct caps
         # guard three distinct failure modes:
@@ -872,7 +875,7 @@ class AgentHost:
         # closing any session whose ``last_used_ns`` is older than
         # ``settings.stream_idle_ttl_sec``. Max-live cap drops the oldest
         # idle session when a new create would exceed the limit.
-        self._streaming_sessions: dict[str, StreamingSession] = {}
+        self._streaming_sessions: dict[str, StreamingSession | Any] = {}
         self._streaming_lock = asyncio.Lock()
         self._streaming_sweep_task: asyncio.Task[None] | None = None
 
@@ -1146,6 +1149,16 @@ class AgentHost:
                 "stream.create_failed",
                 session_key=session_key,
             )
+            if self._backend.name == "codex_cli":
+                return await self._backend.run_query(
+                    prompt=prepared.prompt,
+                    mcp_ctx=mcp_ctx,
+                    session_id=current_session_id,
+                    system_prompt_append=prepared.system_prompt,
+                    cwd=prepared.paths.cwd,
+                    stream_text=True,
+                    on_stream_event=on_stream_event,
+                )
             return await run_query(
                 prompt=prepared.prompt,
                 mcp_ctx=mcp_ctx,
@@ -1263,19 +1276,23 @@ class AgentHost:
         prepared: _PreparedTurn,
         mcp_ctx: McpContext,
         resume_session_id: str | None,
-    ) -> StreamingSession:
-        """Return a live ``StreamingSession`` for ``session_key``.
+    ) -> StreamingSession | Any:
+        """Return a live streaming session for ``session_key``.
 
         Holds ``self._streaming_lock`` around the create path so two
         concurrent first-turns on the same key can't both spawn a
         client. Per-turn dispatch happens OUTSIDE this lock (each
         session owns its own ``_turn_lock``).
+
+        Backend-aware: Claude Code creates ``StreamingSession``, Codex
+        creates ``CodexStreamingSession`` — both satisfy
+        ``StreamingSessionProtocol``.
         """
         from pip_agent import _profile
 
         async with self._streaming_lock:
             existing = self._streaming_sessions.get(session_key)
-            if existing is not None and not existing._closed:
+            if existing is not None and not getattr(existing, "_closed", False):
                 _profile.event(
                     "stream.reused",
                     session_key=session_key,
@@ -1295,9 +1312,19 @@ class AgentHost:
             if len(self._streaming_sessions) >= settings.stream_max_live:
                 await self._evict_oldest_idle(reason="max_live_cap")
 
-            # Resolve the right resume id — mirror _reap_stale_session
-            # semantics on just this id to avoid attempting resume
-            # against a JSONL that's been pruned on disk.
+            if self._backend.name == "codex_cli":
+                session = await self._backend.open_streaming_session(
+                    session_key=session_key,
+                    mcp_ctx=mcp_ctx,
+                    model_chain=prepared.model_chain,
+                    cwd=prepared.paths.cwd,
+                    system_prompt_append=prepared.system_prompt,
+                    resume_session_id=resume_session_id,
+                )
+                self._streaming_sessions[session_key] = session
+                return session
+
+            # Claude Code path — unchanged.
             effective_resume = resume_session_id
             if effective_resume and locate_session_jsonl(
                 effective_resume, prefer_cwd=prepared.paths.cwd,
@@ -1312,7 +1339,6 @@ class AgentHost:
                     sid=effective_resume,
                 )
                 effective_resume = None
-                # Keep persistence in sync — the old id is toast.
                 self._sessions.pop(session_key, None)
                 _save_sessions(self._sessions)
 
@@ -1345,12 +1371,11 @@ class AgentHost:
         them once they're back to idle.
         """
         now = time.perf_counter_ns()
-        candidate: tuple[str, StreamingSession] | None = None
+        candidate: tuple[str, Any] | None = None
         candidate_age_ns = -1
         for sk, sess in self._streaming_sessions.items():
-            # ``asyncio.Lock.locked()`` is safe to call from inside the
-            # same loop — no blocking.
-            if sess._turn_lock.locked():
+            turn_lock = getattr(sess, "_turn_lock", None)
+            if turn_lock is not None and turn_lock.locked():
                 continue
             age = now - sess.last_used_ns
             if age > candidate_age_ns:
@@ -1390,7 +1415,8 @@ class AgentHost:
                 stale_keys: list[str] = []
                 # Snapshot to avoid dict-mutation-during-iteration.
                 for sk, sess in list(self._streaming_sessions.items()):
-                    if sess._turn_lock.locked():
+                    turn_lock = getattr(sess, "_turn_lock", None)
+                    if turn_lock is not None and turn_lock.locked():
                         continue
                     if now - sess.last_used_ns >= ttl_ns:
                         stale_keys.append(sk)
@@ -1407,7 +1433,8 @@ class AgentHost:
                                 continue
                             # Re-check inside the lock: something could
                             # have bumped the session in the meantime.
-                            if sess._turn_lock.locked():
+                            turn_lock = getattr(sess, "_turn_lock", None)
+                            if turn_lock is not None and turn_lock.locked():
                                 continue
                             if now - sess.last_used_ns < ttl_ns:
                                 continue
@@ -2114,22 +2141,27 @@ class AgentHost:
                                 "str" if isinstance(prepared.prompt, str) else "blocks"
                             ),
                         ):
-                            result = await run_query(
-                                prompt=prepared.prompt,
-                                mcp_ctx=mcp_ctx,
-                                model_chain=prepared.model_chain,
-                                session_id=session_for_turn,
-                                system_prompt_append=prepared.system_prompt,
-                                cwd=prepared.paths.cwd,
-                                # Heartbeats must NOT stream: we need the full
-                                # reply before deciding whether to print (so
-                                # the HEARTBEAT_OK sentinel can be silenced).
-                                # Everything else streams unconditionally —
-                                # streaming is an interactive contract, not a
-                                # debug toggle.
-                                stream_text=not is_heartbeat,
-                                on_stream_event=stream_event_cb,
-                            )
+                            if self._backend.name == "codex_cli":
+                                result = await self._backend.run_query(
+                                    prompt=prepared.prompt,
+                                    mcp_ctx=mcp_ctx,
+                                    session_id=session_for_turn,
+                                    system_prompt_append=prepared.system_prompt,
+                                    cwd=prepared.paths.cwd,
+                                    stream_text=not is_heartbeat,
+                                    on_stream_event=stream_event_cb,
+                                )
+                            else:
+                                result = await run_query(
+                                    prompt=prepared.prompt,
+                                    mcp_ctx=mcp_ctx,
+                                    model_chain=prepared.model_chain,
+                                    session_id=session_for_turn,
+                                    system_prompt_append=prepared.system_prompt,
+                                    cwd=prepared.paths.cwd,
+                                    stream_text=not is_heartbeat,
+                                    on_stream_event=stream_event_cb,
+                                )
                 except Exception as exc:
                     log.exception(
                         "SDK query failed for %s (type=%s): %s",
