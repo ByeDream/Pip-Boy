@@ -1,6 +1,6 @@
 # Dual-Backend Implementation Progress Report
 
-> **Status**: Phase 1 complete, Phase 2+ pending  
+> **Status**: Phase 2 complete, Phase 3+ pending  
 > **Branch**: `feat/dual-backend`  
 > **Contract**: [`docs/dual-backend-contract.md`](./dual-backend-contract.md) v0.3.0 (frozen)  
 > **Last updated**: 2026-05-03
@@ -48,42 +48,117 @@ without breaking any existing functionality.
 - No test files modified
 - Lint clean (`ruff check` passes on all new and modified files)
 
-### What is NOT done (deferred to later phases)
+---
 
-- `hooks.py` and `plugins.py` are not moved/wrapped — they are purely CC-specific and will be backend-switched in Phase 4 (hooks/reflect) and Phase 5 (plugins) respectively.
-- `mcp_tools.py` stays untouched — shared tool schemas don't change; the server *startup mode* (in-process vs STDIO) changes in Phase 2.
-- `agent_host.py` does not yet route through `AgentBackend` — it still directly imports `run_query` and `StreamingSession`. Wiring the backend factory into the host dispatch is Phase 6 (capability gating).
-- No configuration change — `settings.backend` field not yet added to `config.py`.
+## Phase 2: Codex SDK Integration — COMPLETE
+
+### What was done
+
+Fully implemented the Codex backend with SDK runner, persistent streaming,
+event translation, MCP bridge, and config management.
+
+#### New files created
+
+| File | Purpose |
+|---|---|
+| `src/pip_agent/backends/codex_cli/event_translator.py` | Maps SDK JSON-RPC notifications into 5 Pip-Boy semantic events (`text_delta`, `thinking_delta`, `tool_use`, `tool_result`, `finalize`) |
+| `src/pip_agent/backends/codex_cli/runner.py` | One-shot `run_query()` via `Codex()` → `start_thread()` → `thread.run()` → stream → close lifecycle |
+| `src/pip_agent/backends/codex_cli/streaming.py` | `CodexStreamingSession` implementing `StreamingSessionProtocol` for persistent multi-turn connections |
+| `src/pip_agent/backends/codex_cli/mcp_bridge.py` | STDIO MCP server exposing Pip-Boy's 11 tools via standard MCP JSON-RPC over stdin/stdout |
+| `src/pip_agent/backends/codex_cli/config_gen.py` | Generates `~/.codex/config.toml` with `[mcp_servers.pip]` STDIO entry |
+| `tests/test_codex_event_translator.py` | 19 tests for event translation (all 5 event types + edge cases) |
+| `tests/test_codex_backend.py` | 8 tests for backend factory, capabilities, delegation, config |
+| `tests/test_codex_mcp_bridge.py` | 9 tests for config_gen and tool collection |
+
+#### Files modified
+
+| File | Change |
+|---|---|
+| `src/pip_agent/backends/codex_cli/__init__.py` | Upgraded from stub to full `CodexBackend` delegating to runner/streaming |
+| `src/pip_agent/config.py` | Added `backend: str = Field(default="claude_code")` |
+| `pyproject.toml` | Added `[project.optional-dependencies] codex = ["codex-python>=1.122"]` |
+
+### Event translator mapping (contract §3.2)
+
+| SDK Event | Pip-Boy Event | Details |
+|---|---|---|
+| `ItemAgentMessageDeltaNotification` | `text_delta` | Incremental text streaming |
+| `ItemReasoningTextDeltaNotification` | `thinking_delta` | Model reasoning (if available) |
+| `ItemReasoningSummaryTextDeltaNotification` | `thinking_delta` | Reasoning summary |
+| `ItemStartedNotification` + CommandExecution | `tool_use` | name="Bash", input={command} |
+| `ItemStartedNotification` + FileChange | `tool_use` | name=Write/Edit per kind |
+| `ItemStartedNotification` + McpToolCall | `tool_use` | name=tool, input=arguments |
+| `ItemStartedNotification` + WebSearch | `tool_use` | name="WebSearch" |
+| `ItemCompletedNotification` + cmd/file/mcp | `tool_result` | is_error from exitCode/status/error |
+| `TurnPlanUpdatedNotification` | `tool_use` + `tool_result` | name="TodoWrite" |
+| `ThreadTokenUsageUpdatedNotification` | (internal state) | Tracked in turn state dict |
+| `TurnCompletedNotification` | `finalize` | Final text + usage + elapsed |
+
+### MCP bridge architecture
+
+```
+Codex app-server process
+    ↓ STDIO (stdin/stdout JSON-RPC)
+pip_agent.backends.codex_cli.mcp_bridge
+    ↓ direct Python calls
+pip_agent.mcp_tools._memory_tools/._cron_tools/etc.
+    ↓
+MemoryStore / HostScheduler / Channel (via McpContext)
+```
+
+Registration: `~/.codex/config.toml` gets `[mcp_servers.pip]` via `config_gen.ensure_codex_config()`.
+
+### Test results
+
+- **1121 tests passed** (1085 existing + 36 new), 0 failed
+- No existing test files modified
+- Lint clean on all new and modified files
+
+### Key implementation notes
+
+1. **Codex `run_query` is async but the SDK iteration is sync** — `thread.run()` returns a sync iterable (`CodexTurnStream`). The `for event in stream` loop runs synchronously within the async function. This is fine for the current architecture where each query runs in its own coroutine.
+
+2. **`_blocks_to_text` flattener** — Claude Code uses `list[dict]` content blocks (Anthropic format); Codex accepts plain strings. The flattener extracts text parts and joins with newlines.
+
+3. **Error mapping** — `StaleSessionError` is raised when known stale-session marker strings appear in exceptions. Other Codex errors propagate as generic `BackendError` subclasses.
+
+4. **MCP bridge runs standalone** — `python -m pip_agent.backends.codex_cli.mcp_bridge` starts the STDIO server. It builds its own `McpContext` with a fresh `MemoryStore` from `PIP_WORKDIR/.pip/`. This means tool handlers in bridge mode have access to memory but NOT to the host's live scheduler or channel state.
+
+5. **`approval_policy=never`** — both runner and streaming session set `AskForApproval(root="never")` per contract §3.3, otherwise MCP calls get "user rejected".
 
 ---
 
-## Phase 2-7: Pending
+## Phase 3+: Pending
 
 See [plan document](../.cursor/plans/dual-backend_evaluation_6fc33440.plan.md) for full breakdown.
 
 | Phase | Summary | Status |
 |---|---|---|
 | **1** | AgentBackend abstraction + Claude Code backend | **COMPLETE** |
-| 2 | Codex SDK integration + event translation | Pending |
-| 3 | Codex persistent streaming session | Pending |
-| 4 | SDK resume + reflect trigger adaptation | Pending |
+| **2** | Codex SDK integration + event translation + MCP bridge | **COMPLETE** |
+| 3 | Host integration — route through `get_backend()` | Pending |
+| 4 | Capability gating + hooks/reflect adaptation | Pending |
 | 5 | `/plugin` bridge for codex /plugins | Pending |
-| 6 | Capability gating + slash/TUI conditionals | Pending |
+| 6 | Session management + transcript format | Pending |
 | 7 | Test matrix (parametrize across backends) | Pending |
 
 ---
 
 ## Memos for next phases
 
-### Phase 2 implementation notes
+### Phase 3 implementation notes
 
-1. **Event translator is the core** — `codex_cli/event_translator.py` maps SDK JSON-RPC notifications to the 5 `StreamEvent` types. All spike data is in contract §3.2 and Appendix A.
+1. **`agent_host.py` wiring** — Currently `AgentHost._query()` directly imports `run_query` from `agent_runner` and `StreamingSession` from `streaming_session`. It needs to switch to `get_backend()` → `backend.run_query()` / `backend.open_streaming_session()`. The backend instance should be resolved once at host init and stored as `self._backend`.
 
-2. **MCP bridge** — Pip-Boy's 11 tools need a STDIO MCP server process for Codex. The tool schemas in `mcp_tools.py` are reusable; only the server startup changes. `config.toml` registration with `approval_policy=never` is mandatory.
+2. **Session pool compatibility** — The existing `SessionPool` manages `StreamingSession` objects. It needs to accept `StreamingSessionProtocol` instead, so `CodexStreamingSession` objects can participate. The pool's sweep logic (idle TTL) works identically since both session types expose `last_used_ns`.
 
-3. **`codex-python` SDK pattern** — `Codex()` → `start_thread(ThreadStartOptions(...))` → `thread.run("prompt")` → iterate events. First connection ~11s, subsequent turns ~3s.
+3. **Config.toml auto-setup** — When `settings.backend == "codex_cli"`, the host should call `ensure_codex_config(workdir)` during startup to ensure the MCP bridge is registered.
 
-4. **Import structure** — `codex-python` v1.122.0 exposes: `from codex import Codex, CodexOptions, ThreadStartOptions` and `from codex.protocol import types as proto`.
+### Phase 4 implementation notes
+
+1. **Hooks** — `PreCompact` and `Stop` hooks are Claude Code only. When backend doesn't support `PRE_COMPACT_HOOK`, the reflect trigger needs an alternative (turn-count threshold or explicit command).
+
+2. **Reflect** — The L1 reflect pipeline currently parses Claude Code JSONL transcripts. For Codex, a different transcript format parser is needed, or the reflect input changes to use in-memory state instead of file parsing.
 
 ### Test patching memo
 
@@ -92,13 +167,13 @@ Tests heavily patch `agent_runner.query` (the `claude_agent_sdk.query` function)
 - `_run_one_attempt` calls `query(...)` through that module-level binding
 - `patch.object` replaces the binding on the module namespace
 
-For the Codex backend, tests will need to patch the Codex SDK client differently. Phase 7 should introduce a `@pytest.fixture` parametrized by backend name.
+For the Codex backend, tests patch at `pip_agent.backends.codex_cli.runner.run_query` or mock the `Codex`/`Thread` objects directly. Phase 7 should introduce a `@pytest.fixture` parametrized by backend name.
 
 ### `BackendError` hierarchy adoption
 
-The unified error hierarchy (`BackendError` → `StaleSessionError`, `ModelInvalidError`, etc.) is defined but not yet fully adopted. Current code still catches `RuntimeError` and does string-matching. Migration path:
-1. Phase 2: Codex backend raises the typed errors natively
-2. Phase 6: `agent_host.py` switches to catching `BackendError` subtypes
+The unified error hierarchy (`BackendError` → `StaleSessionError`, `ModelInvalidError`, etc.) is defined and used by the Codex backend natively. Migration path:
+1. ~~Phase 2: Codex backend raises the typed errors natively~~ **DONE**
+2. Phase 4: `agent_host.py` switches to catching `BackendError` subtypes
 3. Phase 7: test assertions updated to match
 
 ---
@@ -114,5 +189,15 @@ src/pip_agent/backends/
 ├── claude_code/
 │   └── __init__.py       # ClaudeCodeBackend
 └── codex_cli/
-    └── __init__.py       # CodexBackend (stub)
+    ├── __init__.py       # CodexBackend (full implementation)
+    ├── config_gen.py     # ~/.codex/config.toml management
+    ├── event_translator.py  # SDK events → 5 Pip-Boy events
+    ├── mcp_bridge.py     # STDIO MCP server (python -m ...)
+    ├── runner.py         # One-shot run_query
+    └── streaming.py      # CodexStreamingSession
+
+tests/
+├── test_codex_backend.py         # 8 tests
+├── test_codex_event_translator.py # 19 tests
+└── test_codex_mcp_bridge.py      # 9 tests
 ```
