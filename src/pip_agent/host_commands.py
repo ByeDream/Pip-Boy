@@ -2421,6 +2421,86 @@ def _plugin_disable_handler(
 def _plugin_marketplace_handler(
     ctx: CommandContext, tail: list[str],
 ) -> CommandResult:
+    from pip_agent.config import settings as _settings
+
+    if _settings.backend == "codex_cli":
+        return _plugin_marketplace_codex(ctx, tail)
+    return _plugin_marketplace_claude(ctx, tail)
+
+
+def _plugin_marketplace_codex(
+    ctx: CommandContext, tail: list[str],
+) -> CommandResult:
+    """Marketplace operations via Codex CLI."""
+    from pip_agent.backends.codex_cli import plugins as cx_plug
+    from pip_agent.plugins import run_sync
+
+    if not tail:
+        return CommandResult(
+            handled=True,
+            response="Usage: /plugin marketplace {add|remove|upgrade} ...",
+        )
+    sub = tail[0].lower()
+    rest = tail[1:]
+    cwd = _active_agent_cwd(ctx)
+
+    try:
+        if sub == "add":
+            if len(rest) != 1:
+                return CommandResult(
+                    handled=True,
+                    response="Usage: /plugin marketplace add <url>",
+                )
+            out = run_sync(cx_plug.marketplace_add(rest[0], cwd=cwd))
+            return CommandResult(
+                handled=True,
+                response=out or f"Added marketplace {rest[0]}.",
+            )
+
+        if sub == "remove":
+            if len(rest) != 1:
+                return CommandResult(
+                    handled=True,
+                    response="Usage: /plugin marketplace remove <name>",
+                )
+            out = run_sync(cx_plug.marketplace_remove(rest[0], cwd=cwd))
+            return CommandResult(
+                handled=True,
+                response=out or f"Removed marketplace {rest[0]}.",
+            )
+
+        if sub in ("update", "upgrade"):
+            out = run_sync(cx_plug.marketplace_upgrade(cwd=cwd))
+            return CommandResult(
+                handled=True,
+                response=out or "Marketplace plugins upgraded.",
+            )
+
+        if sub == "list":
+            return CommandResult(
+                handled=True,
+                response=(
+                    "`/plugin marketplace list` is not available with the "
+                    "Codex backend. Use `/plugin marketplace add|remove|upgrade`."
+                ),
+            )
+
+    except Exception as exc:  # noqa: BLE001
+        return CommandResult(
+            handled=True,
+            response=f"Codex plugin command failed: {exc}",
+        )
+
+    return CommandResult(
+        handled=True,
+        response=f"Unknown /plugin marketplace subcommand '{sub}'.",
+    )
+
+
+def _plugin_marketplace_claude(
+    ctx: CommandContext, tail: list[str],
+) -> CommandResult:
+    """Marketplace operations via Claude Code CLI (original path)."""
     from pip_agent import plugins as plug
 
     if not tail:
@@ -2493,6 +2573,11 @@ def _plugin_marketplace_handler(
     )
 
 
+_CODEX_UNSUPPORTED_PLUGIN_OPS: frozenset[str] = frozenset({
+    "list", "search", "install", "uninstall", "enable", "disable",
+})
+
+
 def _cmd_plugin(ctx: CommandContext, args: str) -> CommandResult:
     """Dispatcher for the ``/plugin`` family.
 
@@ -2505,6 +2590,8 @@ def _cmd_plugin(ctx: CommandContext, args: str) -> CommandResult:
     Available on every channel — same trust model as ``/cron``: users
     own the plugin sources they trust.
     """
+    from pip_agent.config import settings as _settings
+
     try:
         tokens = shlex.split(args) if args.strip() else []
     except ValueError as exc:
@@ -2515,6 +2602,20 @@ def _cmd_plugin(ctx: CommandContext, args: str) -> CommandResult:
 
     sub = tokens[0].lower()
     tail = tokens[1:]
+
+    if (
+        _settings.backend == "codex_cli"
+        and sub in _CODEX_UNSUPPORTED_PLUGIN_OPS
+    ):
+        return CommandResult(
+            handled=True,
+            response=(
+                f"`/plugin {sub}` is not available with the Codex backend. "
+                "Codex plugins are managed via marketplace operations only: "
+                "`/plugin marketplace add|remove|update`."
+            ),
+        )
+
     handler = _PLUGIN_SUBCOMMANDS.get(sub)
     if handler is None:
         from difflib import get_close_matches
