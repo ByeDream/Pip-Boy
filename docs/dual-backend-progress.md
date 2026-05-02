@@ -1,6 +1,6 @@
 # Dual-Backend Implementation Progress Report
 
-> **Status**: Phase 2 complete, Phase 3+ pending  
+> **Status**: Phase 1-2 complete + Phase 3 prep, Phase 4+ pending  
 > **Branch**: `feat/dual-backend`  
 > **Contract**: [`docs/dual-backend-contract.md`](./dual-backend-contract.md) v0.3.0 (frozen)  
 > **Last updated**: 2026-05-03
@@ -128,7 +128,35 @@ Registration: `~/.codex/config.toml` gets `[mcp_servers.pip]` via `config_gen.en
 
 ---
 
-## Phase 3+: Pending
+## Phase 3 prep: Plugin adapter + error detection + integration tests — COMPLETE
+
+### What was done
+
+Infrastructure for the remaining phases, without touching `agent_host.py`'s
+live dispatch path (high-risk change deferred to developer review).
+
+#### New files
+
+| File | Purpose |
+|---|---|
+| `src/pip_agent/backends/codex_cli/plugins.py` | Plugin CLI adapter: marketplace add/remove/upgrade via bundled `codex.exe` |
+| `tests/test_backend_integration.py` | 39 integration tests: factory, capabilities, errors, protocol conformance (parametrized across both backends), settings |
+| `tests/test_codex_plugins.py` | 5 tests for CLI resolution and error types |
+
+#### Files modified
+
+| File | Change |
+|---|---|
+| `src/pip_agent/models.py` | Extended `_SDK_NEVER_MODEL` (+ `codexautherror`) and `_SDK_DEFINITELY_MODEL` (+ `modelinvaliderror`) for Codex error detection |
+
+### Test results
+
+- **1165 tests passed** (1085 existing + 80 new), 0 failed
+- No existing test files modified
+
+---
+
+## Phase 4+: Pending
 
 See [plan document](../.cursor/plans/dual-backend_evaluation_6fc33440.plan.md) for full breakdown.
 
@@ -136,29 +164,80 @@ See [plan document](../.cursor/plans/dual-backend_evaluation_6fc33440.plan.md) f
 |---|---|---|
 | **1** | AgentBackend abstraction + Claude Code backend | **COMPLETE** |
 | **2** | Codex SDK integration + event translation + MCP bridge | **COMPLETE** |
-| 3 | Host integration — route through `get_backend()` | Pending |
-| 4 | Capability gating + hooks/reflect adaptation | Pending |
-| 5 | `/plugin` bridge for codex /plugins | Pending |
-| 6 | Session management + transcript format | Pending |
+| **3 prep** | Plugin adapter + error detection + integration tests | **COMPLETE** |
+| 4 | Host integration — route through `get_backend()` in `agent_host.py` | Pending |
+| 5 | Capability gating + hooks/reflect adaptation | Pending |
+| 6 | `/plugin` bridge wiring into host_commands | Pending |
 | 7 | Test matrix (parametrize across backends) | Pending |
 
 ---
 
 ## Memos for next phases
 
-### Phase 3 implementation notes
+### Phase 4: Host integration (HIGH PRIORITY, NEEDS REVIEW)
 
-1. **`agent_host.py` wiring** — Currently `AgentHost._query()` directly imports `run_query` from `agent_runner` and `StreamingSession` from `streaming_session`. It needs to switch to `get_backend()` → `backend.run_query()` / `backend.open_streaming_session()`. The backend instance should be resolved once at host init and stored as `self._backend`.
+The core wiring that makes the dual-backend actually switchable. This is the
+highest-risk change because it modifies the live `agent_host.py` dispatch path.
 
-2. **Session pool compatibility** — The existing `SessionPool` manages `StreamingSession` objects. It needs to accept `StreamingSessionProtocol` instead, so `CodexStreamingSession` objects can participate. The pool's sweep logic (idle TTL) works identically since both session types expose `last_used_ns`.
+#### Change plan
 
-3. **Config.toml auto-setup** — When `settings.backend == "codex_cli"`, the host should call `ensure_codex_config(workdir)` during startup to ensure the MCP bridge is registered.
+1. **Store backend at host init**: Add `self._backend = get_backend()` in `AgentHost.__init__`
 
-### Phase 4 implementation notes
+2. **Two-path dispatch in `_run_turn_streaming`** (line ~1106):
+   ```python
+   if self._backend.name == "codex_cli":
+       session = await self._backend.open_streaming_session(...)
+       result = await session.run_turn(prompt, ...)
+   else:
+       # existing Claude Code path unchanged
+       session = self._get_or_create_streaming_session(...)
+       result = await session.run_turn(prompt, ...)
+   ```
 
-1. **Hooks** — `PreCompact` and `Stop` hooks are Claude Code only. When backend doesn't support `PRE_COMPACT_HOOK`, the reflect trigger needs an alternative (turn-count threshold or explicit command).
+3. **Two-path dispatch in one-shot `run_query`** (line ~2109):
+   ```python
+   if self._backend.name == "codex_cli":
+       result = await self._backend.run_query(prompt, ...)
+   else:
+       result = await run_query(prompt, ...)  # existing path
+   ```
 
-2. **Reflect** — The L1 reflect pipeline currently parses Claude Code JSONL transcripts. For Codex, a different transcript format parser is needed, or the reflect input changes to use in-memory state instead of file parsing.
+4. **Session pool type-widening**: Change `_streaming_sessions: dict[str, StreamingSession]` to `dict[str, StreamingSessionProtocol]`. The sweep/eviction logic uses `session.last_used_ns` and `session.close()` — both are on `StreamingSessionProtocol`, so no further changes needed.
+
+5. **Config.toml auto-setup**: When `settings.backend == "codex_cli"`, call `ensure_codex_config(workdir)` during host startup.
+
+6. **Import dependencies** to add:
+   ```python
+   from pip_agent.backends import get_backend
+   from pip_agent.backends.base import StreamingSessionProtocol
+   ```
+
+#### Risk mitigation
+- Keep the Claude Code path EXACTLY as-is (no refactoring)
+- Only add `if self._backend.name == "codex_cli":` branches
+- Run full 1165 test suite after each change
+
+### Phase 5: Capability gating
+
+1. **`host_commands.py`**: Before executing backend-specific slash commands, check `backend.supports(cap)`. Display clear message when feature unavailable.
+
+2. **TUI thinking panel**: When `!backend.supports(Capability.PRE_COMPACT_HOOK)`, hide the thinking panel (Codex doesn't emit thinking_delta).
+
+3. **Plugin commands**: Route `/plugin` operations through the active backend's plugin adapter.
+
+4. **`/T` slash passthrough**: Pass through to the active backend's CLI (claude or codex).
+
+### Phase 6: Reflect trigger adaptation
+
+1. **Turn-count threshold**: When `!backend.supports(PRE_COMPACT_HOOK)`, trigger reflect based on turn count (e.g., every 10 turns) + `ThreadTokenUsageUpdated` event monitoring.
+
+2. **Transcript format**: Codex transcript parsing for L1 reflect input (different from Claude JSONL).
+
+### Phase 7: Test matrix
+
+1. Add `@pytest.fixture(params=["claude_code", "codex_cli"])` fixture
+2. Parametrize relevant tests across both backends
+3. Add Codex-specific edge case tests (stale thread, SDK errors)
 
 ### Test patching memo
 
@@ -193,11 +272,24 @@ src/pip_agent/backends/
     ├── config_gen.py     # ~/.codex/config.toml management
     ├── event_translator.py  # SDK events → 5 Pip-Boy events
     ├── mcp_bridge.py     # STDIO MCP server (python -m ...)
+    ├── plugins.py        # Codex plugin CLI adapter
     ├── runner.py         # One-shot run_query
     └── streaming.py      # CodexStreamingSession
 
 tests/
-├── test_codex_backend.py         # 8 tests
+├── test_backend_integration.py    # 39 tests (protocol conformance, factory, capabilities)
+├── test_codex_backend.py          # 8 tests
 ├── test_codex_event_translator.py # 19 tests
-└── test_codex_mcp_bridge.py      # 9 tests
+├── test_codex_mcp_bridge.py       # 9 tests
+└── test_codex_plugins.py          # 5 tests
 ```
+
+## Commit log (feat/dual-backend)
+
+| Commit | Summary |
+|---|---|
+| `7b3299c` | Phase 1: AgentBackend protocol + backends/ package hierarchy |
+| `a13b512` | Phase 2: Codex runner + streaming + event translator |
+| `9e0602a` | Phase 2: STDIO MCP bridge + config.toml generator |
+| `e3ba2fd` | docs: Phase 2 progress report |
+| `c9af76d` | Phase 3 prep: plugin adapter + error detection + integration tests |
