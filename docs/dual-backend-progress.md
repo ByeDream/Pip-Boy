@@ -1,6 +1,6 @@
 # Dual-Backend Implementation Progress Report
 
-> **Status**: Phase 1-7 complete (all plan phases executed)  
+> **Status**: Phase 1-7 complete + reflect trigger / transcript capture  
 > **Branch**: `feat/dual-backend`  
 > **Contract**: [`docs/dual-backend-contract.md`](./dual-backend-contract.md) v0.3.0 (frozen)  
 > **Last updated**: 2026-05-03
@@ -255,6 +255,55 @@ Parametrized tests that verify both backends satisfy the same contract.
 
 ---
 
+## Post-Phase 7: Reflect Trigger + Transcript Capture — COMPLETE
+
+### Motivation
+
+The original plan's Phase 4 (session reflect) was deferred during renumbering.
+Codex has no `PreCompact` hook, so the reflect pipeline needed an alternative
+trigger mechanism.  Additionally, the reflect pipeline reads Claude Code's JSONL
+transcripts; Codex sessions needed a compatible transcript format.
+
+### What was done
+
+1. **Transcript JSONL capture** — `CodexStreamingSession.run_turn()` now writes
+   user and assistant messages to `.pip/codex_sessions/<session_id>.jsonl` using
+   the flat `{"role":"user|assistant","content":"..."}` shape that
+   `transcript_source.normalize_line` already handles (Shape 2).
+
+2. **Turn-count reflect trigger** — `_maybe_codex_reflect()` in `agent_host.py`
+   fires `reflect_and_persist()` every 10 turns, roughly matching when Claude
+   Code would auto-compact a mid-length session.  Gated on: backend is codex,
+   turn is not ephemeral, no error, streaming mode, transcript exists, memory
+   store available, ANTHROPIC_API_KEY configured.
+
+3. **`locate_session_jsonl` extension** — now also searches
+   `.pip/codex_sessions/` so `flush_and_rotate` and the `reflect` MCP tool find
+   Codex transcripts.
+
+4. **`ensure_codex_config()` at boot** — `run_host()` calls the MCP config
+   generator when `settings.backend == "codex_cli"`, ensuring `~/.codex/config.toml`
+   has the Pip-Boy MCP server entry before any Codex session starts.
+
+5. **Token usage tracking** — `CodexStreamingSession.cumulative_tokens` is
+   updated from `ThreadTokenUsageUpdatedNotification` events via `state["token_usage"]`.
+   `translate_event` now accepts `callback=None` (state-only mode), so token
+   tracking works even without a stream consumer.
+
+### Test results
+
+- **1235 tests passed** (1218 + 17 new), 0 failed
+- 17 new tests in `test_codex_reflect_trigger.py` covering:
+  - Transcript JSONL write / skip-empty / noop-when-no-path
+  - Transcript path initialization
+  - Full run_turn transcript capture
+  - `locate_session_jsonl` Codex path discovery
+  - Reflect trigger at threshold (10, 20) / skip below / skip without transcript / skip no memory store
+  - Boot config presence verification
+  - Token usage tracking
+
+---
+
 ## File inventory (new in this branch)
 
 ```
@@ -281,6 +330,7 @@ tests/
 ├── test_codex_event_translator.py # 19 tests
 ├── test_codex_mcp_bridge.py       # 9 tests
 ├── test_codex_plugins.py          # 5 tests
+├── test_codex_reflect_trigger.py  # 17 tests (transcript, reflect trigger, boot config)
 └── test_host_backend_dispatch.py  # 23 tests (host dispatch, plugin gating)
 ```
 
@@ -293,8 +343,11 @@ tests/
 | `config.py` | 2 | `backend` field added |
 | `pyproject.toml` | 2 | `codex-python` optional dep |
 | `models.py` | 3 | Codex error detection |
-| `agent_host.py` | 4 | Backend dispatch routing |
+| `agent_host.py` | 4, post-7 | Backend dispatch routing + codex reflect trigger + config auto-setup |
 | `host_commands.py` | 5-6 | Backend info in /status, /help; plugin routing per backend |
+| `event_translator.py` | post-7 | `callback` parameter now optional (`None` for state-only tracking) |
+| `streaming.py` (codex) | post-7 | Transcript JSONL capture + cumulative token tracking |
+| `transcript_source.py` | post-7 | `locate_session_jsonl` searches `.pip/codex_sessions/` |
 
 ## Commit log (feat/dual-backend)
 
@@ -310,3 +363,5 @@ tests/
 | `35793e0` | Phase 5: backend info in /status and /help |
 | `813555f` | Phase 5-6: plugin routing and capability gating tests |
 | `6239b26` | Phase 7: cross-backend test matrix |
+| `7555b51` | docs: finalize progress report for Phase 1-7 |
+| `f25923b` | feat(codex): transcript capture + reflect trigger + config auto-setup |
