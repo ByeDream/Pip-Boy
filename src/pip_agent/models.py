@@ -1,19 +1,22 @@
 """Tiered model registry — single source of truth for model name resolution.
 
-Three tiers (t0 - t1 - t2) live in the env (``MODEL_T0`` / ``MODEL_T1`` /
-``MODEL_T2``). Every call site picks a tier; never a concrete model name.
-Async / background tasks (heartbeat, cron, reflect, dream) are pinned to
-fixed tiers in code so they cannot accidentally burn the strongest model
-on cheap work.
+Each backend has its own tier set in ``.env``:
+
+* **Codex** (default): ``CODEX_MODEL_T0`` / ``CODEX_MODEL_T1`` / ``CODEX_MODEL_T2``
+* **Claude**:          ``CLAUDE_MODEL_T0`` / ``CLAUDE_MODEL_T1`` / ``CLAUDE_MODEL_T2``
+
+Every call site picks a tier (``t0`` / ``t1`` / ``t2``); never a concrete
+model name.  ``resolve_chain`` selects the correct set at runtime based on
+``settings.backend``.
 
 Failures on a specific model degrade DOWN the chain (never up):
 
-* ``t0`` -> ``[model_t0, model_t1, model_t2]``
-* ``t1`` -> ``[model_t1, model_t2]``
-* ``t2`` -> ``[model_t2]``
+* ``t0`` -> ``[*_t0, *_t1, *_t2]``
+* ``t1`` -> ``[*_t1, *_t2]``
+* ``t2`` -> ``[*_t2]``
 
 Empty env entries are skipped, so a partly-configured ``.env`` (e.g. only
-``MODEL_T2`` set) still works for the tiers that do have a name.
+``*_T2`` set) still works for the tiers that do have a name.
 """
 
 from __future__ import annotations
@@ -47,15 +50,26 @@ TASK_TIER: dict[str, Tier] = {
 }
 
 
-_DOWN_CHAIN: dict[Tier, tuple[str, ...]] = {
-    "t0": ("model_t0", "model_t1", "model_t2"),
-    "t1": ("model_t1", "model_t2"),
-    "t2": ("model_t2",),
+_CLAUDE_CHAIN: dict[Tier, tuple[str, ...]] = {
+    "t0": ("claude_model_t0", "claude_model_t1", "claude_model_t2"),
+    "t1": ("claude_model_t1", "claude_model_t2"),
+    "t2": ("claude_model_t2",),
+}
+
+_CODEX_CHAIN: dict[Tier, tuple[str, ...]] = {
+    "t0": ("codex_model_t0", "codex_model_t1", "codex_model_t2"),
+    "t1": ("codex_model_t1", "codex_model_t2"),
+    "t2": ("codex_model_t2",),
 }
 
 
 def resolve_chain(tier: Tier) -> list[str]:
     """Return the ordered list of concrete model names to try for ``tier``.
+
+    Selects the tier table matching ``settings.backend``:
+
+    * ``codex_cli``  -> ``CODEX_MODEL_T*``
+    * ``claude_code`` -> ``CLAUDE_MODEL_T*``
 
     Empty / whitespace entries are skipped. The result may be empty when
     the env is not configured for ``tier`` or any lower tier; callers
@@ -63,8 +77,10 @@ def resolve_chain(tier: Tier) -> list[str]:
     """
     from pip_agent.config import settings
 
+    table = _CODEX_CHAIN if settings.backend == "codex_cli" else _CLAUDE_CHAIN
+
     chain: list[str] = []
-    for attr in _DOWN_CHAIN[tier]:
+    for attr in table[tier]:
         value = (getattr(settings, attr, "") or "").strip()
         if value:
             chain.append(value)
@@ -204,7 +220,7 @@ def with_model_fallback(
     if not chain:
         raise RuntimeError(
             f"No model configured for tier {tier}. "
-            "Set MODEL_T0 / MODEL_T1 / MODEL_T2 in .env.",
+            "Set CODEX_MODEL_T* or CLAUDE_MODEL_T* in .env.",
         )
 
     last_exc: BaseException | None = None

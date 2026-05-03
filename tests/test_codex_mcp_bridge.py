@@ -3,23 +3,20 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock, patch
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # config_gen tests
 # ---------------------------------------------------------------------------
 
-def test_pip_mcp_server_toml_block():
-    from pip_agent.backends.codex_cli.config_gen import pip_mcp_server_toml_block
+def test_pip_block():
+    from pip_agent.backends.codex_cli.config_gen import _pip_block
 
-    block = pip_mcp_server_toml_block()
+    block = _pip_block()
     assert "[mcp_servers.pip]" in block
-    assert "type = " in block
-    assert "stdio" in block
+    assert "command = " in block
+    assert "args = " in block
     assert "pip_agent.backends.codex_cli.mcp_bridge" in block
 
 
@@ -34,7 +31,7 @@ def test_ensure_codex_config_creates_file(tmp_path: Path, monkeypatch: pytest.Mo
     assert result.exists()
     content = result.read_text(encoding="utf-8")
     assert "[mcp_servers.pip]" in content
-    assert "stdio" in content
+    assert "command = " in content
 
 
 def test_ensure_codex_config_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

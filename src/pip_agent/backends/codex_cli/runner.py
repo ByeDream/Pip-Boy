@@ -23,19 +23,22 @@ from pip_agent.backends.base import QueryResult, StreamEventCallback
 log = logging.getLogger(__name__)
 
 
-def _resolve_codex_api_key() -> str | None:
-    """Resolve the API key for the Codex backend.
+def _resolve_codex_credentials() -> tuple[str | None, str | None]:
+    from pip_agent.backends.codex_cli.bridge_env import resolve_codex_credentials
+    return resolve_codex_credentials()
 
-    Reads from ``CODEX_API_KEY`` → ``OPENAI_API_KEY`` env vars.
-    Returns ``None`` if neither is set (SDK will use config.toml).
-    """
-    import os
 
-    return (
-        os.environ.get("CODEX_API_KEY")
-        or os.environ.get("OPENAI_API_KEY")
-        or None
-    )
+def _resolve_reasoning_effort() -> Any:
+    """Read ``codex_reasoning_effort`` from settings and wrap it."""
+    from codex.protocol import types as proto
+
+    from pip_agent.config import settings
+
+    _VALID = {"none", "minimal", "low", "medium", "high", "xhigh"}
+    raw = (settings.codex_reasoning_effort or "").strip().lower()
+    if raw and raw in _VALID:
+        return proto.ReasoningEffort(root=raw)  # type: ignore[arg-type]
+    return None
 
 
 async def run_query(
@@ -47,7 +50,7 @@ async def run_query(
     session_id: str | None = None,
     system_prompt_append: str = "",
     cwd: str | Path | None = None,
-    sandbox: str = "workspace-write",
+    sandbox: str = "danger-full-access",
     on_stream_event: StreamEventCallback | None = None,
 ) -> QueryResult:
     """Run a single agent turn via the codex-python SDK.
@@ -81,14 +84,14 @@ async def _run_query_with_chain(
     session_id: str | None = None,
     system_prompt_append: str = "",
     cwd: str | Path | None = None,
-    sandbox: str = "workspace-write",
+    sandbox: str = "danger-full-access",
     on_stream_event: StreamEventCallback | None = None,
 ) -> QueryResult:
     from pip_agent import _profile
     from pip_agent.models import is_model_invalid_error
 
     try:
-        from codex import Codex, CodexOptions, ThreadStartOptions
+        from codex import Codex, CodexOptions, ThreadResumeOptions, ThreadStartOptions
         from codex.protocol import types as proto
     except ImportError as exc:
         return QueryResult(
@@ -101,10 +104,12 @@ async def _run_query_with_chain(
     last_exc: Exception | None = None
 
     for model_candidate in chain:
-        api_key = _resolve_codex_api_key()
+        api_key, base_url = _resolve_codex_credentials()
         options_kwargs: dict[str, Any] = {}
         if api_key:
             options_kwargs["api_key"] = api_key
+        if base_url:
+            options_kwargs["base_url"] = base_url
 
         from pip_agent.backends.codex_cli.bridge_env import build_bridge_env
 
@@ -115,7 +120,7 @@ async def _run_query_with_chain(
         client = Codex(CodexOptions(**options_kwargs) if options_kwargs else None)
 
         result = QueryResult()
-        state: dict[str, Any] = {}
+        state: dict[str, Any] = {"start_ns": time.perf_counter_ns()}
 
         try:
             async with _profile.span("codex.run_query"):
@@ -130,9 +135,16 @@ async def _run_query_with_chain(
                 )
 
                 if session_id:
+                    resume_opts = ThreadResumeOptions(
+                        sandbox=proto.SandboxMode(root=sandbox),
+                        approval_policy=proto.AskForApproval(root="never"),
+                        cwd=str(cwd) if cwd else None,
+                        model=model_candidate,
+                        developer_instructions=system_prompt_append or None,
+                    )
                     thread = client.resume_thread(
                         session_id,
-                        options=thread_opts,
+                        options=resume_opts,
                     )
                 else:
                     thread = client.start_thread(thread_opts)
@@ -143,29 +155,44 @@ async def _run_query_with_chain(
                     prompt if isinstance(prompt, str)
                     else _blocks_to_text(prompt)
                 )
-                stream = thread.run(prompt_text)
+                from codex import TurnOptions
+
+                turn_opts_kwargs: dict[str, Any] = {}
+                effort_val = _resolve_reasoning_effort()
+                if effort_val is not None:
+                    turn_opts_kwargs["effort"] = effort_val
+                stream = thread.run(
+                    prompt_text,
+                    TurnOptions(**turn_opts_kwargs) if turn_opts_kwargs else None,
+                )
 
                 for event in stream:
-                    if on_stream_event is not None:
-                        await translate_event(
-                            event, on_stream_event, state=state,
-                        )
+                    await translate_event(
+                        event, on_stream_event, state=state,
+                    )
 
-                    etype = type(event).__name__
-                    if etype == "ItemCompletedNotificationModel":
-                        item = event.params.item.root
-                        item_type = getattr(item, "type", None)
-                        if hasattr(item_type, "root"):
-                            item_type = item_type.root
-                        if item_type == "agent_message":
-                            result.text = getattr(item, "text", "") or ""
-
-                if result.text is None:
-                    result.text = state.get("final_text", "")
+                result.text = state.get("accumulated_text", "") or state.get("final_text", "")
 
                 elapsed_s = (time.perf_counter_ns() - start_ns) / 1e9
                 state["elapsed_s"] = elapsed_s
                 result.num_turns = 1
+
+                token_usage = state.get("token_usage", {})
+                token_usage["tool_calls"] = state.get("tool_calls", 0)
+
+                from pip_agent.backends.codex_cli.event_translator import estimate_cost_usd
+                cost = estimate_cost_usd(model_candidate, token_usage)
+                result.cost_usd = cost
+
+                if on_stream_event is not None:
+                    await on_stream_event(
+                        "finalize",
+                        final_text=result.text or "",
+                        num_turns=1,
+                        cost_usd=cost,
+                        usage=token_usage,
+                        elapsed_s=elapsed_s,
+                    )
 
                 _profile.event(
                     "codex.result",

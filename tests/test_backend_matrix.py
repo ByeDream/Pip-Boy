@@ -7,7 +7,6 @@ experience) are maintained.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -19,10 +18,8 @@ from pip_agent.backends.base import (
     Capability,
     QueryResult,
     StaleSessionError,
-    StreamEventCallback,
     StreamingSessionProtocol,
 )
-
 
 # ---------------------------------------------------------------------------
 # Shared fixture

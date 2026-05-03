@@ -1,6 +1,8 @@
 """Shared pytest fixtures for the Pip-Boy test suite."""
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
 
@@ -28,3 +30,16 @@ def _disable_lazy_plugin_bootstrap():
         yield
     finally:
         _plug.reset_bootstrap_for_test()
+
+
+@pytest.fixture(autouse=True)
+def _pin_backend_to_claude_code():
+    """Default ``settings.backend`` to ``claude_code`` for all tests.
+
+    The live ``.env`` may set ``BACKEND=codex_cli`` for manual testing.
+    Without this pin, hundreds of existing tests that implicitly assume
+    the claude_code backend would break. Tests that need a different
+    backend should mock ``settings.backend`` explicitly.
+    """
+    with patch("pip_agent.config.settings.backend", "claude_code"):
+        yield

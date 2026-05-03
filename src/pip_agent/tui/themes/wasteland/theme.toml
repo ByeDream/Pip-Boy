@@ -11,7 +11,7 @@ description = "Default Fallout-inspired green-on-black wasteland theme."
 show_art = true
 show_app_log = true
 show_status_bar = true
-footer_template = "[{tools} tools · {turns} turn · {elapsed_s}s · ${cost}]"
+footer_template = "[{tools} tools · {turns} turn · {elapsed_s}s · ${cost}{effort}]"
 
 [palette]
 background = "#0a0f0a"

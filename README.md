@@ -113,7 +113,8 @@ On first launch Pip-Boy scaffolds `.pip/` with defaults, including `.env` from t
 |---|---|---|---|
 | `ANTHROPIC_API_KEY` | Conditional | — | Anthropic credential. Sent as `x-api-key` for direct calls; automatically promoted to `Authorization: Bearer` when `ANTHROPIC_BASE_URL` is set (so it works with OneAPI / claude-relay / corporate gateways out of the box). |
 | `ANTHROPIC_BASE_URL` | No | — | Custom API endpoint. Presence flips the auth header to bearer for proxy gateway compatibility. |
-| `MODEL_T0` / `MODEL_T1` / `MODEL_T2` | Yes | — | Three model tiers, strongest → cheapest. Every call site picks a tier and resolves through the table. Background tasks are pinned to fixed tiers in code. On model-invalid errors the chain steps DOWN; never up. |
+| `CODEX_MODEL_T0/T1/T2` | Yes | — | Model tiers for Codex backend (default), strongest → cheapest. Every call site picks a tier and resolves through the table. Background tasks are pinned to fixed tiers in code. On model-invalid errors the chain steps DOWN; never up. |
+| `CLAUDE_MODEL_T0/T1/T2` | Yes | — | Model tiers for Claude Code backend. Same semantics as Codex tiers. |
 | `TAVILY_API_KEY` | No | — | Tavily search API key. When empty, `web_search` falls back to DuckDuckGo. |
 | `WECOM_BOT_ID` / `WECOM_BOT_SECRET` | No | — | WeCom enterprise bot credentials. |
 | `USE_CUSTOM_WEB_TOOLS` | No | `true` | Ship Pip-Boy's own `web_search`/`web_fetch` MCP tools; set to `false` for Claude Code's native WebSearch/WebFetch. |

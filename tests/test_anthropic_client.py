@@ -138,8 +138,8 @@ class TestTieredDirectSdkResolution:
         from pip_agent import config
         from pip_agent.memory import reflect
 
-        monkeypatch.setattr(config.settings, "model_t1", "sentinel-t1")
-        monkeypatch.setattr(config.settings, "model_t2", "sentinel-t2")
+        monkeypatch.setattr(config.settings, "claude_model_t1", "sentinel-t1")
+        monkeypatch.setattr(config.settings, "claude_model_t2", "sentinel-t2")
 
         captured = {}
 
@@ -167,8 +167,8 @@ class TestTieredDirectSdkResolution:
         from pip_agent import config
         from pip_agent.memory import consolidate
 
-        monkeypatch.setattr(config.settings, "model_t1", "sentinel-t1")
-        monkeypatch.setattr(config.settings, "model_t2", "sentinel-t2")
+        monkeypatch.setattr(config.settings, "claude_model_t1", "sentinel-t1")
+        monkeypatch.setattr(config.settings, "claude_model_t2", "sentinel-t2")
 
         captured = {}
 

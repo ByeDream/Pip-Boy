@@ -59,10 +59,11 @@ class CodexStreamingSession:
         cwd: str | Path,
         system_prompt_append: str,
         model: str | None = None,
-        sandbox: str = "workspace-write",
+        sandbox: str = "danger-full-access",
         resume_session_id: str | None = None,
         sender_id: str = "",
         peer_id: str = "",
+        user_id: str = "",
         account_id: str = "",
     ) -> None:
         self.session_key = session_key
@@ -81,6 +82,7 @@ class CodexStreamingSession:
         self._model = model
         self._sender_id = sender_id
         self._peer_id = peer_id
+        self._user_id = user_id
         self._account_id = account_id
         self._client: Any = None
         self._thread: Any = None
@@ -149,7 +151,7 @@ class CodexStreamingSession:
         from pip_agent import _profile
 
         try:
-            from codex import Codex, CodexOptions, ThreadStartOptions
+            from codex import Codex, CodexOptions, ThreadResumeOptions, ThreadStartOptions
             from codex.protocol import types as proto
         except ImportError as exc:
             raise BackendError(
@@ -157,11 +159,13 @@ class CodexStreamingSession:
             ) from exc
 
         async with _profile.span("codex_session.connect"):
-            api_key = self._resolve_api_key()
+            api_key, base_url = self._resolve_credentials()
             codex_env = self._build_bridge_env()
             opts_kwargs: dict[str, Any] = {}
             if api_key:
                 opts_kwargs["api_key"] = api_key
+            if base_url:
+                opts_kwargs["base_url"] = base_url
             if codex_env:
                 opts_kwargs["env"] = codex_env
             self._client = Codex(
@@ -180,9 +184,18 @@ class CodexStreamingSession:
 
             if self.session_id:
                 try:
+                    resume_opts = ThreadResumeOptions(
+                        sandbox=proto.SandboxMode(root=self._sandbox),
+                        approval_policy=proto.AskForApproval(root="never"),
+                        cwd=self._cwd,
+                        model=self._model,
+                        developer_instructions=(
+                            self._system_prompt_append or None
+                        ),
+                    )
                     self._thread = self._client.resume_thread(
                         self.session_id,
-                        options=thread_opts,
+                        options=resume_opts,
                     )
                 except Exception as exc:
                     msg = str(exc).lower()
@@ -196,9 +209,10 @@ class CodexStreamingSession:
             self._write_bridge_session_alias()
             self._transcript_path = self._init_transcript_path()
             log.info(
-                "Codex session connected: key=%s thread=%s transcript=%s",
+                "Codex session connected: key=%s thread=%s cwd=%s transcript=%s",
                 self.session_key,
                 self.session_id[:12] if self.session_id else "?",
+                self._cwd,
                 self._transcript_path,
             )
 
@@ -219,6 +233,36 @@ class CodexStreamingSession:
         except Exception:  # noqa: BLE001
             pass
 
+    def _write_bridge_ctx(
+        self,
+        sender_id: str,
+        peer_id: str,
+        account_id: str = "",
+    ) -> None:
+        """Write per-turn identity to a file the MCP bridge can read.
+
+        The bridge process is long-lived and cannot receive per-session
+        env vars after its initial spawn.  This file is the rendezvous
+        point for identity context that changes with each conversation.
+        """
+        from pip_agent.config import WORKDIR
+
+        ctx_path = WORKDIR / ".pip" / "codex_bridge_ctx.json"
+        try:
+            ctx_path.parent.mkdir(parents=True, exist_ok=True)
+            ctx_path.write_text(
+                json.dumps({
+                    "sender_id": sender_id,
+                    "peer_id": peer_id,
+                    "user_id": self._user_id,
+                    "session_id": self._bridge_session_id,
+                    "account_id": account_id,
+                }),
+                encoding="utf-8",
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("Failed to write bridge context file", exc_info=True)
+
     async def run_turn(
         self,
         prompt: str | list[dict[str, Any]],
@@ -236,6 +280,7 @@ class CodexStreamingSession:
         if self._closed or self._thread is None:
             raise StaleSessionError("Session is closed or not connected")
 
+        self._write_bridge_ctx(sender_id, peer_id, account_id)
         self.last_used_ns = time.monotonic_ns()
         self.turn_count += 1
 
@@ -247,30 +292,29 @@ class CodexStreamingSession:
         self._append_transcript("user", prompt_text)
 
         result = QueryResult()
-        state: dict[str, Any] = {}
+        state: dict[str, Any] = {"start_ns": time.perf_counter_ns()}
 
         try:
             async with _profile.span("codex_session.run_turn"):
                 start_ns = time.perf_counter_ns()
 
-                stream = self._thread.run(prompt_text)
+                from codex import TurnOptions
+
+                turn_opts_kwargs: dict[str, Any] = {}
+                effort_val = self._resolve_reasoning_effort()
+                if effort_val is not None:
+                    turn_opts_kwargs["effort"] = effort_val
+                stream = self._thread.run(
+                    prompt_text,
+                    TurnOptions(**turn_opts_kwargs) if turn_opts_kwargs else None,
+                )
 
                 for event in stream:
                     await translate_event(
                         event, on_stream_event, state=state,
                     )
 
-                    etype = type(event).__name__
-                    if etype == "ItemCompletedNotificationModel":
-                        item = event.params.item.root
-                        item_type = getattr(item, "type", None)
-                        if hasattr(item_type, "root"):
-                            item_type = item_type.root
-                        if item_type == "agent_message":
-                            result.text = getattr(item, "text", "") or ""
-
-                if result.text is None:
-                    result.text = state.get("final_text", "")
+                result.text = state.get("accumulated_text", "") or state.get("final_text", "")
 
                 elapsed_s = (time.perf_counter_ns() - start_ns) / 1e9
                 state["elapsed_s"] = elapsed_s
@@ -281,9 +325,24 @@ class CodexStreamingSession:
                     self._append_transcript("assistant", result.text)
 
                 token_usage = state.get("token_usage", {})
+                token_usage["tool_calls"] = state.get("tool_calls", 0)
                 if token_usage:
                     self.cumulative_tokens = (
                         token_usage.get("total_tokens", 0)
+                    )
+
+                from pip_agent.backends.codex_cli.event_translator import estimate_cost_usd
+                cost = estimate_cost_usd(self._model, token_usage)
+                result.cost_usd = cost
+
+                if on_stream_event is not None:
+                    await on_stream_event(
+                        "finalize",
+                        final_text=result.text or "",
+                        num_turns=self.turn_count,
+                        cost_usd=cost,
+                        usage=token_usage,
+                        elapsed_s=elapsed_s,
                     )
 
                 log.info(
@@ -353,17 +412,27 @@ class CodexStreamingSession:
             session_id=self._bridge_session_id,
             sender_id=self._sender_id,
             peer_id=self._peer_id,
+            user_id=self._user_id,
             account_id=self._account_id,
         )
 
     @staticmethod
-    def _resolve_api_key() -> str | None:
-        import os
-        return (
-            os.environ.get("CODEX_API_KEY")
-            or os.environ.get("OPENAI_API_KEY")
-            or None
-        )
+    def _resolve_credentials() -> tuple[str | None, str | None]:
+        from pip_agent.backends.codex_cli.bridge_env import resolve_codex_credentials
+        return resolve_codex_credentials()
+
+    @staticmethod
+    def _resolve_reasoning_effort() -> Any:
+        """Read ``codex_reasoning_effort`` from settings and wrap it."""
+        from codex.protocol import types as proto
+
+        from pip_agent.config import settings
+
+        _VALID = {"none", "minimal", "low", "medium", "high", "xhigh"}
+        raw = (settings.codex_reasoning_effort or "").strip().lower()
+        if raw and raw in _VALID:
+            return proto.ReasoningEffort(root=raw)  # type: ignore[arg-type]
+        return None
 
 
 def _blocks_to_text(blocks: list[dict[str, Any]]) -> str:

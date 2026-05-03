@@ -8,7 +8,6 @@ import pytest
 
 from pip_agent.backends.base import Capability
 
-
 # ---------------------------------------------------------------------------
 # get_backend() factory
 # ---------------------------------------------------------------------------
@@ -72,8 +71,8 @@ async def test_codex_health_check_installed():
 
 @pytest.mark.asyncio
 async def test_codex_run_query_delegates():
-    from pip_agent.backends.codex_cli import CodexBackend
     from pip_agent.backends.base import QueryResult
+    from pip_agent.backends.codex_cli import CodexBackend
 
     fake_result = QueryResult(text="hello from codex")
 

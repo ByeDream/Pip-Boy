@@ -34,6 +34,64 @@ from pip_agent.backends.base import StreamEventCallback
 
 log = logging.getLogger(__name__)
 
+# Per-1M-token pricing (USD). Reasoning tokens are billed as output
+# tokens — no separate multiplier. Higher reasoning effort just
+# produces more output tokens at the same per-token rate.
+#
+# Entries are matched longest-key-first so "gpt-5.4-mini" wins over
+# "gpt-5.4". Returns ``None`` for unknown models.
+_MODEL_PRICING: dict[str, tuple[float, float, float]] = {
+    # (input, cached_input, output) per 1M tokens
+    "gpt-5.5":       (5.00,   0.50,   30.00),
+    "gpt-5.4-pro":   (30.00,  3.00,  180.00),
+    "gpt-5.4":       (2.50,   0.25,   15.00),
+    "gpt-5.4-mini":  (0.75,   0.075,   4.50),
+    "gpt-5.3-codex": (1.75,   0.175,  14.00),
+    "gpt-5.2":       (1.75,   0.175,  14.00),
+    "o3":            (2.00,   0.50,    8.00),
+    "o3-mini":       (0.55,   0.14,    2.20),
+    "o4-mini":       (0.55,   0.14,    2.20),
+}
+
+_SORTED_PRICING = sorted(
+    _MODEL_PRICING.items(), key=lambda kv: len(kv[0]), reverse=True,
+)
+
+
+def estimate_cost_usd(
+    model: str | None,
+    usage: dict[str, int],
+) -> float | None:
+    """Estimate cost from token usage and model name.
+
+    Returns ``None`` when pricing is unknown for the model.
+    """
+    if not model or not usage:
+        return None
+
+    pricing = _MODEL_PRICING.get(model)
+    if pricing is None:
+        for key, val in _SORTED_PRICING:
+            if key in model:
+                pricing = val
+                break
+    if pricing is None:
+        return None
+
+    inp_price, cached_price, out_price = pricing
+    input_tok = usage.get("input_tokens", 0)
+    cached_tok = usage.get("cached_input_tokens", 0)
+    output_tok = usage.get("output_tokens", 0)
+    net_input = max(input_tok - cached_tok, 0)
+
+    cost = (
+        net_input * inp_price / 1_000_000
+        + cached_tok * cached_price / 1_000_000
+        + output_tok * out_price / 1_000_000
+    )
+    return round(cost, 6)
+
+
 # Codex item.type → Pip-Boy standard tool name (contract §4)
 _TOOL_NAME_MAP: dict[str, str] = {
     "command_execution": "Bash",
@@ -88,6 +146,8 @@ async def translate_event(
     if etype == "ItemAgentMessageDeltaNotification":
         delta = getattr(event.params, "delta", "") or ""
         if delta:
+            state.setdefault("accumulated_text", "")
+            state["accumulated_text"] += delta
             await cb("text_delta", text=delta)
         return
 
@@ -105,16 +165,18 @@ async def translate_event(
     if etype == "ItemStartedNotificationModel":
         item = event.params.item.root
         item_type = _get_item_type(item)
+        log.debug("codex item_started: type=%s", item_type)
 
-        if item_type == "command_execution":
+        if item_type in ("command_execution", "commandExecution"):
             cmd = getattr(item, "command", "") or ""
+            state["tool_calls"] = state.get("tool_calls", 0) + 1
             await cb(
                 "tool_use",
                 id=getattr(item, "id", ""),
                 name="Bash",
                 input={"command": cmd},
             )
-        elif item_type == "file_change":
+        elif item_type in ("file_change", "fileChange"):
             changes = getattr(item, "changes", []) or []
             for change in changes:
                 kind = getattr(change, "kind", "update")
@@ -122,13 +184,14 @@ async def translate_event(
                     kind = kind.root
                 path = getattr(change, "path", "")
                 tool_name = _FILE_KIND_MAP.get(str(kind), "Edit")
+                state["tool_calls"] = state.get("tool_calls", 0) + 1
                 await cb(
                     "tool_use",
                     id=getattr(item, "id", ""),
                     name=tool_name,
                     input={"path": path, "kind": str(kind)},
                 )
-        elif item_type == "mcp_tool_call":
+        elif item_type in ("mcp_tool_call", "mcpToolCall"):
             tool = getattr(item, "tool", "") or ""
             arguments = getattr(item, "arguments", {}) or {}
             if isinstance(arguments, str):
@@ -137,14 +200,16 @@ async def translate_event(
                     arguments = json.loads(arguments)
                 except (ValueError, TypeError):
                     arguments = {"raw": arguments}
+            state["tool_calls"] = state.get("tool_calls", 0) + 1
             await cb(
                 "tool_use",
                 id=getattr(item, "id", ""),
                 name=tool,
                 input=arguments,
             )
-        elif item_type == "web_search":
+        elif item_type in ("web_search", "webSearch"):
             query = getattr(item, "query", "") or ""
+            state["tool_calls"] = state.get("tool_calls", 0) + 1
             await cb(
                 "tool_use",
                 id=getattr(item, "id", ""),
@@ -166,7 +231,7 @@ async def translate_event(
         item = event.params.item.root
         item_type = _get_item_type(item)
 
-        if item_type == "command_execution":
+        if item_type in ("command_execution", "commandExecution"):
             exit_code = getattr(item, "exitCode", None)
             is_error = exit_code is not None and exit_code != 0
             await cb(
@@ -174,26 +239,26 @@ async def translate_event(
                 tool_use_id=getattr(item, "id", ""),
                 is_error=is_error,
             )
-        elif item_type == "file_change":
+        elif item_type in ("file_change", "fileChange"):
             await cb(
                 "tool_result",
                 tool_use_id=getattr(item, "id", ""),
                 is_error=_get_status(item) != "completed",
             )
-        elif item_type == "mcp_tool_call":
+        elif item_type in ("mcp_tool_call", "mcpToolCall"):
             error = getattr(item, "error", None)
             await cb(
                 "tool_result",
                 tool_use_id=getattr(item, "id", ""),
                 is_error=bool(error),
             )
-        elif item_type == "web_search":
+        elif item_type in ("web_search", "webSearch"):
             await cb(
                 "tool_result",
                 tool_use_id=getattr(item, "id", ""),
                 is_error=False,
             )
-        elif item_type == "agent_message":
+        elif item_type in ("agent_message", "agentMessage"):
             text = getattr(item, "text", "") or ""
             if text:
                 state["final_text"] = text
@@ -232,25 +297,19 @@ async def translate_event(
             if total is not None:
                 state["token_usage"] = {
                     "input_tokens": getattr(total, "inputTokens", 0) or 0,
+                    "cached_input_tokens": getattr(total, "cachedInputTokens", 0) or 0,
                     "output_tokens": getattr(total, "outputTokens", 0) or 0,
+                    "reasoning_tokens": getattr(total, "reasoningOutputTokens", 0) or 0,
                     "total_tokens": getattr(total, "totalTokens", 0) or 0,
                 }
         return
 
-    # -- Turn completed (finalize) ---------------------------------------
+    # -- Turn completed (bookkeeping) -------------------------------------
+    # Finalize is emitted by the caller AFTER the stream loop ends, so
+    # that post-loop data (tool counts from stream.items, elapsed_s) is
+    # available.  We only mark the turn as done in state here.
     if etype == "TurnCompletedNotificationModel":
-        usage = state.get("token_usage", {})
-        final_text = state.get("final_text", "")
-        cost_usd = None
-
-        await cb(
-            "finalize",
-            final_text=final_text,
-            num_turns=1,
-            cost_usd=cost_usd,
-            usage=usage,
-            elapsed_s=state.get("elapsed_s", 0),
-        )
+        state["turn_completed"] = True
         return
 
     # -- Turn started (bookkeeping only) ---------------------------------
@@ -258,4 +317,4 @@ async def translate_event(
         return
 
     # -- All other events: log and skip ----------------------------------
-    log.debug("codex event_translator: unhandled event type %s", etype)
+    log.debug("codex event_translator: unhandled event %s", etype)

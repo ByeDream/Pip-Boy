@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -13,7 +12,6 @@ from pip_agent.backends.codex_cli.plugins import (
     _bundled_cli,
     health_check,
 )
-
 
 # ---------------------------------------------------------------------------
 # _bundled_cli resolution

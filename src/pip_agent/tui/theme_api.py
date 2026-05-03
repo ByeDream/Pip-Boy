@@ -139,9 +139,9 @@ class ThemeManifest:
 
     ``footer_template`` is rendered with str.format()-style fields:
     ``{turns}``, ``{cost}``, ``{elapsed_s}``, ``{tokens_in}``,
-    ``{tokens_out}``, ``{tools}``. Themes may use any subset; missing
-    fields render as empty strings rather than raising, so future
-    additions don't break older themes.
+    ``{tokens_out}``, ``{tools}``, ``{effort}``. Themes may use any
+    subset; missing fields render as empty strings rather than raising,
+    so future additions don't break older themes.
     """
 
     name: str
@@ -155,7 +155,7 @@ class ThemeManifest:
     show_status_bar: bool = True
     show_todo_pane: bool = True
     footer_template: str = (
-        "[{tools} tools - {turns} turns - {elapsed_s}s - ${cost}]"
+        "[{tools} tools - {turns} turns - {elapsed_s}s - ${cost}{effort}]"
     )
 
 
@@ -315,7 +315,7 @@ def validate_manifest_dict(
     )
     footer_template = theme.get(
         "footer_template",
-        "[{tools} tools - {turns} turns - {elapsed_s}s - ${cost}]",
+        "[{tools} tools - {turns} turns - {elapsed_s}s - ${cost}{effort}]",
     )
     if not isinstance(footer_template, str):
         raise ThemeValidationError(

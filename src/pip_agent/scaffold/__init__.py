@@ -399,7 +399,7 @@ def ensure_claude_model_overrides() -> None:
         return
 
     overrides: dict[str, str] = {}
-    for model in (settings.model_t0, settings.model_t1, settings.model_t2):
+    for model in (settings.claude_model_t0, settings.claude_model_t1, settings.claude_model_t2):
         name = (model or "").strip()
         if not name:
             continue

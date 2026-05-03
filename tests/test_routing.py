@@ -92,7 +92,7 @@ class TestAgentConfig:
         # registry to the head of the candidate chain.
         from pip_agent import config
 
-        monkeypatch.setattr(config.settings, "model_t0", "claude-test-strong")
+        monkeypatch.setattr(config.settings, "claude_model_t0", "claude-test-strong")
         cfg = AgentConfig(
             id="helper", name="Stella",
             system_body="You are {agent_name}, an assistant running {model_name}.",

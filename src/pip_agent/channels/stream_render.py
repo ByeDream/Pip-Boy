@@ -269,11 +269,19 @@ class WecomStreamRenderer:
         cost_text = f"${cost_usd:.3f}" if cost_usd is not None else "$0.000"
         in_tok = int(usage.get("input_tokens") or 0)
         out_tok = int(usage.get("output_tokens") or 0)
-        # Cache reads count as input from the user's perspective;
-        # pipi's footer hid them, we follow suit to match the look.
+        reasoning_tok = int(usage.get("reasoning_tokens") or 0)
+        from pip_agent.config import settings as _settings
+
+        effort_seg = (
+            f" · effort:{_settings.codex_reasoning_effort or 'medium'}"
+            if _settings.backend == "codex_cli"
+            else ""
+        )
         line1 = (
             f"⚙ {self._tool_count} tools · {num_turns} turn"
             f"{'s' if num_turns != 1 else ''} · {elapsed_s:.1f}s · {cost_text}"
+            f"{effort_seg}"
         )
-        line2 = f"📊 {in_tok} in / {out_tok} out"
+        reasoning_seg = f" ({reasoning_tok} reasoning)" if reasoning_tok else ""
+        line2 = f"📊 {in_tok} in / {out_tok} out{reasoning_seg}"
         return f"{line1}\n{line2}"

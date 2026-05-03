@@ -9,7 +9,6 @@ import pytest
 
 from pip_agent.backends.codex_cli.event_translator import translate_event
 
-
 # ---------------------------------------------------------------------------
 # Helpers — lightweight fakes for SDK notification objects
 # ---------------------------------------------------------------------------
@@ -358,6 +357,7 @@ async def test_token_usage_tracked():
 
 @pytest.mark.asyncio
 async def test_finalize():
+    """TurnCompleted only marks state; caller emits the real finalize."""
     cb = AsyncMock()
     state: dict[str, Any] = {"final_text": "All done.", "elapsed_s": 1.5}
     ev = _make_event(
@@ -365,10 +365,8 @@ async def test_finalize():
         _FakeParams(turn=None),
     )
     await translate_event(ev, cb, state=state)
-    cb.assert_awaited_once()
-    call_args = cb.call_args
-    assert call_args[0][0] == "finalize"
-    assert call_args[1]["final_text"] == "All done."
+    cb.assert_not_awaited()
+    assert state.get("turn_completed") is True
 
 
 # ---------------------------------------------------------------------------

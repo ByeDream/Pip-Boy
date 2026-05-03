@@ -7,13 +7,12 @@ factory resolution, protocol conformance, capability gating, error mapping.
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from pip_agent.backends import get_backend
 from pip_agent.backends.base import (
-    AgentBackend,
     AuthenticationError,
     BackendError,
     BackendTimeoutError,
@@ -22,9 +21,7 @@ from pip_agent.backends.base import (
     ModelInvalidError,
     QueryResult,
     StaleSessionError,
-    StreamingSessionProtocol,
 )
-
 
 # ---------------------------------------------------------------------------
 # Factory smoke tests
@@ -262,17 +259,17 @@ class TestProtocolConformance:
 # ---------------------------------------------------------------------------
 
 class TestSettingsBackend:
-    def test_default_is_claude_code(self):
+    def test_default_is_codex_cli(self):
         from pip_agent.config import Settings
 
-        s = Settings()
+        default = Settings.model_fields["backend"].default
+        assert default == "codex_cli"
+
+    def test_claude_code_value(self):
+        from pip_agent.config import Settings
+
+        s = Settings(backend="claude_code")
         assert s.backend == "claude_code"
-
-    def test_codex_cli_value(self):
-        from pip_agent.config import Settings
-
-        s = Settings(backend="codex_cli")
-        assert s.backend == "codex_cli"
 
     def test_env_override(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("BACKEND", "codex_cli")

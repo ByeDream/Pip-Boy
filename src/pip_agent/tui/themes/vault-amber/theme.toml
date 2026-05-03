@@ -14,7 +14,7 @@ description = "Amber-on-black retro terminal, HHGTTG flavour (DON'T PANIC / 42).
 show_art = true
 show_app_log = true
 show_status_bar = true
-footer_template = "<{tools} tools · {turns} turns · {elapsed_s}s · ${cost}>"
+footer_template = "<{tools} tools · {turns} turns · {elapsed_s}s · ${cost}{effort}>"
 
 [palette]
 background = "#1a0e00"

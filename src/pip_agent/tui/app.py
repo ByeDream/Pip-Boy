@@ -929,6 +929,13 @@ class PipBoyTuiApp(App[None]):
         cost_str = f"{event.cost_usd:.4f}" if event.cost_usd else "0.0000"
         usage = event.usage or {}
         try:
+            from pip_agent.config import settings as _settings
+
+            effort = (
+                f" · effort:{_settings.codex_reasoning_effort or 'medium'}"
+                if _settings.backend == "codex_cli"
+                else ""
+            )
             return template.format(
                 turns=event.num_turns,
                 cost=cost_str,
@@ -936,6 +943,7 @@ class PipBoyTuiApp(App[None]):
                 tokens_in=usage.get("input_tokens", 0),
                 tokens_out=usage.get("output_tokens", 0),
                 tools=usage.get("tool_calls", 0),
+                effort=effort,
             )
         except (KeyError, IndexError):
             return f"[turns={event.num_turns} cost=${cost_str}]"

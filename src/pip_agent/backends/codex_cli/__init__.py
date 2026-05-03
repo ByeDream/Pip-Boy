@@ -76,6 +76,7 @@ class CodexBackend:
             resume_session_id=resume_session_id,
             sender_id=getattr(mcp_ctx, "sender_id", "") or "",
             peer_id=getattr(mcp_ctx, "peer_id", "") or "",
+            user_id=getattr(mcp_ctx, "user_id", "") or "",
             account_id=getattr(mcp_ctx, "account_id", "") or "",
         )
         await session.connect()

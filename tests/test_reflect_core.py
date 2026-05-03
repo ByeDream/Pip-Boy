@@ -35,7 +35,7 @@ def _stub_t1_model(monkeypatch):
     happy."""
     from pip_agent import config
 
-    monkeypatch.setattr(config.settings, "model_t1", "fake-t1")
+    monkeypatch.setattr(config.settings, "claude_model_t1", "fake-t1")
 
 
 def _write_transcript(path: Path, lines: list[str]) -> None:

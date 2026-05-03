@@ -28,18 +28,35 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
+def _read_bridge_ctx(pip_dir: Path) -> dict[str, str]:
+    """Read per-turn identity from the context file written by the host.
+
+    The host's ``CodexStreamingSession`` writes this file before each
+    turn so the long-lived bridge process always sees fresh identity
+    data — env vars alone are stale after the initial spawn.
+    """
+    ctx_path = pip_dir / "codex_bridge_ctx.json"
+    try:
+        if ctx_path.is_file():
+            return json.loads(ctx_path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        log.debug("Failed to read bridge context file", exc_info=True)
+    return {}
+
+
 def _build_mcp_ctx() -> Any:
     """Construct a ``McpContext`` for tool handlers in the STDIO subprocess.
 
     The STDIO MCP bridge runs as a child process of the Codex app-server,
     so it cannot share the host's live in-process state (channel objects,
     TUI app, asyncio-based scheduler).  We reconstruct what we can from
-    disk and environment variables:
+    disk and a context file written by the host before each turn:
 
     * ``memory_store`` — loaded from ``.pip/`` (full read/write)
     * ``workdir`` — from ``PIP_WORKDIR`` env var
-    * ``sender_id`` / ``peer_id`` / ``session_id`` / ``account_id`` —
-      from env vars set by ``ensure_codex_config``
+    * ``sender_id`` / ``peer_id`` / ``user_id`` / ``session_id`` /
+      ``account_id`` — from ``.pip/codex_bridge_ctx.json`` (primary)
+      with env-var fallback for backwards compatibility
     Limitations (documented in dual-backend-contract.md §3.6):
     * ``channel`` / ``tui_app`` are ``None`` — tools that require a live
       channel (``send_file``) will report unavailability
@@ -58,14 +75,21 @@ def _build_mcp_ctx() -> Any:
         from pip_agent.memory import MemoryStore
 
         if pip_dir.exists():
-            memory_store = MemoryStore(pip_dir)
+            memory_store = MemoryStore(
+                agent_dir=pip_dir,
+                workspace_pip_dir=pip_dir,
+            )
     except Exception:  # noqa: BLE001
-        pass
+        log.warning("MCP bridge: failed to init MemoryStore", exc_info=True)
 
-    sender_id = os.environ.get("PIP_SENDER_ID", "")
-    peer_id = os.environ.get("PIP_PEER_ID", "")
+    bridge_ctx = _read_bridge_ctx(pip_dir)
 
-    user_id = os.environ.get("PIP_USER_ID", "")
+    sender_id = bridge_ctx.get("sender_id") or os.environ.get("PIP_SENDER_ID", "")
+    peer_id = bridge_ctx.get("peer_id") or os.environ.get("PIP_PEER_ID", "")
+    user_id = bridge_ctx.get("user_id") or os.environ.get("PIP_USER_ID", "")
+    session_id = bridge_ctx.get("session_id") or os.environ.get("PIP_SESSION_ID", "")
+    account_id = bridge_ctx.get("account_id") or os.environ.get("PIP_ACCOUNT_ID", "")
+
     if not user_id and memory_store and sender_id:
         try:
             profile = memory_store.find_profile_by_sender(
@@ -83,9 +107,25 @@ def _build_mcp_ctx() -> Any:
         sender_id=sender_id,
         peer_id=peer_id,
         user_id=user_id,
-        session_id=os.environ.get("PIP_SESSION_ID", ""),
-        account_id=os.environ.get("PIP_ACCOUNT_ID", ""),
+        session_id=session_id,
+        account_id=account_id,
     )
+
+
+def _refresh_ctx_identity(ctx: Any) -> None:
+    """Re-read identity fields from the bridge context file.
+
+    Called before every tool invocation so the long-lived bridge
+    process picks up identity changes between turns.
+    """
+    workdir = Path(os.environ.get("PIP_WORKDIR", os.getcwd()))
+    bridge_ctx = _read_bridge_ctx(workdir / ".pip")
+    if not bridge_ctx:
+        return
+    for field in ("sender_id", "peer_id", "user_id", "session_id", "account_id"):
+        val = bridge_ctx.get(field)
+        if val and hasattr(ctx, field):
+            setattr(ctx, field, val)
 
 
 def _collect_sdk_tools(ctx: Any) -> list[Any]:
@@ -146,6 +186,8 @@ def _run_server() -> None:
     async def handle_call_tool(
         name: str, arguments: dict[str, Any] | None
     ) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
+        _refresh_ctx_identity(ctx)
+
         handler = tool_map.get(name)
         if handler is None:
             return [types.TextContent(type="text", text=f"Unknown tool: {name}")]

@@ -62,10 +62,10 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Which backend to use: ``claude_code`` (default) or ``codex_cli``.
-    # Set via ``BACKEND=codex_cli`` in ``.env`` or env var.
+    # Which backend to use: ``codex_cli`` (default) or ``claude_code``.
+    # Set via ``BACKEND=claude_code`` in ``.env`` or env var.
     # ``get_backend()`` in ``pip_agent.backends`` reads this value.
-    backend: str = Field(default="claude_code")
+    backend: str = Field(default="codex_cli")
 
     # The single Anthropic credential. The header it goes out as
     # (``x-api-key`` vs ``Authorization: Bearer``) is decided by whether
@@ -75,16 +75,32 @@ class Settings(BaseSettings):
     anthropic_api_key: str = Field(default="")
     anthropic_base_url: str = Field(default="")
 
-    # Three model tiers, ordered strongest to cheapest. Pip-Boy never uses
-    # a concrete model name at a call site — every site picks a tier
-    # (t0/t1/t2) and resolves through :mod:`pip_agent.models`. Async /
-    # background tasks (heartbeat, cron, reflect, dream) are pinned to
-    # fixed tiers in code; persona-driven turns pick their tier from
-    # ``persona.md``. Failures degrade DOWN the chain (t0 -> t1 -> t2);
-    # never up.
-    model_t0: str = Field(default="")
-    model_t1: str = Field(default="")
-    model_t2: str = Field(default="")
+    # Codex backend credentials (used when ``backend = codex_cli``).
+    # Falls back to ``OPENAI_API_KEY`` / ``OPENAI_BASE_URL`` env vars
+    # when these are empty. When set, these take precedence over any
+    # global ``~/.codex/config.toml`` configuration because they are
+    # injected directly into ``CodexOptions(api_key=..., base_url=...)``.
+    codex_api_key: str = Field(default="")
+    codex_base_url: str = Field(default="")
+
+    # --- Codex model tiers (used when ``backend = codex_cli``) ---
+    # Three model names, ordered strongest -> cheapest. ``resolve_chain``
+    # picks the matching set automatically based on ``backend``.
+    codex_model_t0: str = Field(default="")
+    codex_model_t1: str = Field(default="")
+    codex_model_t2: str = Field(default="")
+
+    # Reasoning effort for the Codex backend. Controls how much "thinking"
+    # the model does per turn. Valid: none, minimal, low, medium, high, xhigh.
+    # Higher effort → more reasoning (output) tokens → better quality but
+    # higher cost and latency. Reasoning tokens are billed as output tokens.
+    codex_reasoning_effort: str = Field(default="medium")
+
+    # --- Claude model tiers (used when ``backend = claude_code``) ---
+    # Parallel set for the Claude Code backend; same fallback semantics.
+    claude_model_t0: str = Field(default="")
+    claude_model_t1: str = Field(default="")
+    claude_model_t2: str = Field(default="")
 
     # Controls *only* the logging threshold — see
     # ``pip_agent.__main__._configure_logging``. Streaming agent replies

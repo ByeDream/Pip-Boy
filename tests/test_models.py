@@ -3,7 +3,7 @@
 Locking these in matters because :func:`is_model_invalid_error` is the
 gate that decides "burn through tier candidates" vs "surface to the
 user". A regression in either direction is bad: false negatives leave
-misconfigured ``MODEL_T*`` failures unrecoverable; false positives
+misconfigured ``*_MODEL_T*`` failures unrecoverable; false positives
 swallow auth/rate-limit errors as model issues and silently spend the
 whole tier chain on each turn.
 """
@@ -47,9 +47,9 @@ class TestResolveChain:
     def test_t0_descends_through_all_three(self, monkeypatch):
         from pip_agent import config
 
-        monkeypatch.setattr(config.settings, "model_t0", "strong")
-        monkeypatch.setattr(config.settings, "model_t1", "medium")
-        monkeypatch.setattr(config.settings, "model_t2", "cheap")
+        monkeypatch.setattr(config.settings, "claude_model_t0", "strong")
+        monkeypatch.setattr(config.settings, "claude_model_t1", "medium")
+        monkeypatch.setattr(config.settings, "claude_model_t2", "cheap")
         assert resolve_chain("t0") == ["strong", "medium", "cheap"]
 
     def test_t1_skips_t0(self, monkeypatch):
@@ -57,42 +57,42 @@ class TestResolveChain:
         # whole point is "downgrade only".
         from pip_agent import config
 
-        monkeypatch.setattr(config.settings, "model_t0", "strong")
-        monkeypatch.setattr(config.settings, "model_t1", "medium")
-        monkeypatch.setattr(config.settings, "model_t2", "cheap")
+        monkeypatch.setattr(config.settings, "claude_model_t0", "strong")
+        monkeypatch.setattr(config.settings, "claude_model_t1", "medium")
+        monkeypatch.setattr(config.settings, "claude_model_t2", "cheap")
         assert resolve_chain("t1") == ["medium", "cheap"]
 
     def test_t2_pins_to_one(self, monkeypatch):
         from pip_agent import config
 
-        monkeypatch.setattr(config.settings, "model_t0", "strong")
-        monkeypatch.setattr(config.settings, "model_t1", "medium")
-        monkeypatch.setattr(config.settings, "model_t2", "cheap")
+        monkeypatch.setattr(config.settings, "claude_model_t0", "strong")
+        monkeypatch.setattr(config.settings, "claude_model_t1", "medium")
+        monkeypatch.setattr(config.settings, "claude_model_t2", "cheap")
         assert resolve_chain("t2") == ["cheap"]
 
     def test_empty_entries_are_skipped(self, monkeypatch):
         from pip_agent import config
 
-        monkeypatch.setattr(config.settings, "model_t0", "")
-        monkeypatch.setattr(config.settings, "model_t1", "  ")
-        monkeypatch.setattr(config.settings, "model_t2", "cheap")
+        monkeypatch.setattr(config.settings, "claude_model_t0", "")
+        monkeypatch.setattr(config.settings, "claude_model_t1", "  ")
+        monkeypatch.setattr(config.settings, "claude_model_t2", "cheap")
         assert resolve_chain("t0") == ["cheap"]
 
     def test_primary_model_is_chain_head(self, monkeypatch):
         from pip_agent import config
 
-        monkeypatch.setattr(config.settings, "model_t0", "")
-        monkeypatch.setattr(config.settings, "model_t1", "medium")
-        monkeypatch.setattr(config.settings, "model_t2", "cheap")
+        monkeypatch.setattr(config.settings, "claude_model_t0", "")
+        monkeypatch.setattr(config.settings, "claude_model_t1", "medium")
+        monkeypatch.setattr(config.settings, "claude_model_t2", "cheap")
         # Empty t0 -> falls through to t1's name as the head of t0's chain.
         assert primary_model("t0") == "medium"
 
     def test_primary_model_empty_when_unconfigured(self, monkeypatch):
         from pip_agent import config
 
-        monkeypatch.setattr(config.settings, "model_t0", "")
-        monkeypatch.setattr(config.settings, "model_t1", "")
-        monkeypatch.setattr(config.settings, "model_t2", "")
+        monkeypatch.setattr(config.settings, "claude_model_t0", "")
+        monkeypatch.setattr(config.settings, "claude_model_t1", "")
+        monkeypatch.setattr(config.settings, "claude_model_t2", "")
         assert primary_model("t0") == ""
 
 
@@ -257,8 +257,8 @@ class TestWithModelFallback:
     def test_first_candidate_succeeds(self, monkeypatch):
         from pip_agent import config
 
-        monkeypatch.setattr(config.settings, "model_t1", "primary")
-        monkeypatch.setattr(config.settings, "model_t2", "fallback")
+        monkeypatch.setattr(config.settings, "claude_model_t1", "primary")
+        monkeypatch.setattr(config.settings, "claude_model_t2", "fallback")
         seen: list[str] = []
 
         def call(model: str) -> str:
@@ -271,8 +271,8 @@ class TestWithModelFallback:
     def test_falls_through_invalid_to_next(self, monkeypatch):
         from pip_agent import config
 
-        monkeypatch.setattr(config.settings, "model_t1", "primary")
-        monkeypatch.setattr(config.settings, "model_t2", "fallback")
+        monkeypatch.setattr(config.settings, "claude_model_t1", "primary")
+        monkeypatch.setattr(config.settings, "claude_model_t2", "fallback")
         seen: list[str] = []
 
         def call(model: str) -> str:
@@ -287,8 +287,8 @@ class TestWithModelFallback:
     def test_does_not_swallow_unrelated_errors(self, monkeypatch):
         from pip_agent import config
 
-        monkeypatch.setattr(config.settings, "model_t1", "primary")
-        monkeypatch.setattr(config.settings, "model_t2", "fallback")
+        monkeypatch.setattr(config.settings, "claude_model_t1", "primary")
+        monkeypatch.setattr(config.settings, "claude_model_t2", "fallback")
         seen: list[str] = []
 
         def call(model: str) -> str:
@@ -304,9 +304,9 @@ class TestWithModelFallback:
     def test_empty_chain_raises(self, monkeypatch):
         from pip_agent import config
 
-        monkeypatch.setattr(config.settings, "model_t0", "")
-        monkeypatch.setattr(config.settings, "model_t1", "")
-        monkeypatch.setattr(config.settings, "model_t2", "")
+        monkeypatch.setattr(config.settings, "claude_model_t0", "")
+        monkeypatch.setattr(config.settings, "claude_model_t1", "")
+        monkeypatch.setattr(config.settings, "claude_model_t2", "")
 
         with pytest.raises(RuntimeError, match="No model configured"):
             with_model_fallback("t0", lambda m: m)
@@ -314,8 +314,8 @@ class TestWithModelFallback:
     def test_all_candidates_invalid_raises_last(self, monkeypatch):
         from pip_agent import config
 
-        monkeypatch.setattr(config.settings, "model_t1", "a")
-        monkeypatch.setattr(config.settings, "model_t2", "b")
+        monkeypatch.setattr(config.settings, "claude_model_t1", "a")
+        monkeypatch.setattr(config.settings, "claude_model_t2", "b")
 
         def call(model: str) -> str:
             raise RuntimeError(f"模型不存在: {model}")

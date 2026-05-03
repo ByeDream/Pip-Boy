@@ -19,11 +19,9 @@ from pip_agent.backends.base import Capability
 from pip_agent.channels import InboundMessage
 from pip_agent.host_commands import (
     CommandContext,
-    CommandResult,
     dispatch_command,
 )
 from pip_agent.routing import AgentRegistry, BindingTable
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

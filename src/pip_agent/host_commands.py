@@ -379,6 +379,8 @@ _HELP_COMMON = (
     "### Session & memory\n\n"
     "- **`/help`** — Show this help.\n"
     "- **`/status`** — Current agent, session, and binding.\n"
+    "- **`/effort [level]`** — Show or set Codex reasoning effort "
+    "(`none`|`minimal`|`low`|`medium`|`high`|`xhigh`). Claude: `-`.\n"
     "- **`/memory`** — Memory statistics for the current agent.\n"
     "- **`/axioms`** — Current judgment principles.\n"
     "- **`/recall <query>`** — Search stored memories.\n"
@@ -501,10 +503,17 @@ def _cmd_status(ctx: CommandContext, _args: str) -> CommandResult:
     model_display = f"{tier} ({resolved})" if resolved else f"{tier} (no model configured)"
     from pip_agent.config import settings as _settings
 
+    effort_display = (
+        (_settings.codex_reasoning_effort or "medium")
+        if _settings.backend == "codex_cli"
+        else "-"
+    )
+
     lines = [
         f"Agent: {agent.name or agent.id} ({agent.id})",
         f"Backend: {_settings.backend}",
         f"Model: {model_display}",
+        f"Effort: {effort_display}",
         f"Scope: {effective.effective_dm_scope}",
         f"Session: {sk}",
         f"Channel: {inbound.channel}",
@@ -514,6 +523,46 @@ def _cmd_status(ctx: CommandContext, _args: str) -> CommandResult:
         lines.append(f"Guild: {inbound.guild_id}")
     lines.append(f"Peer: {inbound.peer_id}")
     return CommandResult(handled=True, response="\n".join(lines))
+
+
+# ---------------------------------------------------------------------------
+# /effort — live reasoning effort toggle (Codex only)
+# ---------------------------------------------------------------------------
+
+_VALID_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
+
+
+def _cmd_effort(ctx: CommandContext, args: str) -> CommandResult:
+    from pip_agent.config import settings as _settings
+
+    if _settings.backend != "codex_cli":
+        return CommandResult(
+            handled=True,
+            response="Reasoning effort is a Codex-only feature. Current backend: "
+            f"`{_settings.backend}` (effort: `-`).",
+        )
+
+    level = args.strip().lower()
+    if not level:
+        current = _settings.codex_reasoning_effort or "medium"
+        return CommandResult(
+            handled=True,
+            response=f"Current reasoning effort: **{current}**\n\n"
+            f"Valid levels: {', '.join(sorted(_VALID_EFFORTS))}",
+        )
+
+    if level not in _VALID_EFFORTS:
+        return CommandResult(
+            handled=True,
+            response=f"Unknown effort level `{level}`. "
+            f"Valid: {', '.join(sorted(_VALID_EFFORTS))}",
+        )
+
+    _settings.codex_reasoning_effort = level
+    return CommandResult(
+        handled=True,
+        response=f"Reasoning effort set to **{level}** (takes effect next turn).",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -865,7 +914,7 @@ _CREATE_USAGE = (
     "simple case. Provide --id to decouple them.\n"
     "Defaults: --name <id>, --model t0, --dm_scope per-guild.\n"
     "--model picks a tier (t0 strongest, t2 cheapest); concrete model "
-    "names live in MODEL_T0/MODEL_T1/MODEL_T2 in .env.\n"
+    "names live in CODEX_MODEL_T*/CLAUDE_MODEL_T* in .env.\n"
     "Valid scopes: main | per-guild | per-guild-peer."
 )
 
@@ -2652,6 +2701,7 @@ _HANDLERS: dict[
 ] = {
     "/help": _cmd_help,
     "/status": _cmd_status,
+    "/effort": _cmd_effort,
     "/memory": _cmd_memory,
     "/axioms": _cmd_axioms,
     "/recall": _cmd_recall,
