@@ -29,11 +29,24 @@ log = logging.getLogger(__name__)
 
 
 def _build_mcp_ctx() -> Any:
-    """Construct a minimal ``McpContext`` for tool handlers.
+    """Construct a ``McpContext`` for tool handlers in the STDIO subprocess.
 
-    In STDIO mode we can't share the host's live state, so we create
-    a standalone context with the memory store loaded from the
-    workspace's ``.pip/`` directory.
+    The STDIO MCP bridge runs as a child process of the Codex app-server,
+    so it cannot share the host's live in-process state (channel objects,
+    TUI app, asyncio-based scheduler).  We reconstruct what we can from
+    disk and environment variables:
+
+    * ``memory_store`` — loaded from ``.pip/`` (full read/write)
+    * ``workdir`` — from ``PIP_WORKDIR`` env var
+    * ``sender_id`` / ``peer_id`` / ``session_id`` / ``account_id`` —
+      from env vars set by ``ensure_codex_config``
+    * ``scheduler`` — read-only snapshot from ``cron.json``
+
+    Limitations (documented in dual-backend-contract.md §3.6):
+    * ``channel`` / ``tui_app`` are ``None`` — tools that require a live
+      channel (``send_file``) will report unavailability
+    * ``scheduler`` is a snapshot, not the live instance — cron mutations
+      are picked up on next host restart
     """
     from pip_agent.mcp_tools import McpContext
 
@@ -66,6 +79,10 @@ def _build_mcp_ctx() -> Any:
         memory_store=memory_store,
         workdir=workdir,
         scheduler=scheduler,
+        sender_id=os.environ.get("PIP_SENDER_ID", ""),
+        peer_id=os.environ.get("PIP_PEER_ID", ""),
+        session_id=os.environ.get("PIP_SESSION_ID", ""),
+        account_id=os.environ.get("PIP_ACCOUNT_ID", ""),
     )
 
 

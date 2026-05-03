@@ -224,14 +224,17 @@ async def translate_event(
         return
 
     # -- Token usage update (internal bookkeeping) -----------------------
+    # SDK field path: params.tokenUsage.total.{inputTokens,outputTokens,...}
     if etype == "ThreadTokenUsageUpdatedNotificationModel":
-        usage = getattr(event.params, "usage", None)
-        if usage is not None:
-            state["token_usage"] = {
-                "input_tokens": getattr(usage, "inputTokens", 0) or 0,
-                "output_tokens": getattr(usage, "outputTokens", 0) or 0,
-                "total_tokens": getattr(usage, "totalTokens", 0) or 0,
-            }
+        token_usage = getattr(event.params, "tokenUsage", None)
+        if token_usage is not None:
+            total = getattr(token_usage, "total", None)
+            if total is not None:
+                state["token_usage"] = {
+                    "input_tokens": getattr(total, "inputTokens", 0) or 0,
+                    "output_tokens": getattr(total, "outputTokens", 0) or 0,
+                    "total_tokens": getattr(total, "totalTokens", 0) or 0,
+                }
         return
 
     # -- Turn completed (finalize) ---------------------------------------

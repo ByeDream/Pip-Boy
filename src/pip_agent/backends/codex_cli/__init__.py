@@ -48,6 +48,7 @@ class CodexBackend:
 
         return await _run(
             prompt,
+            model_chain=model_chain,
             session_id=session_id,
             system_prompt_append=system_prompt_append,
             cwd=cwd,
@@ -70,6 +71,7 @@ class CodexBackend:
             session_key=session_key,
             cwd=cwd,
             system_prompt_append=system_prompt_append,
+            model=model_chain[0] if model_chain else None,
             resume_session_id=resume_session_id,
         )
         await session.connect()

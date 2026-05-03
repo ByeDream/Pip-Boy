@@ -323,11 +323,13 @@ class TestTokenUsageTracking:
 
         token_event = MagicMock()
         type(token_event).__name__ = "ThreadTokenUsageUpdatedNotificationModel"
-        usage = MagicMock()
-        usage.inputTokens = 100
-        usage.outputTokens = 50
-        usage.totalTokens = 150
-        token_event.params.usage = usage
+        total = MagicMock()
+        total.inputTokens = 100
+        total.outputTokens = 50
+        total.totalTokens = 150
+        token_usage = MagicMock()
+        token_usage.total = total
+        token_event.params.tokenUsage = token_usage
 
         done_event = MagicMock()
         type(done_event).__name__ = "TurnCompletedNotificationModel"

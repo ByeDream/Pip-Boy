@@ -12,13 +12,17 @@ from pathlib import Path
 
 
 def pip_mcp_server_toml_block() -> str:
-    """Return the TOML snippet for registering Pip-Boy's MCP server."""
+    """Return the TOML snippet for registering Pip-Boy's MCP server.
+
+    Uses forward slashes and TOML literal strings (single-quoted) to
+    avoid Windows backslash escape issues in TOML double-quoted strings.
+    """
     python = sys.executable.replace("\\", "/")
     return (
         "[mcp_servers.pip]\n"
-        'type = "stdio"\n'
-        f'command = ["{python}", "-m", '
-        '"pip_agent.backends.codex_cli.mcp_bridge"]\n'
+        "type = 'stdio'\n"
+        f"command = ['{python}', '-m', "
+        "'pip_agent.backends.codex_cli.mcp_bridge']\n"
     )
 
 
@@ -43,7 +47,11 @@ def ensure_codex_config(workdir: Path | None = None) -> Path:
         block = pip_mcp_server_toml_block()
 
         if workdir:
-            env_block = f'\n[mcp_servers.pip.env]\nPIP_WORKDIR = "{workdir}"\n'
+            safe_path = str(workdir).replace("\\", "/")
+            env_block = (
+                f"\n[mcp_servers.pip.env]\n"
+                f"PIP_WORKDIR = '{safe_path}'\n"
+            )
             block += env_block
 
         if content and not content.endswith("\n"):

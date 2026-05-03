@@ -329,18 +329,26 @@ async def test_plan_updated():
 async def test_token_usage_tracked():
     cb = AsyncMock()
     state: dict[str, Any] = {}
-    usage = type("Usage", (), {
+    total = type("TokenUsageBreakdown", (), {
         "inputTokens": 100,
         "outputTokens": 50,
         "totalTokens": 150,
+        "cachedInputTokens": 0,
+        "reasoningOutputTokens": 0,
+    })()
+    token_usage = type("ThreadTokenUsage", (), {
+        "total": total,
+        "last": None,
+        "modelContextWindow": None,
     })()
     ev = _make_event(
         "ThreadTokenUsageUpdatedNotificationModel",
-        _FakeParams(usage=usage),
+        _FakeParams(tokenUsage=token_usage),
     )
     await translate_event(ev, cb, state=state)
     assert state["token_usage"]["input_tokens"] == 100
     assert state["token_usage"]["output_tokens"] == 50
+    assert state["token_usage"]["total_tokens"] == 150
     cb.assert_not_awaited()
 
 

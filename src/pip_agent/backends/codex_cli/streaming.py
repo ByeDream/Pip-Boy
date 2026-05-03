@@ -58,6 +58,7 @@ class CodexStreamingSession:
         session_key: str,
         cwd: str | Path,
         system_prompt_append: str,
+        model: str | None = None,
         sandbox: str = "workspace-write",
         resume_session_id: str | None = None,
     ) -> None:
@@ -71,6 +72,7 @@ class CodexStreamingSession:
         self._cwd = str(cwd) if cwd else None
         self._sandbox = sandbox
         self._system_prompt_append = system_prompt_append
+        self._model = model
         self._client: Any = None
         self._thread: Any = None
         self._closed = False
@@ -97,6 +99,10 @@ class CodexStreamingSession:
                 sandbox=proto.SandboxMode(root=self._sandbox),
                 approval_policy=proto.AskForApproval(root="never"),
                 cwd=self._cwd,
+                model=self._model,
+                developer_instructions=(
+                    self._system_prompt_append or None
+                ),
             )
 
             if self.session_id:
