@@ -40,13 +40,13 @@ def _build_mcp_ctx() -> Any:
     * ``workdir`` — from ``PIP_WORKDIR`` env var
     * ``sender_id`` / ``peer_id`` / ``session_id`` / ``account_id`` —
       from env vars set by ``ensure_codex_config``
-    * ``scheduler`` — read-only snapshot from ``cron.json``
-
     Limitations (documented in dual-backend-contract.md §3.6):
     * ``channel`` / ``tui_app`` are ``None`` — tools that require a live
       channel (``send_file``) will report unavailability
-    * ``scheduler`` is a snapshot, not the live instance — cron mutations
-      are picked up on next host restart
+    * ``scheduler`` is ``None`` — ``HostScheduler`` requires a live
+      registry, message queue, and threading primitives that do not exist
+      in this child process.  Cron tools will report "scheduler not
+      wired" which is accurate for the bridge context.
     """
     from pip_agent.mcp_tools import McpContext
 
@@ -62,25 +62,27 @@ def _build_mcp_ctx() -> Any:
     except Exception:  # noqa: BLE001
         pass
 
-    scheduler = None
-    try:
-        from pip_agent.host_scheduler import HostScheduler
+    sender_id = os.environ.get("PIP_SENDER_ID", "")
+    peer_id = os.environ.get("PIP_PEER_ID", "")
 
-        if memory_store is not None:
-            scheduler = HostScheduler.__new__(HostScheduler)
-            scheduler._jobs = {}
-            scheduler._store_path = pip_dir / "cron.json"
-            if scheduler._store_path.exists():
-                scheduler._load()
-    except Exception:  # noqa: BLE001
-        pass
+    user_id = os.environ.get("PIP_USER_ID", "")
+    if not user_id and memory_store and sender_id:
+        try:
+            profile = memory_store.find_profile_by_sender(
+                channel="cli", sender_id=sender_id,
+            )
+            if profile:
+                user_id = memory_store.extract_user_id(profile)
+        except Exception:  # noqa: BLE001
+            pass
 
     return McpContext(
         memory_store=memory_store,
         workdir=workdir,
-        scheduler=scheduler,
-        sender_id=os.environ.get("PIP_SENDER_ID", ""),
-        peer_id=os.environ.get("PIP_PEER_ID", ""),
+        scheduler=None,
+        sender_id=sender_id,
+        peer_id=peer_id,
+        user_id=user_id,
         session_id=os.environ.get("PIP_SESSION_ID", ""),
         account_id=os.environ.get("PIP_ACCOUNT_ID", ""),
     )

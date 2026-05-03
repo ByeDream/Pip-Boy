@@ -2612,7 +2612,7 @@ def _cmd_plugin(ctx: CommandContext, args: str) -> CommandResult:
             response=(
                 f"`/plugin {sub}` is not available with the Codex backend. "
                 "Codex plugins are managed via marketplace operations only: "
-                "`/plugin marketplace add|remove|update`."
+                "`/plugin marketplace add|remove|upgrade`."
             ),
         )
 
