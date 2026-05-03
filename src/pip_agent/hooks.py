@@ -98,14 +98,14 @@ def _pre_compact_hook(memory_store: MemoryStore | None):
                 return {}
 
             try:
-                from pip_agent.anthropic_client import build_anthropic_client
+                from pip_agent.llm_client import build_background_client
                 from pip_agent.memory.reflect import reflect_and_persist
 
-                client = build_anthropic_client()
+                client = build_background_client()
                 if client is None:
                     log.info(
                         "PreCompact: reflect skipped for session=%s — "
-                        "no ANTHROPIC_API_KEY configured",
+                        "no LLM credentials configured",
                         session_id[:8],
                     )
                     return {}

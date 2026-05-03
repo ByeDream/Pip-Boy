@@ -1536,7 +1536,7 @@ class AgentHost:
             return summary
 
         try:
-            from pip_agent.anthropic_client import build_anthropic_client
+            from pip_agent.llm_client import build_background_client
             from pip_agent.memory.reflect import reflect_and_persist
         except Exception:  # pragma: no cover — memory pkg is bundled
             log.exception("flush_and_rotate: memory package import failed")
@@ -1545,7 +1545,7 @@ class AgentHost:
             _save_sessions(self._sessions)
             return summary
 
-        client = build_anthropic_client()
+        client = build_background_client()
         snapshot = dict(self._sessions)
         summary.rotated = len(snapshot)
 
@@ -2317,13 +2317,13 @@ class AgentHost:
             session_key, turn_count, transcript_path,
         )
         try:
-            from pip_agent.anthropic_client import build_anthropic_client
+            from pip_agent.llm_client import build_background_client
             from pip_agent.memory.reflect import reflect_and_persist
 
-            client = build_anthropic_client()
+            client = build_background_client()
             if client is None:
                 log.info(
-                    "Codex reflect skipped — no ANTHROPIC_API_KEY configured",
+                    "Codex reflect skipped — no LLM credentials configured",
                 )
                 return
             start_offset, new_offset, obs_count = reflect_and_persist(

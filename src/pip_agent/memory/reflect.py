@@ -21,10 +21,9 @@ import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
-import anthropic
-
-from pip_agent.anthropic_client import build_anthropic_client
+from pip_agent.llm_client import build_background_client
 from pip_agent.memory.transcript_source import load_formatted
 from pip_agent.models import with_model_fallback
 from pip_agent.types import Observation
@@ -118,7 +117,7 @@ def reflect_from_jsonl(
     *,
     start_offset: int = 0,
     agent_id: str,
-    client: anthropic.Anthropic | None = None,
+    client: Any = None,
 ) -> tuple[int, list[Observation]]:
     """Run L1 reflection over new lines in ``transcript_path``.
 
@@ -156,7 +155,7 @@ def reflect_from_jsonl(
     if not formatted.strip():
         return new_offset, []
 
-    llm = client or build_anthropic_client()
+    llm = client or build_background_client()
     if llm is None:
         return start_offset, []
 
@@ -178,9 +177,9 @@ def reflect_from_jsonl(
 
     try:
         response = with_model_fallback("t1", _call, label="reflect")
-    except Exception as exc:  # noqa: BLE001
-        log.warning("reflect LLM call failed: %s", exc)
-        return start_offset, []
+    except Exception:
+        log.warning("reflect LLM call failed", exc_info=True)
+        raise
 
     text = ""
     for block in response.content:
@@ -308,7 +307,7 @@ def reflect_and_persist(
     memory_store,  # MemoryStore — avoid circular import at module load
     session_id: str,
     transcript_path: Path | str,
-    client: anthropic.Anthropic | None = None,
+    client: Any = None,
 ) -> tuple[int, int, int]:
     """Reflect a session's delta, persist observations, advance the cursor.
 

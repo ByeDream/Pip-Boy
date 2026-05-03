@@ -14,7 +14,7 @@ import logging
 import uuid
 from pathlib import Path
 
-import anthropic
+from typing import Any
 
 from pip_agent.models import with_model_fallback
 from pip_agent.types import Memory, Observation
@@ -123,7 +123,7 @@ def _get_axiom_system() -> str:
 
 
 def consolidate(
-    client: anthropic.Anthropic,
+    client: Any,
     observations: list[Observation],
     memories: list[Memory],
     cycle_count: int,
@@ -207,7 +207,7 @@ def consolidate(
 
 
 def distill_axioms(
-    client: anthropic.Anthropic,
+    client: Any,
     memories: list[Memory],
 ) -> str:
     """L3: distill high-stability memories into judgment principles.

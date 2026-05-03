@@ -60,15 +60,18 @@ def _build_mcp_ctx() -> Any:
     Limitations (documented in dual-backend-contract.md §3.6):
     * ``channel`` / ``tui_app`` are ``None`` — tools that require a live
       channel (``send_file``) will report unavailability
-    * ``scheduler`` is ``None`` — ``HostScheduler`` requires a live
-      registry, message queue, and threading primitives that do not exist
-      in this child process.  Cron tools will report "scheduler not
-      wired" which is accurate for the bridge context.
+    * ``scheduler`` uses :class:`CronProxy` — a file-only CRUD that
+      writes to ``cron.json`` on disk.  The host's ``HostScheduler``
+      tick loop picks up new/changed/removed jobs on its next pass.
     """
     from pip_agent.mcp_tools import McpContext
 
     workdir = Path(os.environ.get("PIP_WORKDIR", os.getcwd()))
     pip_dir = workdir / ".pip"
+
+    bridge_ctx = _read_bridge_ctx(pip_dir)
+
+    agent_id = bridge_ctx.get("agent_id") or os.environ.get("PIP_AGENT_ID", "")
 
     memory_store = None
     try:
@@ -78,11 +81,19 @@ def _build_mcp_ctx() -> Any:
             memory_store = MemoryStore(
                 agent_dir=pip_dir,
                 workspace_pip_dir=pip_dir,
+                agent_id=agent_id,
             )
     except Exception:  # noqa: BLE001
         log.warning("MCP bridge: failed to init MemoryStore", exc_info=True)
 
-    bridge_ctx = _read_bridge_ctx(pip_dir)
+    scheduler = None
+    try:
+        from pip_agent.host_scheduler import CronProxy
+
+        if pip_dir.exists():
+            scheduler = CronProxy(pip_dir)
+    except Exception:  # noqa: BLE001
+        log.debug("MCP bridge: failed to init CronProxy", exc_info=True)
 
     sender_id = bridge_ctx.get("sender_id") or os.environ.get("PIP_SENDER_ID", "")
     peer_id = bridge_ctx.get("peer_id") or os.environ.get("PIP_PEER_ID", "")
@@ -104,7 +115,7 @@ def _build_mcp_ctx() -> Any:
     return McpContext(
         memory_store=memory_store,
         workdir=workdir,
-        scheduler=None,
+        scheduler=scheduler,
         sender_id=sender_id,
         peer_id=peer_id,
         user_id=user_id,
@@ -128,6 +139,9 @@ def _refresh_ctx_identity(ctx: Any) -> None:
         val = bridge_ctx.get(field)
         if val and hasattr(ctx, field):
             setattr(ctx, field, val)
+    agent_id = bridge_ctx.get("agent_id")
+    if agent_id and ctx.memory_store is not None:
+        ctx.memory_store.agent_id = agent_id
 
 
 def _collect_sdk_tools(ctx: Any) -> list[Any]:
@@ -153,8 +167,34 @@ def _collect_sdk_tools(ctx: Any) -> list[Any]:
     return tools
 
 
+def _setup_bridge_logging() -> None:
+    """Configure file logging for the bridge subprocess.
+
+    STDIO MCP uses stdin/stdout for the JSON-RPC protocol, so console
+    handlers would corrupt the wire.  Write to ``<pip_dir>/log/mcp-bridge.log``
+    where operators can inspect it alongside ``pip-boy.log``.
+    """
+    workdir = Path(os.environ.get("PIP_WORKDIR", os.getcwd()))
+    log_dir = workdir / ".pip" / "log"
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(
+            log_dir / "mcp-bridge.log", encoding="utf-8",
+        )
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)-5s %(name)s: %(message)s",
+        ))
+        root = logging.getLogger()
+        root.addHandler(handler)
+        root.setLevel(logging.DEBUG)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _run_server() -> None:
     """Entry point: build and run the STDIO MCP server."""
+    _setup_bridge_logging()
+
     from mcp import types
     from mcp.server import Server
     from mcp.server.stdio import stdio_server

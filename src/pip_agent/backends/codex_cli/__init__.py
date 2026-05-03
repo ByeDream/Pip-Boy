@@ -68,6 +68,7 @@ class CodexBackend:
     ) -> StreamingSessionProtocol:
         from pip_agent.backends.codex_cli.streaming import CodexStreamingSession
 
+        _ms = getattr(mcp_ctx, "memory_store", None)
         session = CodexStreamingSession(
             session_key=session_key,
             cwd=cwd,
@@ -79,6 +80,7 @@ class CodexBackend:
             user_id=getattr(mcp_ctx, "user_id", "") or "",
             account_id=getattr(mcp_ctx, "account_id", "") or "",
             channel_name=getattr(mcp_ctx, "effective_channel_name", "") or "",
+            agent_id=getattr(_ms, "agent_id", "") or "",
         )
         await session.connect()
         return session  # type: ignore[return-value]

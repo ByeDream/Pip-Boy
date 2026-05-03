@@ -127,18 +127,17 @@ class TestQ8FailurePreservesCursor:
                 def create(*a, **kw):
                     raise RuntimeError("simulated API outage")
 
-        new_offset, obs = reflect_from_jsonl(
-            path,
-            start_offset=0,
-            agent_id="pip-boy",
-            client=_FailingClient(),
-        )
-
-        # Contract: returned offset == start_offset so the caller's
-        # "persist only if offset advanced" logic preserves the cursor
-        # and the next trigger re-reads the same delta.
-        assert new_offset == 0
-        assert obs == []
+        # Contract: LLM errors propagate to the caller so they can
+        # report meaningfully (not silently degrade to "no new content").
+        # The cursor is preserved because reflect_and_persist only
+        # advances it on a successful return.
+        with pytest.raises(RuntimeError, match="simulated API outage"):
+            reflect_from_jsonl(
+                path,
+                start_offset=0,
+                agent_id="pip-boy",
+                client=_FailingClient(),
+            )
 
     def test_invalid_json_from_llm_preserves_cursor_for_retry(
         self, tmp_path,
@@ -274,7 +273,7 @@ class TestPromptPreconditions:
         _write_transcript(path, [_user_line("hi")])
 
         with patch(
-            "pip_agent.memory.reflect.build_anthropic_client",
+            "pip_agent.memory.reflect.build_background_client",
             return_value=None,
         ):
             new_offset, obs = reflect_from_jsonl(

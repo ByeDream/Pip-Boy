@@ -152,7 +152,7 @@ class TestPreCompactHook:
 
         caplog.set_level("INFO", logger="pip_agent.hooks")
         with patch(
-            "pip_agent.anthropic_client.build_anthropic_client", return_value=None,
+            "pip_agent.llm_client.build_background_client", return_value=None,
         ):
             cb = _pre_compact_hook(memory_store)
             _run(cb({
@@ -165,7 +165,7 @@ class TestPreCompactHook:
         assert "last_reflect_at" not in state
         # But the pre-compact stamp is still recorded so /status can show it.
         assert state["last_pre_compact_session_id"] == "sess-nokey"
-        assert any("no ANTHROPIC" in r.message for r in caplog.records)
+        assert any("no LLM credentials" in r.message for r in caplog.records)
 
     def test_no_memory_store_is_noop(self, tmp_path):
         cb = _pre_compact_hook(None)

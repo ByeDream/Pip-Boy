@@ -40,7 +40,7 @@ from claude_agent_sdk import McpSdkServerConfig, SdkMcpTool, create_sdk_mcp_serv
 
 if TYPE_CHECKING:
     from pip_agent.channels import Channel
-    from pip_agent.host_scheduler import HostScheduler
+    from pip_agent.host_scheduler import CronProxy, HostScheduler
     from pip_agent.memory import MemoryStore
 
 log = logging.getLogger(__name__)
@@ -68,7 +68,7 @@ class McpContext:
     memory_store: MemoryStore | None = None
     workdir: Path = field(default_factory=Path.cwd)
     session_id: str = ""
-    scheduler: HostScheduler | None = None
+    scheduler: HostScheduler | CronProxy | None = None
     channel: Channel | None = None
     channel_name: str = ""
     peer_id: str = ""
@@ -211,25 +211,30 @@ def _memory_tools(ctx: McpContext) -> list[SdkMcpTool]:
                 "Run at least one turn with Claude Code first."
             )
 
-        from pip_agent.anthropic_client import build_anthropic_client
+        from pip_agent.llm_client import build_background_client
         from pip_agent.memory.reflect import reflect_and_persist
         from pip_agent.memory.transcript_source import locate_session_jsonl
 
+        log.debug(
+            "reflect: session_id=%s workdir=%s",
+            ctx.session_id[:8], ctx.workdir,
+        )
         path = locate_session_jsonl(ctx.session_id, prefer_cwd=ctx.workdir)
         if path is None:
             return _text(
                 f"Reflection skipped: transcript for session {ctx.session_id[:8]} "
-                f"not found under ~/.claude/projects/."
+                f"not found under ~/.claude/projects/ or "
+                f"{{workdir}}/.pip/codex_sessions/."
             )
 
-        # Check credentials up front so the response can distinguish
-        # "ran + empty" from "skipped for lack of credentials" from "crashed".
-        client = build_anthropic_client()
+        file_size = path.stat().st_size if path.is_file() else -1
+        log.debug("reflect: transcript=%s size=%d", path, file_size)
+
+        client = build_background_client()
         if client is None:
             return _text(
-                "Reflection skipped: no ANTHROPIC_API_KEY configured. "
-                "Set it in `.env` (or as an environment variable) so reflect "
-                "can make direct Anthropic calls."
+                "Reflection skipped: no LLM credentials configured. "
+                "Set CODEX_API_KEY+CODEX_BASE_URL or ANTHROPIC_API_KEY in `.env`."
             )
 
         try:
@@ -242,16 +247,24 @@ def _memory_tools(ctx: McpContext) -> list[SdkMcpTool]:
         except Exception as exc:  # noqa: BLE001
             return _error(f"Reflection failed: {exc}")
 
+        log.debug(
+            "reflect: start=%d end=%d obs=%d",
+            start_offset, new_offset, obs_count,
+        )
         if obs_count:
             return _text(
-                f"Reflection complete: extracted {obs_count} observations."
+                f"Reflection complete: extracted {obs_count} observations "
+                f"(cursor {start_offset}→{new_offset})."
             )
         if new_offset == start_offset:
             return _text(
-                "Reflection complete: no new transcript content since last run."
+                f"Reflection complete: no new transcript content since last run "
+                f"(cursor={start_offset}, file={file_size}B, "
+                f"session={ctx.session_id[:8]}, path={path})."
             )
         return _text(
-            "Reflection complete: LLM produced no new observations from the delta."
+            f"Reflection complete: LLM produced no new observations from the delta "
+            f"(cursor {start_offset}→{new_offset})."
         )
 
     return [

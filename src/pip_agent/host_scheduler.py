@@ -290,6 +290,145 @@ def _in_dream_window(now: float) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# CronProxy — file-only CRUD for out-of-process contexts
+# ---------------------------------------------------------------------------
+
+
+class CronProxy:
+    """Lightweight cron CRUD for contexts without a live scheduler thread.
+
+    The STDIO MCP bridge runs as a child process and cannot share the
+    host's in-process queue, locks, or registry.  ``CronProxy`` performs
+    the same file I/O as :class:`HostScheduler`'s CRUD methods — writing
+    directly to ``<pip_dir>/cron.json`` — so the host's tick loop picks
+    up new/changed/removed jobs on its next pass.
+    """
+
+    def __init__(self, pip_dir: Path) -> None:
+        self._pip_dir = pip_dir
+        self._io_lock = threading.Lock()
+
+    def _cron_path(self) -> Path:
+        return self._pip_dir / _CRON_FILE
+
+    def _load_jobs(self) -> list[dict[str, Any]]:
+        path = self._cron_path()
+        if not path.is_file():
+            return []
+        try:
+            data = json.loads(path.read_text("utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        if not isinstance(data, list):
+            return []
+        return [j for j in data if isinstance(j, dict) and j.get("id")]
+
+    def _save_jobs(self, jobs: list[dict[str, Any]]) -> None:
+        path = self._cron_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write(path, json.dumps(jobs, indent=2, ensure_ascii=False))
+
+    @staticmethod
+    def _fmt(ts: float) -> str:
+        if ts <= 0:
+            return "never"
+        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+
+    def add_job(
+        self,
+        *,
+        name: str,
+        schedule_kind: str,
+        schedule_config: dict[str, Any],
+        message: str,
+        channel: str,
+        peer_id: str,
+        sender_id: str,
+        agent_id: str,
+    ) -> str:
+        if not name:
+            return "Error: 'name' is required."
+        if not message:
+            return "Error: 'message' is required."
+        if not agent_id:
+            return "Error: 'agent_id' is required (no active agent in context)."
+        err = _validate_schedule(schedule_kind, schedule_config)
+        if err:
+            return f"Error: {err}"
+
+        now = time.time()
+        fire_at = _next_fire_at(schedule_kind, schedule_config, now=now)
+        if fire_at is None:
+            return "Error: schedule resolves to no future fire time."
+
+        job = {
+            "id": uuid.uuid4().hex[:8],
+            "name": name,
+            "enabled": True,
+            "schedule_kind": schedule_kind,
+            "schedule_config": schedule_config,
+            "message": message,
+            "channel": channel or "cli",
+            "peer_id": peer_id or "cli-user",
+            "sender_id": sender_id,
+            "agent_id": agent_id,
+            "created_at": now,
+            "next_fire_at": fire_at,
+            "last_fire_at": 0,
+            "consecutive_errors": 0,
+        }
+        with self._io_lock:
+            jobs = self._load_jobs()
+            jobs.append(job)
+            self._save_jobs(jobs)
+        return f"Scheduled '{name}' (id={job['id']}, fires at {self._fmt(fire_at)})."
+
+    def remove_job(self, job_id: str) -> str:
+        if not job_id:
+            return "Error: 'job_id' is required."
+        with self._io_lock:
+            jobs = self._load_jobs()
+            new_jobs = [j for j in jobs if j.get("id") != job_id]
+            if len(new_jobs) != len(jobs):
+                self._save_jobs(new_jobs)
+                return f"Removed job {job_id}."
+        return f"Job {job_id} not found."
+
+    def update_job(self, job_id: str, **updates: Any) -> str:
+        if not job_id:
+            return "Error: 'job_id' is required."
+        fields = {
+            k: v for k, v in updates.items()
+            if k in {"enabled", "name", "schedule_kind", "schedule_config", "message"}
+        }
+        if not fields:
+            return "Nothing to update."
+        with self._io_lock:
+            jobs = self._load_jobs()
+            for job in jobs:
+                if job.get("id") != job_id:
+                    continue
+                new_kind = fields.get("schedule_kind", job["schedule_kind"])
+                new_cfg = fields.get("schedule_config", job["schedule_config"])
+                if "schedule_kind" in fields or "schedule_config" in fields:
+                    err = _validate_schedule(new_kind, new_cfg)
+                    if err:
+                        return f"Error: {err}"
+                    fire_at = _next_fire_at(new_kind, new_cfg, now=time.time())
+                    if fire_at is None:
+                        return "Error: schedule resolves to no future fire time."
+                    job["next_fire_at"] = fire_at
+                job.update(fields)
+                self._save_jobs(jobs)
+                return f"Updated job {job_id}."
+        return f"Job {job_id} not found."
+
+    def list_jobs(self) -> list[dict[str, Any]]:
+        with self._io_lock:
+            return self._load_jobs()
+
+
+# ---------------------------------------------------------------------------
 # HostScheduler
 # ---------------------------------------------------------------------------
 
@@ -685,13 +824,13 @@ class HostScheduler:
         deadlock the next night's window.
         """
         try:
-            from pip_agent.anthropic_client import build_anthropic_client
+            from pip_agent.llm_client import build_background_client
             from pip_agent.memory.consolidate import consolidate, distill_axioms
 
-            client = build_anthropic_client()
+            client = build_background_client()
             if client is None:
                 log.info(
-                    "Dream: skipped for agent=%s — no Anthropic credentials",
+                    "Dream: skipped for agent=%s — no LLM credentials",
                     agent_id,
                 )
                 return
