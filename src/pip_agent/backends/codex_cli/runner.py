@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from pip_agent.backends.base import QueryResult, StreamEventCallback
+from pip_agent.backends.codex_cli.streaming import _async_iter
 
 log = logging.getLogger(__name__)
 
@@ -166,7 +167,7 @@ async def _run_query_with_chain(
                     TurnOptions(**turn_opts_kwargs) if turn_opts_kwargs else None,
                 )
 
-                for event in stream:
+                async for event in _async_iter(stream):
                     await translate_event(
                         event, on_stream_event, state=state,
                     )

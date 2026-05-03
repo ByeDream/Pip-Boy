@@ -25,11 +25,13 @@ already handles (Shape 2).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from pip_agent.backends.base import (
     BackendError,
@@ -37,6 +39,46 @@ from pip_agent.backends.base import (
     StaleSessionError,
     StreamEventCallback,
 )
+
+_T = TypeVar("_T")
+
+_SENTINEL = object()
+
+
+def _next_or_sentinel(it: Iterator[_T]) -> _T | object:
+    """Call ``next(it)`` and return ``_SENTINEL`` on exhaustion.
+
+    ``StopIteration`` cannot propagate out of ``run_in_executor``
+    (Python 3.13+ raises ``RuntimeError``), so we convert it to a
+    sentinel value here, inside the worker thread.
+    """
+    try:
+        return next(it)
+    except StopIteration:
+        return _SENTINEL
+
+
+async def _async_iter(sync_iter: Iterator[_T]) -> AsyncIterator[_T]:
+    """Wrap a blocking sync iterator so each ``__next__`` runs in a thread.
+
+    The Codex SDK's ``CodexTurnStream`` is a synchronous iterator whose
+    ``__next__`` blocks on network I/O (waiting for the next JSON-RPC
+    event from the app-server).  Running it directly in an ``async``
+    function starves the asyncio event loop — TUI updates, WebSocket
+    keepalives, and all other coroutines are frozen until the entire
+    turn finishes.
+
+    This wrapper offloads each ``__next__`` call to the default
+    ``ThreadPoolExecutor``, yielding control back to the event loop
+    between events.
+    """
+    loop = asyncio.get_running_loop()
+    it = iter(sync_iter)
+    while True:
+        value = await loop.run_in_executor(None, _next_or_sentinel, it)
+        if value is _SENTINEL:
+            return
+        yield value  # type: ignore[misc]
 
 log = logging.getLogger(__name__)
 
@@ -309,7 +351,7 @@ class CodexStreamingSession:
                     TurnOptions(**turn_opts_kwargs) if turn_opts_kwargs else None,
                 )
 
-                for event in stream:
+                async for event in _async_iter(stream):
                     await translate_event(
                         event, on_stream_event, state=state,
                     )
