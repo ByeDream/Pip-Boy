@@ -63,7 +63,6 @@ class McpContext:
 
     ``user_id`` is the caller's resolved addressbook id — empty when the
     sender is not yet registered (``<user_query user_id="unverified">``).
-    It gates ``remember_user``'s create-vs-update branch.
     """
 
     memory_store: MemoryStore | None = None
@@ -71,9 +70,16 @@ class McpContext:
     session_id: str = ""
     scheduler: HostScheduler | None = None
     channel: Channel | None = None
+    channel_name: str = ""
     peer_id: str = ""
     sender_id: str = ""
     user_id: str = ""
+
+    @property
+    def effective_channel_name(self) -> str:
+        if self.channel is not None:
+            return self.channel.name
+        return self.channel_name or "cli"
     # WeChat multi-account: picks which bot identity originates outbound
     # sends through ``send_image`` / ``send_file``. Empty for single-
     # identity channels (CLI, WeCom).
@@ -155,52 +161,29 @@ def _memory_tools(ctx: McpContext) -> list[SdkMcpTool]:
         if ctx.memory_store is None:
             return _error("Memory store not available.")
 
-        ch_name = ctx.channel.name if ctx.channel else "cli"
+        name = (args.get("name", "") or "").strip()
+        if not name:
+            return _error("'name' is required for remember_user.")
+
+        ch_name = ctx.effective_channel_name
         sid = ctx.sender_id
         if sid and ch_name and sid.startswith(f"{ch_name}:"):
             sid = sid[len(ch_name) + 1:]
 
         fields: dict[str, str] = {
-            "name": args.get("name", "") or "",
+            "name": name,
             "call_me": args.get("call_me", "") or "",
             "timezone": args.get("timezone", "") or "",
             "notes": args.get("notes", "") or "",
         }
-        target_id_arg = (args.get("user_id") or "").strip()
-        current_user_id = ctx.user_id or ""
 
-        # ACL: verified callers can only update their OWN record. They
-        # cannot invent new contacts (risk of impersonation) nor
-        # rewrite someone else's profile. The errors are surfaced to
-        # the model so it learns the constraint instead of silently
-        # retrying with the same args.
-        if current_user_id:
-            if target_id_arg and target_id_arg != current_user_id:
-                return _error(
-                    "remember_user is only allowed to update your OWN "
-                    f"profile ({current_user_id}). To record information "
-                    f"about another contact (user_id={target_id_arg}), "
-                    "use memory_write instead."
-                )
-            result = ctx.memory_store.update_contact(
-                current_user_id,
-                sender_id=sid, channel=ch_name,
-                **fields,
-            )
-            return _text(result)
-
-        # Unverified caller — introduce-yourself handshake. They may
-        # only create a fresh contact; targeting an existing user_id
-        # would let an anonymous sender hijack that profile's identifiers.
-        if target_id_arg:
-            return _error(
-                "Cannot update an existing contact while unverified. "
-                "Omit user_id to create a new entry for the current sender."
-            )
-        new_id, msg = ctx.memory_store.create_contact(
+        # Upsert: name hash → deterministic user_id. Same name from
+        # any channel converges on the same profile, automatically
+        # linking cross-channel identifiers.
+        uid, msg = ctx.memory_store.upsert_contact(
             sender_id=sid, channel=ch_name, **fields,
         )
-        return _text(f"{msg} user_id={new_id}")
+        return _text(f"{msg} user_id={uid}")
 
     async def lookup_user(args: dict[str, Any]) -> dict[str, Any]:
         if ctx.memory_store is None:
@@ -304,31 +287,23 @@ def _memory_tools(ctx: McpContext) -> list[SdkMcpTool]:
         SdkMcpTool(
             name="remember_user",
             description=(
-                "Record or update a contact in the workspace-shared "
-                "addressbook (<workspace>/.pip/addressbook/<user_id>.md). "
-                "This tool is strictly self-directed: "
-                "• If the caller is verified (the current <user_query> "
-                "carries a user_id), it updates that caller's own "
-                "profile only. Passing a different user_id is refused. "
-                "• If the caller is unverified, it creates a brand new "
-                "contact with a freshly-minted 8-hex user_id and "
-                "records the current sender's channel:sender_id. "
-                "To note facts ABOUT someone else, use memory_write, "
-                "not this tool. All agents share one addressbook."
+                "Upsert a contact in the workspace-shared addressbook. "
+                "The 'name' field is REQUIRED — a deterministic user_id "
+                "is derived from the name so the same person calling "
+                "from different channels (CLI, WeCom, WeChat) converges "
+                "on a single profile. The current sender's "
+                "channel:sender_id is automatically recorded as an "
+                "identifier. If the profile already exists, new fields "
+                "are merged and a new identifier is appended. "
+                "To note facts ABOUT someone else, use memory_write."
             ),
             input_schema={
                 "type": "object",
                 "properties": {
-                    "user_id": {
+                    "name": {
                         "type": "string",
-                        "description": (
-                            "Optional. Only meaningful for verified callers, "
-                            "and must equal your own user_id. Omit to default "
-                            "to the current caller. Passing a different id is "
-                            "refused."
-                        ),
+                        "description": "The user's real name. REQUIRED.",
                     },
-                    "name": {"type": "string", "description": "The user's real name."},
                     "call_me": {
                         "type": "string",
                         "description": "Preferred name to be called.",
@@ -342,6 +317,7 @@ def _memory_tools(ctx: McpContext) -> list[SdkMcpTool]:
                         "description": "Additional notes (append). English.",
                     },
                 },
+                "required": ["name"],
             },
             handler=remember_user,
         ),

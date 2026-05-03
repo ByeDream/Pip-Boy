@@ -107,6 +107,7 @@ class CodexStreamingSession:
         peer_id: str = "",
         user_id: str = "",
         account_id: str = "",
+        channel_name: str = "",
     ) -> None:
         self.session_key = session_key
         self.session_id: str = resume_session_id or ""
@@ -126,6 +127,7 @@ class CodexStreamingSession:
         self._peer_id = peer_id
         self._user_id = user_id
         self._account_id = account_id
+        self._channel_name = channel_name
         self._client: Any = None
         self._thread: Any = None
         self._closed = False
@@ -299,6 +301,7 @@ class CodexStreamingSession:
                     "user_id": self._user_id,
                     "session_id": self._bridge_session_id,
                     "account_id": account_id,
+                    "channel_name": self._channel_name,
                 }),
                 encoding="utf-8",
             )

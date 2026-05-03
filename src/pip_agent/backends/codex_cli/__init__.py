@@ -78,6 +78,7 @@ class CodexBackend:
             peer_id=getattr(mcp_ctx, "peer_id", "") or "",
             user_id=getattr(mcp_ctx, "user_id", "") or "",
             account_id=getattr(mcp_ctx, "account_id", "") or "",
+            channel_name=getattr(mcp_ctx, "effective_channel_name", "") or "",
         )
         await session.connect()
         return session  # type: ignore[return-value]

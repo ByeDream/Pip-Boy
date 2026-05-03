@@ -41,7 +41,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import secrets
 import threading
 import time
 from datetime import datetime, timezone
@@ -291,9 +290,19 @@ class MemoryStore:
         return sorted(ab.glob("*.md"))
 
     @staticmethod
-    def _generate_user_id() -> str:
-        """Opaque 8-char hex id — stable, collision-safe for pre-release scale."""
-        return secrets.token_hex(4)
+    def _name_to_user_id(name: str) -> str:
+        """Deterministic 16-char hex id from a display name.
+
+        ``sha256(NFKC(name.strip().lower()))[:16]`` — stable across
+        platforms, case-insensitive, Unicode-normalised.
+        """
+        import hashlib
+        import unicodedata
+
+        normalised = unicodedata.normalize(
+            "NFKC", name.strip().lower(),
+        )
+        return hashlib.sha256(normalised.encode("utf-8")).hexdigest()[:16]
 
     @staticmethod
     def extract_user_id(path: Path) -> str:
@@ -386,22 +395,35 @@ class MemoryStore:
         atomic_write(target, "\n".join(lines))
         return target
 
-    def create_contact(
+    def upsert_contact(
         self,
         *,
         sender_id: str = "",
         channel: str = "",
         **fields: str,
     ) -> tuple[str, str]:
-        """Register a brand-new contact. Returns ``(user_id, message)``.
+        """Create or update a contact keyed by name hash.
 
-        Used by the ``remember_user`` tool when the caller is unverified
-        (i.e. the introduce-yourself handshake). The new contact gets a
-        freshly-minted 8-hex ``user_id`` and the caller's current
-        ``channel:sender_id`` is recorded as its first identifier.
+        The ``name`` field is required — ``sha256(NFKC(name.lower()))[:16]``
+        produces a deterministic ``user_id`` so the same person calling
+        from different channels converges on a single profile.
+
+        Returns ``(user_id, message)``.
         """
+        name = fields.get("name", "")
+        if not name:
+            raise ValueError("'name' is required to derive user_id")
+
         if sender_id and channel and sender_id.startswith(f"{channel}:"):
             sender_id = sender_id[len(channel) + 1:]
+
+        uid = self._name_to_user_id(name)
+        path = self.addressbook_dir / f"{uid}.md"
+
+        if path.is_file():
+            return uid, self.update_contact(
+                uid, sender_id=sender_id, channel=channel, **fields,
+            )
 
         new_fields: dict[str, str] = {
             k: v for k, v in fields.items() if k in self._FIELD_MAP and v
@@ -409,16 +431,6 @@ class MemoryStore:
         identifiers: list[str] = []
         if sender_id and channel:
             identifiers.append(f"{channel}:{sender_id}")
-
-        # Retry until we land a non-colliding id. 8 hex chars = 2^32
-        # keyspace; collision on a pre-release addressbook is astronomically
-        # unlikely but the guard is cheap.
-        for _ in range(16):
-            uid = self._generate_user_id()
-            if not (self.addressbook_dir / f"{uid}.md").exists():
-                break
-        else:
-            raise RuntimeError("could not allocate a free user_id")
 
         self._write_profile(uid, new_fields, identifiers)
         return uid, f"Created contact {uid}."
@@ -588,10 +600,12 @@ class MemoryStore:
 # Helpers
 # ----------------------------------------------------------------------
 
-# Addressbook user_id: lowercase 8-hex (``secrets.token_hex(4)``).
-# Anchored so foreign inputs (e.g. sender IDs, filenames with extensions)
-# don't accidentally pass validation.
-_USER_ID_RE = re.compile(r"[0-9a-f]{8}")
+# Addressbook user_id: lowercase 16-hex, derived from
+# sha256(NFKC(name.lower().strip())).  Deterministic so the same
+# display name always maps to the same profile, enabling cross-channel
+# identity linking without a search tool.
+# Also accepts legacy 8-hex ids for backward compatibility.
+_USER_ID_RE = re.compile(r"[0-9a-f]{8}(?:[0-9a-f]{8})?")
 
 
 # ----------------------------------------------------------------------

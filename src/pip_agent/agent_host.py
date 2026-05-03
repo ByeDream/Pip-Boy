@@ -1224,6 +1224,15 @@ class AgentHost:
                         session_key, len(fused_batch),
                     )
 
+        # Sync per-turn identity onto the session so the bridge context
+        # file (Codex) or in-process MCP context (Claude Code) reflects
+        # the latest addressbook resolution — covers the case where
+        # remember_user onboarded the caller on a previous turn.
+        if hasattr(session, "_user_id"):
+            session._user_id = mcp_ctx.user_id or ""
+        if hasattr(session, "_channel_name"):
+            session._channel_name = mcp_ctx.effective_channel_name
+
         try:
             result = await session.run_turn(
                 effective_prompt,
@@ -1640,6 +1649,7 @@ class AgentHost:
             session_id=session_id,
             sender_id=sender_id,
             channel=channel,
+            channel_name=channel.name if channel else "",
             peer_id=peer_id,
             user_id=user_id,
             scheduler=self._scheduler,

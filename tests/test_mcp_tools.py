@@ -273,7 +273,7 @@ class TestRememberUser:
         files = list(ab.glob("*.md"))
         assert len(files) == 1
         uid = files[0].stem
-        assert len(uid) == 8 and all(c in "0123456789abcdef" for c in uid)
+        assert len(uid) == 16 and all(c in "0123456789abcdef" for c in uid)
         text = files[0].read_text(encoding="utf-8")
         # Prefix was stripped — stored identifier is ``wecom:alice``,
         # not ``wecom:wecom:alice`` which would break future lookups.
@@ -297,7 +297,7 @@ class TestRememberUser:
         class _FakeCh:
             name = "cli"
 
-        # Seed an initial unverified create.
+        # Seed an initial contact.
         seed_ctx = McpContext(
             memory_store=ms, channel=_FakeCh(),  # type: ignore[arg-type]
             sender_id="cli-user",
@@ -305,64 +305,54 @@ class TestRememberUser:
         self._call(seed_ctx, {"name": "Alice"})
         uid = next(ms.addressbook_dir.glob("*.md")).stem
 
-        # Now simulate a verified follow-up turn — ctx carries user_id.
-        verified = McpContext(
+        # Follow-up turn with same name appends notes to existing profile.
+        ctx2 = McpContext(
             memory_store=ms, channel=_FakeCh(),  # type: ignore[arg-type]
             sender_id="cli-user", user_id=uid,
         )
-        result = self._call(verified, {"notes": "prefers terse replies"})
+        result = self._call(ctx2, {"name": "Alice", "notes": "prefers terse replies"})
         assert result.get("is_error") is not True
         text = (ms.addressbook_dir / f"{uid}.md").read_text(encoding="utf-8")
         assert "prefers terse replies" in text
-        # Still the same single file — no rogue create.
         assert len(list(ms.addressbook_dir.glob("*.md"))) == 1
 
-    def test_verified_caller_cannot_target_other_user_id(self, tmp_path):
+    def test_upsert_merges_cross_channel_identity(self, tmp_path):
+        """Same name from different channels converges on one profile."""
         ms = _make_store(tmp_path / "agents")
-        # Two separate contacts, Alice and Bob.
-        uid_a, _ = ms.create_contact(
-            sender_id="alice", channel="cli", name="Alice",
-        )
-        uid_b, _ = ms.create_contact(
-            sender_id="bob", channel="cli", name="Bob",
-        )
 
-        class _FakeCh:
+        class _CliCh:
             name = "cli"
 
-        ctx = McpContext(
-            memory_store=ms, channel=_FakeCh(),  # type: ignore[arg-type]
-            sender_id="alice", user_id=uid_a,
-        )
-        result = self._call(
-            ctx, {"user_id": uid_b, "notes": "sneaky"},
-        )
-        assert result.get("is_error") is True
-        # Bob's record stays untouched.
-        bob_text = (ms.addressbook_dir / f"{uid_b}.md").read_text(encoding="utf-8")
-        assert "sneaky" not in bob_text
-
-    def test_unverified_cannot_target_existing_user_id(self, tmp_path):
-        ms = _make_store(tmp_path / "agents")
-        uid, _ = ms.create_contact(
-            sender_id="alice", channel="cli", name="Alice",
-        )
-
-        class _FakeCh:
+        class _WecomCh:
             name = "wecom"
 
-        # Stranger from a fresh channel tries to claim Alice's record.
-        ctx = McpContext(
-            memory_store=ms, channel=_FakeCh(),  # type: ignore[arg-type]
-            sender_id="imposter",  # user_id left empty → unverified
+        # First contact from CLI.
+        ctx1 = McpContext(
+            memory_store=ms, channel=_CliCh(),  # type: ignore[arg-type]
+            sender_id="cli-user",
         )
-        result = self._call(
-            ctx, {"user_id": uid, "notes": "injected"},
+        r1 = self._call(ctx1, {"name": "Alice"})
+        assert r1.get("is_error") is not True
+        uid = next(ms.addressbook_dir.glob("*.md")).stem
+
+        # Same person from WeCom — should merge, not create a second file.
+        ctx2 = McpContext(
+            memory_store=ms, channel=_WecomCh(),  # type: ignore[arg-type]
+            sender_id="alice-wecom-id",
         )
-        assert result.get("is_error") is True
+        r2 = self._call(ctx2, {"name": "Alice"})
+        assert r2.get("is_error") is not True
+        assert len(list(ms.addressbook_dir.glob("*.md"))) == 1
+
         text = (ms.addressbook_dir / f"{uid}.md").read_text(encoding="utf-8")
-        assert "injected" not in text
-        assert "wecom:imposter" not in text
+        assert "`cli:cli-user`" in text
+        assert "`wecom:alice-wecom-id`" in text
+
+    def test_name_required(self, tmp_path):
+        ms = _make_store(tmp_path / "agents")
+        ctx = McpContext(memory_store=ms, sender_id="x")
+        result = self._call(ctx, {"notes": "no name given"})
+        assert result.get("is_error") is True
 
     def test_write_lands_in_workspace_addressbook(self, tmp_path):
         """End-to-end: a ``remember_user`` call from a sub-agent's
@@ -425,7 +415,7 @@ class TestLookupUser:
 
     def test_known_id_returns_profile_body(self, tmp_path):
         ms = _make_store(tmp_path / "agents")
-        uid, _ = ms.create_contact(
+        uid, _ = ms.upsert_contact(
             sender_id="alice", channel="cli",
             name="Alice", call_me="Ali", notes="likes terse replies",
         )

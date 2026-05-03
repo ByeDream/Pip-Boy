@@ -89,11 +89,12 @@ def _build_mcp_ctx() -> Any:
     user_id = bridge_ctx.get("user_id") or os.environ.get("PIP_USER_ID", "")
     session_id = bridge_ctx.get("session_id") or os.environ.get("PIP_SESSION_ID", "")
     account_id = bridge_ctx.get("account_id") or os.environ.get("PIP_ACCOUNT_ID", "")
+    channel_name = bridge_ctx.get("channel_name") or os.environ.get("PIP_CHANNEL", "cli")
 
     if not user_id and memory_store and sender_id:
         try:
             profile = memory_store.find_profile_by_sender(
-                channel="cli", sender_id=sender_id,
+                channel=channel_name, sender_id=sender_id,
             )
             if profile:
                 user_id = memory_store.extract_user_id(profile)
@@ -109,6 +110,7 @@ def _build_mcp_ctx() -> Any:
         user_id=user_id,
         session_id=session_id,
         account_id=account_id,
+        channel_name=channel_name,
     )
 
 
@@ -122,7 +124,7 @@ def _refresh_ctx_identity(ctx: Any) -> None:
     bridge_ctx = _read_bridge_ctx(workdir / ".pip")
     if not bridge_ctx:
         return
-    for field in ("sender_id", "peer_id", "user_id", "session_id", "account_id"):
+    for field in ("sender_id", "peer_id", "user_id", "session_id", "account_id", "channel_name"):
         val = bridge_ctx.get(field)
         if val and hasattr(ctx, field):
             setattr(ctx, field, val)

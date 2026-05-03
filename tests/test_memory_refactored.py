@@ -200,7 +200,7 @@ class TestAddressbookLazyLoad:
         # ``workdir`` (``tmp_path`` typically embeds the OS username,
         # so realistic names like "Eric" alias straight onto a
         # ``C:\Users\Eric...`` substring on dev machines).
-        store.create_contact(
+        store.upsert_contact(
             sender_id="cli-user", channel="cli",
             name="Zorblax", call_me="Zorblax",
             notes="addressbook-leak-canary-xyzzy",
@@ -227,18 +227,18 @@ class TestAddressbookLazyLoad:
         )
         assert "## Addressbook" not in out
 
-    def test_sub_agent_create_contact_lands_in_root_addressbook(
+    def test_sub_agent_upsert_contact_lands_in_root_addressbook(
         self, tmp_path: Path,
     ):
         """Shared addressbook invariant: the sub-agent's
-        ``create_contact`` must land in the workspace root's
+        ``upsert_contact`` must land in the workspace root's
         ``addressbook/``, not a local sub-agent copy."""
         store, workspace_pip = self._seed_sub_agent_store(tmp_path)
-        uid, msg = store.create_contact(
+        uid, msg = store.upsert_contact(
             sender_id="alice", channel="wecom",
             name="Alice", call_me="Alice",
         )
-        assert uid and len(uid) == 8
+        assert uid and len(uid) == 16
         root_ab = workspace_pip / "addressbook"
         assert (root_ab / f"{uid}.md").is_file()
         # Sub-agent dir stays addressbook-free.
@@ -252,7 +252,7 @@ class TestAddressbookLazyLoad:
         contract so a refactor of the storage layout can't silently
         break the prompt wrapper."""
         store, _ = self._seed_sub_agent_store(tmp_path)
-        uid, _ = store.create_contact(
+        uid, _ = store.upsert_contact(
             sender_id="alice", channel="wecom", name="Alice",
         )
         path = store.find_profile_by_sender("wecom", "alice")
@@ -266,7 +266,7 @@ class TestAddressbookLazyLoad:
         see every field ``remember_user`` wrote. This is the lazy-load
         round-trip the new design depends on."""
         store, _ = self._seed_sub_agent_store(tmp_path)
-        uid, _ = store.create_contact(
+        uid, _ = store.upsert_contact(
             sender_id="alice", channel="cli",
             name="Alice", call_me="Ali", timezone="Asia/Shanghai",
             notes="prefers terse replies",
@@ -294,7 +294,7 @@ class TestAddressbookLazyLoad:
         recognisable next time — ``update_contact`` appends the new
         ``channel:sender_id`` to the Identifiers list."""
         store, _ = self._seed_sub_agent_store(tmp_path)
-        uid, _ = store.create_contact(
+        uid, _ = store.upsert_contact(
             sender_id="alice", channel="cli", name="Alice",
         )
         store.update_contact(
