@@ -293,16 +293,19 @@ class MemoryStore:
     def _name_to_user_id(name: str) -> str:
         """Deterministic 16-char hex id from a display name.
 
-        ``sha256(NFKC(name.strip().lower()))[:16]`` — stable across
-        platforms, case-insensitive, Unicode-normalised.
+        Normalisation pipeline (maximises collision for trivial variants):
+        1. NFKC unicode normalisation
+        2. lowercase
+        3. strip all whitespace (so "Eric Li" == "ericli", "李 瑞丰" == "李瑞丰")
+
+        Result: ``sha256(normalised)[:16]``
         """
         import hashlib
         import unicodedata
 
-        normalised = unicodedata.normalize(
-            "NFKC", name.strip().lower(),
-        )
-        return hashlib.sha256(normalised.encode("utf-8")).hexdigest()[:16]
+        s = unicodedata.normalize("NFKC", name)
+        s = "".join(ch for ch in s.lower() if not unicodedata.category(ch).startswith("Z"))
+        return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
 
     @staticmethod
     def extract_user_id(path: Path) -> str:

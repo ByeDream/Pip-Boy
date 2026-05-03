@@ -1027,24 +1027,29 @@ class AgentHost:
     def _reap_stale_session(
         self, sk: str, *, prefer_cwd: Path | None = None,
     ) -> str | None:
-        """Return the session id for ``sk`` iff its JSONL is still on disk.
+        """Return the session id for ``sk`` iff it is still valid.
 
-        A user can delete the JSONL out from under us — either by hand
-        (happens) or by CC's own ``/clear`` (also happens). The in-memory
-        ``_sessions`` map has no way to know the id went dead. Passing a dead
-        id into ``run_query(resume=...)`` makes the CC subprocess print
+        For Claude Code: the session's JSONL must exist on disk. A user
+        can delete the JSONL out from under us — either by hand (happens)
+        or by CC's own ``/clear`` (also happens). Passing a dead id into
+        ``run_query(resume=...)`` makes the CC subprocess print
         ``No conversation found with session ID: <uuid>``, exit 1, and the
         SDK surfaces that as a ``ClaudeSDKError`` that kills the whole turn.
-        From the user's seat: "我发一句你好就爆 fatal error".
 
-        Pre-flight the glob once per turn. If the file is gone, drop the id
-        from the map and persist, so this turn (and subsequent ones) start
-        fresh. ``locate_session_jsonl`` is a single directory glob — cheap
-        even with a large ``projects/`` root.
+        For Codex: session persistence is server-side (the thread id lives
+        on the Codex app-server, not as a local JSONL). The transcript
+        file is keyed by ``bridge_session_id``, not the SDK thread id
+        stored in ``_sessions``, so the disk check would always fail.
+        Skip the JSONL pre-flight and trust the server; stale threads
+        are caught by ``StaleSessionError`` at ``run_turn`` time.
         """
         sid = self._sessions.get(sk)
         if not sid:
             return None
+
+        if self._backend.name == "codex_cli":
+            return sid
+
         cwd = prefer_cwd or WORKDIR
         if locate_session_jsonl(sid, prefer_cwd=cwd) is not None:
             return sid
