@@ -70,8 +70,12 @@ class WecomChannel(Channel):
         import asyncio
 
         class _QuietLogger:
+            _HEARTBEAT_KEYWORDS = ("heartbeat", "pong")
+
             def debug(self, msg: str, *args: object) -> None:
-                pass
+                lower = msg.lower() if isinstance(msg, str) else ""
+                if any(kw in lower for kw in self._HEARTBEAT_KEYWORDS):
+                    log.debug("[AiBotSDK] %s", msg)
             def info(self, msg: str, *args: object) -> None:
                 log.info("[AiBotSDK] %s", msg)
             def warn(self, msg: str, *args: object) -> None:
