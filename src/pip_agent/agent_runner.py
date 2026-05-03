@@ -93,9 +93,10 @@ def _build_env() -> dict[str, str]:
 def _builtin_disallowed_tools() -> list[str]:
     """Tools to strip from Claude Code's built-in set.
 
-    When ``USE_CUSTOM_WEB_TOOLS=true`` (default), our MCP ``web_search``
-    / ``web_fetch`` replace CC's native ``WebSearch`` / ``WebFetch``
-    whose schema some upstream proxies reject.
+    When ``USE_CUSTOM_WEB_TOOLS=true``, our MCP ``web_search`` /
+    ``web_fetch`` replace CC's native ``WebSearch`` / ``WebFetch``
+    whose schema some upstream proxies reject.  Default is False
+    (both backends use their own native web tools).
 
     In headless mode (``--headless``), only tools that genuinely need a
     real-time user reply are disabled — ``AskUserQuestion``, whose

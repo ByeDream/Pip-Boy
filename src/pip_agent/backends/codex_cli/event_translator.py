@@ -268,18 +268,22 @@ async def translate_event(
     if etype == "TurnPlanUpdatedNotificationModel":
         plan = getattr(event.params, "plan", None)
         if plan is not None:
-            steps = getattr(plan, "steps", []) or []
-            plan_data = []
-            for step in steps:
-                plan_data.append({
-                    "title": getattr(step, "title", ""),
-                    "status": str(getattr(step, "status", "")),
+            steps = plan if isinstance(plan, list) else (getattr(plan, "steps", []) or [])
+            _STATUS_MAP = {"inProgress": "in_progress"}
+            todos = []
+            for idx, step in enumerate(steps):
+                status_obj = getattr(step, "status", None)
+                raw_status = str(getattr(status_obj, "root", status_obj) or "pending")
+                todos.append({
+                    "id": str(idx),
+                    "content": str(getattr(step, "step", "") or getattr(step, "title", "") or ""),
+                    "status": _STATUS_MAP.get(raw_status, raw_status),
                 })
             await cb(
                 "tool_use",
                 id="plan-update",
                 name="TodoWrite",
-                input={"plan": plan_data},
+                input={"todos": todos},
             )
             await cb(
                 "tool_result",

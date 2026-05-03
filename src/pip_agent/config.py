@@ -135,11 +135,13 @@ class Settings(BaseSettings):
     # every turn back to the one-shot path (useful for A/B comparison).
     enable_streaming_session: bool = Field(default=True)
 
-    # When True, register our own web_search / web_fetch MCP tools and
-    # disable Claude Code's native WebSearch / WebFetch. Some upstream
-    # proxies reject the native tool schema. Set to False to use CC's
-    # built-in web tools when the upstream supports them.
-    use_custom_web_tools: bool = Field(default=True)
+    # When True, register our own web_search / web_fetch MCP tools on
+    # both backends.  On Claude Code this also disables the native
+    # WebSearch / WebFetch (useful when the upstream proxy rejects the
+    # native tool schema).  On Codex, native web tools are always
+    # available — setting this to True adds MCP alternatives alongside
+    # them.  Default False: both backends use their own native web tools.
+    use_custom_web_tools: bool = Field(default=False)
 
     # Interval (seconds) between ASCII art animation frame advances.
     # Set to 0 to disable animation (single-frame themes are unaffected).
