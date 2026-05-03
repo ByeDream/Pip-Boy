@@ -61,6 +61,9 @@ class CodexStreamingSession:
         model: str | None = None,
         sandbox: str = "workspace-write",
         resume_session_id: str | None = None,
+        sender_id: str = "",
+        peer_id: str = "",
+        account_id: str = "",
     ) -> None:
         self.session_key = session_key
         self.session_id: str = resume_session_id or ""
@@ -73,6 +76,9 @@ class CodexStreamingSession:
         self._sandbox = sandbox
         self._system_prompt_append = system_prompt_append
         self._model = model
+        self._sender_id = sender_id
+        self._peer_id = peer_id
+        self._account_id = account_id
         self._client: Any = None
         self._thread: Any = None
         self._closed = False
@@ -91,6 +97,16 @@ class CodexStreamingSession:
             ) from exc
 
         async with _profile.span("codex_session.connect"):
+            import os
+            for env_key, val in (
+                ("PIP_SENDER_ID", self._sender_id),
+                ("PIP_PEER_ID", self._peer_id),
+                ("PIP_SESSION_ID", self.session_id),
+                ("PIP_ACCOUNT_ID", self._account_id),
+            ):
+                if val:
+                    os.environ[env_key] = val
+
             api_key = self._resolve_api_key()
             opts = CodexOptions(api_key=api_key) if api_key else None
             self._client = Codex(opts)
@@ -161,6 +177,14 @@ class CodexStreamingSession:
 
         if self._closed or self._thread is None:
             raise StaleSessionError("Session is closed or not connected")
+
+        import os
+        if sender_id:
+            os.environ["PIP_SENDER_ID"] = sender_id
+        if peer_id:
+            os.environ["PIP_PEER_ID"] = peer_id
+        if account_id:
+            os.environ["PIP_ACCOUNT_ID"] = account_id
 
         self.last_used_ns = time.monotonic_ns()
         self.turn_count += 1

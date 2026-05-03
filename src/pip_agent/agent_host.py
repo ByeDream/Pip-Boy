@@ -1153,6 +1153,7 @@ class AgentHost:
                 return await self._backend.run_query(
                     prompt=prepared.prompt,
                     mcp_ctx=mcp_ctx,
+                    model_chain=prepared.model_chain,
                     session_id=current_session_id,
                     system_prompt_append=prepared.system_prompt,
                     cwd=prepared.paths.cwd,
@@ -2145,6 +2146,7 @@ class AgentHost:
                                 result = await self._backend.run_query(
                                     prompt=prepared.prompt,
                                     mcp_ctx=mcp_ctx,
+                                    model_chain=prepared.model_chain,
                                     session_id=session_for_turn,
                                     system_prompt_append=prepared.system_prompt,
                                     cwd=prepared.paths.cwd,
