@@ -11,10 +11,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest import mock
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import TYPE_CHECKING
+from unittest.mock import MagicMock, patch
 
 import pytest
+
+if TYPE_CHECKING:
+    from pip_agent.backends.codex_cli.streaming import CodexStreamingSession
 
 
 # ---------------------------------------------------------------------------
@@ -67,13 +70,46 @@ class TestTranscriptCapture:
                 path = sess._init_transcript_path()
                 assert path is not None
                 assert path.parent.name == "codex_sessions"
-                assert path.name == "test-session-id.jsonl"
+                assert path.name == f"{sess.reflect_session_id}.jsonl"
                 assert path.parent.is_dir()
 
-    def test_init_transcript_path_none_without_session_id(self, tmp_path: Path):
+    def test_init_transcript_path_none_without_reflect_session_id(
+        self, tmp_path: Path,
+    ):
         sess = self._make_session(tmp_path)
-        sess.session_id = ""
+        sess._bridge_session_id = ""
         assert sess._init_transcript_path() is None
+
+    def test_transcript_path_uses_bridge_id_not_resume_id(self, tmp_path: Path):
+        sess = self._make_session(tmp_path)
+        sess.session_id = "codex-thread-id"
+        sess._bridge_session_id = "bridge-reflect-id"
+
+        with patch("pip_agent.config.WORKDIR", tmp_path):
+            path = sess._init_transcript_path()
+
+        assert path is not None
+        assert path.name == "bridge-reflect-id.jsonl"
+        assert sess.session_id == "codex-thread-id"
+
+    def test_bridge_session_alias_survives_resume(self, tmp_path: Path):
+        from pip_agent.backends.codex_cli.streaming import CodexStreamingSession
+
+        with patch("pip_agent.config.WORKDIR", tmp_path):
+            sess = self._make_session(tmp_path)
+            sess.session_id = "codex-thread-id"
+            sess._bridge_session_id = "bridge-reflect-id"
+            sess._write_bridge_session_alias()
+
+            resumed = CodexStreamingSession(
+                session_key="test-key",
+                cwd=str(tmp_path),
+                system_prompt_append="",
+                resume_session_id="codex-thread-id",
+            )
+
+        assert resumed.session_id == "codex-thread-id"
+        assert resumed.reflect_session_id == "bridge-reflect-id"
 
     @pytest.mark.asyncio
     async def test_transcript_captures_during_run_turn(self, tmp_path: Path):
@@ -152,6 +188,7 @@ class TestMaybeCodexReflect:
         session = MagicMock()
         session.turn_count = turn_count
         session.session_id = "test-sid-1234567890"
+        session.reflect_session_id = "reflect-sid-1234567890"
         if has_transcript:
             tp = tmp_path / "test.jsonl"
             tp.write_text('{"role":"user","content":"hi"}\n')
@@ -188,6 +225,10 @@ class TestMaybeCodexReflect:
                 session_key="key", mcp_ctx=mcp_ctx,
             )
             mock_reflect.assert_called_once()
+            assert (
+                mock_reflect.call_args.kwargs["session_id"]
+                == "reflect-sid-1234567890"
+            )
 
     @pytest.mark.asyncio
     async def test_reflect_skips_below_threshold(self, tmp_path: Path):
@@ -283,6 +324,7 @@ class TestEnsureCodexConfigBoot:
     def test_ensure_codex_config_code_in_run_host(self):
         """run_host contains the ensure_codex_config call for codex backend."""
         import inspect
+
         from pip_agent.agent_host import run_host
 
         source = inspect.getsource(run_host)
@@ -292,6 +334,7 @@ class TestEnsureCodexConfigBoot:
     def test_ensure_codex_config_function_callable(self):
         """ensure_codex_config is importable and callable."""
         from pip_agent.backends.codex_cli.config_gen import ensure_codex_config
+
         assert callable(ensure_codex_config)
 
 

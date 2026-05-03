@@ -67,6 +67,9 @@ class CodexStreamingSession:
     ) -> None:
         self.session_key = session_key
         self.session_id: str = resume_session_id or ""
+        self._bridge_session_id: str = self._resolve_bridge_session_id(
+            resume_session_id,
+        )
         self.last_used_ns: int = time.monotonic_ns()
         self.created_ns: int = time.monotonic_ns()
         self.turn_count: int = 0
@@ -83,6 +86,63 @@ class CodexStreamingSession:
         self._thread: Any = None
         self._closed = False
         self._transcript_path: Path | None = None
+
+    @property
+    def reflect_session_id(self) -> str:
+        """Session id used by transcript lookup and reflect cursors."""
+        return self._bridge_session_id
+
+    @classmethod
+    def _resolve_bridge_session_id(
+        cls, resume_session_id: str | None,
+    ) -> str:
+        """Return the stable session id visible to MCP reflect tools."""
+        if resume_session_id:
+            return (
+                cls._load_bridge_session_id(resume_session_id)
+                or resume_session_id
+            )
+
+        import uuid
+
+        return uuid.uuid4().hex
+
+    @staticmethod
+    def _codex_sessions_dir() -> Path:
+        from pip_agent.config import WORKDIR
+
+        return WORKDIR / ".pip" / "codex_sessions"
+
+    @classmethod
+    def _load_bridge_session_id(cls, session_id: str) -> str:
+        """Load the reflect id previously assigned to a Codex thread."""
+        try:
+            alias_path = cls._codex_sessions_dir() / f"{session_id}.bridge"
+            if not alias_path.is_file():
+                return ""
+            bridge_id = alias_path.read_text(encoding="utf-8").strip()
+            if not bridge_id or Path(bridge_id).name != bridge_id:
+                return ""
+            return bridge_id
+        except Exception:  # noqa: BLE001
+            log.debug("Failed to load Codex bridge session alias", exc_info=True)
+            return ""
+
+    def _write_bridge_session_alias(self) -> None:
+        """Persist Codex thread id to reflect id mapping for resume."""
+        if (
+            not self.session_id
+            or not self.reflect_session_id
+            or self.session_id == self.reflect_session_id
+        ):
+            return
+        try:
+            sessions_dir = self._codex_sessions_dir()
+            sessions_dir.mkdir(parents=True, exist_ok=True)
+            alias_path = sessions_dir / f"{self.session_id}.bridge"
+            alias_path.write_text(self.reflect_session_id, encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            log.debug("Failed to write Codex bridge session alias", exc_info=True)
 
     async def connect(self) -> None:
         """Start the Codex client and open (or resume) a thread."""
@@ -133,6 +193,7 @@ class CodexStreamingSession:
                 self._thread = self._client.start_thread(thread_opts)
                 self.session_id = self._thread.id
 
+            self._write_bridge_session_alias()
             self._transcript_path = self._init_transcript_path()
             log.info(
                 "Codex session connected: key=%s thread=%s transcript=%s",
@@ -255,14 +316,12 @@ class CodexStreamingSession:
         ``transcript_source.locate_session_jsonl`` scans, so the
         existing reflect pipeline finds them without changes.
         """
-        if not self.session_id:
+        if not self.reflect_session_id:
             return None
         try:
-            from pip_agent.config import WORKDIR
-
-            sessions_dir = WORKDIR / ".pip" / "codex_sessions"
+            sessions_dir = self._codex_sessions_dir()
             sessions_dir.mkdir(parents=True, exist_ok=True)
-            return sessions_dir / f"{self.session_id}.jsonl"
+            return sessions_dir / f"{self.reflect_session_id}.jsonl"
         except Exception:  # noqa: BLE001
             log.debug("Failed to init transcript path", exc_info=True)
             return None
@@ -289,6 +348,12 @@ class CodexStreamingSession:
         only reliable way to pass live host context to the bridge —
         ``os.environ`` mutations after the app-server starts do not
         propagate.
+
+        ``_bridge_session_id`` is pre-generated in ``__init__`` so
+        ``PIP_SESSION_ID`` is always available — even for brand-new
+        sessions where the SDK thread ID is not yet assigned.  The Host
+        persists the real ``session_id`` (SDK thread ID) for resume;
+        ``_bridge_session_id`` is only used for MCP bridge context.
         """
         import os
 
@@ -300,8 +365,8 @@ class CodexStreamingSession:
             env["PIP_SENDER_ID"] = self._sender_id
         if self._peer_id:
             env["PIP_PEER_ID"] = self._peer_id
-        if self.session_id:
-            env["PIP_SESSION_ID"] = self.session_id
+        if self._bridge_session_id:
+            env["PIP_SESSION_ID"] = self._bridge_session_id
         if self._account_id:
             env["PIP_ACCOUNT_ID"] = self._account_id
         return env

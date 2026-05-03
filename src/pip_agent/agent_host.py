@@ -2286,7 +2286,10 @@ class AgentHost:
         if transcript_path is None or not transcript_path.is_file():
             return
 
-        session_id = getattr(session, "session_id", None)
+        session_id = (
+            getattr(session, "reflect_session_id", None)
+            or getattr(session, "session_id", None)
+        )
         if not session_id:
             return
 

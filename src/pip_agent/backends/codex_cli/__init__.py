@@ -48,6 +48,7 @@ class CodexBackend:
 
         return await _run(
             prompt,
+            mcp_ctx=mcp_ctx,
             model_chain=model_chain,
             session_id=session_id,
             system_prompt_append=system_prompt_append,
