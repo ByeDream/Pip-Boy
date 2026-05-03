@@ -2997,8 +2997,18 @@ def run_host(*, force_no_tui: bool = False, headless: bool = False) -> None:
     ensure_claude_model_overrides()
 
     if settings.backend == "codex_cli":
+        from pip_agent.backends.codex_cli.config_gen import (
+            cleanup_global_mcp,
+            ensure_codex_config,
+            ensure_project_trusted,
+        )
+
+        if not headless and not ensure_project_trusted(WORKDIR):
+            print("Codex backend requires a trusted project. Exiting.")
+            raise SystemExit(1)
+
         try:
-            from pip_agent.backends.codex_cli.config_gen import ensure_codex_config
+            cleanup_global_mcp()
             ensure_codex_config(WORKDIR)
             _profile.cold_start("codex_config_ensured")
         except Exception:  # noqa: BLE001

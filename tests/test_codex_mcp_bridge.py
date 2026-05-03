@@ -20,64 +20,214 @@ def test_pip_block():
     assert "pip_agent.backends.codex_cli.mcp_bridge" in block
 
 
-def test_ensure_codex_config_creates_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_ensure_codex_config_creates_project_local(tmp_path: Path):
     from pip_agent.backends.codex_cli.config_gen import ensure_codex_config
 
-    fake_home = tmp_path / "home"
-    fake_home.mkdir()
-    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+    workdir = tmp_path / "project"
+    workdir.mkdir()
 
-    result = ensure_codex_config()
+    result = ensure_codex_config(workdir=workdir)
     assert result.exists()
+    assert result.parent.name == ".codex"
+    assert result.parent.parent == workdir
     content = result.read_text(encoding="utf-8")
     assert "[mcp_servers.pip]" in content
     assert "command = " in content
 
 
-def test_ensure_codex_config_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_ensure_codex_config_idempotent(tmp_path: Path):
     from pip_agent.backends.codex_cli.config_gen import ensure_codex_config
 
-    fake_home = tmp_path / "home"
-    fake_home.mkdir()
-    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+    workdir = tmp_path / "project"
+    workdir.mkdir()
 
-    ensure_codex_config()
-    ensure_codex_config()
+    ensure_codex_config(workdir=workdir)
+    ensure_codex_config(workdir=workdir)
 
-    content = (fake_home / ".codex" / "config.toml").read_text(encoding="utf-8")
+    content = (workdir / ".codex" / "config.toml").read_text(encoding="utf-8")
     assert content.count("[mcp_servers.pip]") == 1
 
 
-def test_ensure_codex_config_with_workdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_ensure_codex_config_with_workdir(tmp_path: Path):
     from pip_agent.backends.codex_cli.config_gen import ensure_codex_config
 
-    fake_home = tmp_path / "home"
-    fake_home.mkdir()
-    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
-
     workdir = tmp_path / "workspace"
+    workdir.mkdir()
     ensure_codex_config(workdir=workdir)
 
-    content = (fake_home / ".codex" / "config.toml").read_text(encoding="utf-8")
+    content = (workdir / ".codex" / "config.toml").read_text(encoding="utf-8")
     assert "PIP_WORKDIR" in content
     assert str(workdir).replace("\\", "/") in content
 
 
-def test_ensure_codex_config_preserves_existing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_ensure_codex_config_preserves_existing(tmp_path: Path):
     from pip_agent.backends.codex_cli.config_gen import ensure_codex_config
+
+    workdir = tmp_path / "project"
+    codex_dir = workdir / ".codex"
+    codex_dir.mkdir(parents=True)
+    config = codex_dir / "config.toml"
+    config.write_text('model = "gpt-5.5"\n', encoding="utf-8")
+
+    ensure_codex_config(workdir=workdir)
+    content = config.read_text(encoding="utf-8")
+    assert 'model = "gpt-5.5"' in content
+    assert "[mcp_servers.pip]" in content
+
+
+# ---------------------------------------------------------------------------
+# Project trust tests
+# ---------------------------------------------------------------------------
+
+def test_is_project_trusted_true(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from pip_agent.backends.codex_cli.config_gen import is_project_trusted
 
     fake_home = tmp_path / "home"
     codex_dir = fake_home / ".codex"
     codex_dir.mkdir(parents=True)
     config = codex_dir / "config.toml"
-    config.write_text('model_provider = "openai"\n', encoding="utf-8")
-
+    safe = str(tmp_path / "myproject").replace("\\", "/").lower()
+    config.write_text(
+        f"[projects.'{safe}']\ntrust_level = \"trusted\"\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
 
-    ensure_codex_config()
+    assert is_project_trusted(tmp_path / "myproject") is True
+
+
+def test_is_project_trusted_false(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from pip_agent.backends.codex_cli.config_gen import is_project_trusted
+
+    fake_home = tmp_path / "home"
+    codex_dir = fake_home / ".codex"
+    codex_dir.mkdir(parents=True)
+    config = codex_dir / "config.toml"
+    config.write_text('model = "gpt-5.5"\n', encoding="utf-8")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+
+    assert is_project_trusted(tmp_path / "myproject") is False
+
+
+def test_is_project_trusted_no_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from pip_agent.backends.codex_cli.config_gen import is_project_trusted
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+
+    assert is_project_trusted(tmp_path / "myproject") is False
+
+
+def test_add_project_trust(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from pip_agent.backends.codex_cli.config_gen import (
+        add_project_trust,
+        is_project_trusted,
+    )
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+
+    project = tmp_path / "myproject"
+    assert not is_project_trusted(project)
+    add_project_trust(project)
+    assert is_project_trusted(project)
+
+
+def test_ensure_project_trusted_already_trusted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    from pip_agent.backends.codex_cli.config_gen import ensure_project_trusted
+
+    fake_home = tmp_path / "home"
+    codex_dir = fake_home / ".codex"
+    codex_dir.mkdir(parents=True)
+    config = codex_dir / "config.toml"
+    safe = str(tmp_path / "proj").replace("\\", "/").lower()
+    config.write_text(
+        f"[projects.'{safe}']\ntrust_level = \"trusted\"\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+
+    assert ensure_project_trusted(tmp_path / "proj") is True
+
+
+def test_ensure_project_trusted_user_accepts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    from pip_agent.backends.codex_cli.config_gen import ensure_project_trusted
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+    monkeypatch.setattr("builtins.input", lambda _prompt: "y")
+
+    assert ensure_project_trusted(tmp_path / "proj") is True
+
+    config = (fake_home / ".codex" / "config.toml").read_text(encoding="utf-8")
+    assert 'trust_level = "trusted"' in config
+
+
+def test_ensure_project_trusted_user_declines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    from pip_agent.backends.codex_cli.config_gen import ensure_project_trusted
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+
+    assert ensure_project_trusted(tmp_path / "proj") is False
+
+
+# ---------------------------------------------------------------------------
+# cleanup_global_mcp tests
+# ---------------------------------------------------------------------------
+
+def test_cleanup_global_mcp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from pip_agent.backends.codex_cli.config_gen import cleanup_global_mcp
+
+    fake_home = tmp_path / "home"
+    codex_dir = fake_home / ".codex"
+    codex_dir.mkdir(parents=True)
+    config = codex_dir / "config.toml"
+    config.write_text(
+        'model = "gpt-5.5"\n\n'
+        "[mcp_servers.pip]\n"
+        "command = 'python'\n"
+        "args = ['-m', 'pip_agent.backends.codex_cli.mcp_bridge']\n\n"
+        "[mcp_servers.pip.env]\n"
+        "PIP_WORKDIR = '/some/path'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+
+    cleanup_global_mcp()
+
     content = config.read_text(encoding="utf-8")
-    assert 'model_provider = "openai"' in content
-    assert "[mcp_servers.pip]" in content
+    assert "[mcp_servers.pip]" not in content
+    assert 'model = "gpt-5.5"' in content
+
+
+def test_cleanup_global_mcp_noop_when_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    from pip_agent.backends.codex_cli.config_gen import cleanup_global_mcp
+
+    fake_home = tmp_path / "home"
+    codex_dir = fake_home / ".codex"
+    codex_dir.mkdir(parents=True)
+    config = codex_dir / "config.toml"
+    original = 'model = "gpt-5.5"\n'
+    config.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+
+    cleanup_global_mcp()
+
+    assert config.read_text(encoding="utf-8") == original
 
 
 # ---------------------------------------------------------------------------

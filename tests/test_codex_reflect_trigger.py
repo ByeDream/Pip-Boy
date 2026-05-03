@@ -329,6 +329,8 @@ class TestEnsureCodexConfigBoot:
 
         source = inspect.getsource(run_host)
         assert "ensure_codex_config" in source
+        assert "ensure_project_trusted" in source
+        assert "cleanup_global_mcp" in source
         assert 'settings.backend == "codex_cli"' in source
 
     def test_ensure_codex_config_function_callable(self):
@@ -336,6 +338,18 @@ class TestEnsureCodexConfigBoot:
         from pip_agent.backends.codex_cli.config_gen import ensure_codex_config
 
         assert callable(ensure_codex_config)
+
+    def test_ensure_project_trusted_callable(self):
+        """ensure_project_trusted is importable and callable."""
+        from pip_agent.backends.codex_cli.config_gen import ensure_project_trusted
+
+        assert callable(ensure_project_trusted)
+
+    def test_cleanup_global_mcp_callable(self):
+        """cleanup_global_mcp is importable and callable."""
+        from pip_agent.backends.codex_cli.config_gen import cleanup_global_mcp
+
+        assert callable(cleanup_global_mcp)
 
 
 # ---------------------------------------------------------------------------
