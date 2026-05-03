@@ -106,7 +106,9 @@ async def _run_query_with_chain(
         if api_key:
             options_kwargs["api_key"] = api_key
 
-        bridge_env = _build_bridge_env(mcp_ctx, session_id)
+        from pip_agent.backends.codex_cli.bridge_env import build_bridge_env
+
+        bridge_env = build_bridge_env(mcp_ctx=mcp_ctx, session_id=session_id or "")
         if bridge_env:
             options_kwargs["env"] = bridge_env
 
@@ -211,28 +213,6 @@ async def _run_query_with_chain(
         error=f"All models in chain exhausted; last error: {last_exc}",
     )
     return result
-
-
-def _build_bridge_env(mcp_ctx: Any, session_id: str | None) -> dict[str, str]:
-    """Build env dict for CodexOptions so MCP bridge gets identity context."""
-    import os
-
-    env: dict[str, str] = {}
-    workdir = os.environ.get("PIP_WORKDIR", "")
-    if workdir:
-        env["PIP_WORKDIR"] = workdir
-    if session_id:
-        env["PIP_SESSION_ID"] = session_id
-    if mcp_ctx is not None:
-        for attr, key in (
-            ("sender_id", "PIP_SENDER_ID"),
-            ("peer_id", "PIP_PEER_ID"),
-            ("account_id", "PIP_ACCOUNT_ID"),
-        ):
-            val = getattr(mcp_ctx, attr, "") or ""
-            if val:
-                env[key] = val
-    return env
 
 
 def _blocks_to_text(blocks: list[dict[str, Any]]) -> str:

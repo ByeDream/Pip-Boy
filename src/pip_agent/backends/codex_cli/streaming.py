@@ -341,35 +341,20 @@ class CodexStreamingSession:
             log.debug("transcript append failed", exc_info=True)
 
     def _build_bridge_env(self) -> dict[str, str]:
-        """Build env dict passed to ``CodexOptions(env=...)```.
+        """Build env dict passed to ``CodexOptions(env=...)``.
 
-        The Codex app-server inherits these env vars and propagates them
-        to child MCP server processes (the STDIO bridge).  This is the
-        only reliable way to pass live host context to the bridge —
-        ``os.environ`` mutations after the app-server starts do not
-        propagate.
-
-        ``_bridge_session_id`` is pre-generated in ``__init__`` so
+        Uses ``_bridge_session_id`` (pre-generated in ``__init__``) so
         ``PIP_SESSION_ID`` is always available — even for brand-new
-        sessions where the SDK thread ID is not yet assigned.  The Host
-        persists the real ``session_id`` (SDK thread ID) for resume;
-        ``_bridge_session_id`` is only used for MCP bridge context.
+        sessions where the SDK thread ID is not yet assigned.
         """
-        import os
+        from pip_agent.backends.codex_cli.bridge_env import build_bridge_env
 
-        env: dict[str, str] = {}
-        workdir = os.environ.get("PIP_WORKDIR", "")
-        if workdir:
-            env["PIP_WORKDIR"] = workdir
-        if self._sender_id:
-            env["PIP_SENDER_ID"] = self._sender_id
-        if self._peer_id:
-            env["PIP_PEER_ID"] = self._peer_id
-        if self._bridge_session_id:
-            env["PIP_SESSION_ID"] = self._bridge_session_id
-        if self._account_id:
-            env["PIP_ACCOUNT_ID"] = self._account_id
-        return env
+        return build_bridge_env(
+            session_id=self._bridge_session_id,
+            sender_id=self._sender_id,
+            peer_id=self._peer_id,
+            account_id=self._account_id,
+        )
 
     @staticmethod
     def _resolve_api_key() -> str | None:
