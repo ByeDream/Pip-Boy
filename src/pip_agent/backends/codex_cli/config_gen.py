@@ -32,12 +32,19 @@ def pip_mcp_server_toml_block() -> str:
     )
 
 
-def _needs_rewrite(content: str) -> bool:
+def _needs_rewrite(content: str, workdir: Path | None = None) -> bool:
     """True if the existing pip MCP block is missing or outdated."""
     if "[mcp_servers.pip]" not in content:
         return True
     if _VERSION_MARKER not in content:
         return True
+    python = sys.executable.replace("\\", "/")
+    if python not in content:
+        return True
+    if workdir:
+        safe_path = str(workdir).replace("\\", "/")
+        if safe_path not in content:
+            return True
     return False
 
 
@@ -74,7 +81,7 @@ def ensure_codex_config(workdir: Path | None = None) -> Path:
     else:
         content = ""
 
-    if _needs_rewrite(content):
+    if _needs_rewrite(content, workdir=workdir):
         content = _strip_old_pip_block(content)
         block = pip_mcp_server_toml_block()
 

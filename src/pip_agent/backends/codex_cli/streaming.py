@@ -97,19 +97,16 @@ class CodexStreamingSession:
             ) from exc
 
         async with _profile.span("codex_session.connect"):
-            import os
-            for env_key, val in (
-                ("PIP_SENDER_ID", self._sender_id),
-                ("PIP_PEER_ID", self._peer_id),
-                ("PIP_SESSION_ID", self.session_id),
-                ("PIP_ACCOUNT_ID", self._account_id),
-            ):
-                if val:
-                    os.environ[env_key] = val
-
             api_key = self._resolve_api_key()
-            opts = CodexOptions(api_key=api_key) if api_key else None
-            self._client = Codex(opts)
+            codex_env = self._build_bridge_env()
+            opts_kwargs: dict[str, Any] = {}
+            if api_key:
+                opts_kwargs["api_key"] = api_key
+            if codex_env:
+                opts_kwargs["env"] = codex_env
+            self._client = Codex(
+                CodexOptions(**opts_kwargs) if opts_kwargs else None,
+            )
 
             thread_opts = ThreadStartOptions(
                 sandbox=proto.SandboxMode(root=self._sandbox),
@@ -177,14 +174,6 @@ class CodexStreamingSession:
 
         if self._closed or self._thread is None:
             raise StaleSessionError("Session is closed or not connected")
-
-        import os
-        if sender_id:
-            os.environ["PIP_SENDER_ID"] = sender_id
-        if peer_id:
-            os.environ["PIP_PEER_ID"] = peer_id
-        if account_id:
-            os.environ["PIP_ACCOUNT_ID"] = account_id
 
         self.last_used_ns = time.monotonic_ns()
         self.turn_count += 1
@@ -291,6 +280,31 @@ class CodexStreamingSession:
                 fh.write(line + "\n")
         except Exception:  # noqa: BLE001
             log.debug("transcript append failed", exc_info=True)
+
+    def _build_bridge_env(self) -> dict[str, str]:
+        """Build env dict passed to ``CodexOptions(env=...)```.
+
+        The Codex app-server inherits these env vars and propagates them
+        to child MCP server processes (the STDIO bridge).  This is the
+        only reliable way to pass live host context to the bridge —
+        ``os.environ`` mutations after the app-server starts do not
+        propagate.
+        """
+        import os
+
+        env: dict[str, str] = {}
+        workdir = os.environ.get("PIP_WORKDIR", "")
+        if workdir:
+            env["PIP_WORKDIR"] = workdir
+        if self._sender_id:
+            env["PIP_SENDER_ID"] = self._sender_id
+        if self._peer_id:
+            env["PIP_PEER_ID"] = self._peer_id
+        if self.session_id:
+            env["PIP_SESSION_ID"] = self.session_id
+        if self._account_id:
+            env["PIP_ACCOUNT_ID"] = self._account_id
+        return env
 
     @staticmethod
     def _resolve_api_key() -> str | None:
