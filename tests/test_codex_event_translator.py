@@ -315,7 +315,7 @@ async def test_plan_updated():
         "tool_use",
         id="plan-update",
         name="TodoWrite",
-        input={"plan": [{"title": "Setup env", "status": "pending"}]},
+        input={"todos": [{"id": "0", "content": "Setup env", "status": "pending"}]},
     )
     cb.assert_any_await("tool_result", tool_use_id="plan-update", is_error=False)
 

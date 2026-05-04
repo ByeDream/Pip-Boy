@@ -48,6 +48,8 @@ class LLMResponse:
 class _Messages:
     """Namespace that mirrors ``anthropic.Anthropic().messages``."""
 
+    _RETRIES = 3
+
     def __init__(self, base_url: str, api_key: str, timeout: float) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
@@ -71,19 +73,20 @@ class _Messages:
             oai_messages.extend(messages)
 
         url = f"{self._base_url}/v1/chat/completions"
-        resp = httpx.post(
-            url,
-            headers={
-                "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "messages": oai_messages,
-                "max_tokens": max_tokens,
-            },
-            timeout=self._timeout,
-        )
+        transport = httpx.HTTPTransport(retries=self._RETRIES)
+        with httpx.Client(transport=transport, timeout=self._timeout) as client:
+            resp = client.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": oai_messages,
+                    "max_tokens": max_tokens,
+                },
+            )
         resp.raise_for_status()
         data = resp.json()
 

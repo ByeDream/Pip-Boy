@@ -176,7 +176,7 @@ class TestBlockListPromptWrapped:
         assert "pip" in fake.captured_options.mcp_servers
 
     def test_web_builtins_are_disallowed_so_pip_versions_own_namespace(
-        self, tmp_path,
+        self, tmp_path, monkeypatch,
     ):
         """Built-in ``WebFetch`` and ``WebSearch`` must both be removed
         from the model's option set so the agent uses the Pip-Boy
@@ -185,6 +185,9 @@ class TestBlockListPromptWrapped:
         the bundled beta-gated server-side tools — the corporate
         gateway rejects the experimental-betas header those require.
         """
+        from pip_agent.config import settings
+        monkeypatch.setattr(settings, "use_custom_web_tools", True)
+
         fake = _FakeQuery()
         ctx = McpContext(workdir=tmp_path)
         with patch.object(agent_runner, "query", fake):

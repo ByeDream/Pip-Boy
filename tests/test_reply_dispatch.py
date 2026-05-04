@@ -323,10 +323,11 @@ class TestReapStaleSession:
     contract: the id silently drops, next turn starts fresh.
     """
 
-    def _host(self, sessions: dict[str, str]) -> object:
+    def _host(self, sessions: dict[str, str], backend_name: str = "claude_code") -> object:
         from types import SimpleNamespace
 
-        return SimpleNamespace(_sessions=dict(sessions))
+        backend = SimpleNamespace(name=backend_name)
+        return SimpleNamespace(_sessions=dict(sessions), _backend=backend)
 
     def test_live_session_is_returned_untouched(self, monkeypatch, tmp_path):
         import pip_agent.agent_host as mod
