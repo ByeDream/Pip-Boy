@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from pip_agent.backends.codex_cli.event_translator import translate_event
+from pip_agent.backends.codex_cli.turn_options import build_turn_options
 
 # ---------------------------------------------------------------------------
 # Helpers — lightweight fakes for SDK notification objects
@@ -44,6 +45,47 @@ def _make_event(type_name: str, params: _FakeParams) -> Any:
     """Build a fake notification with ``type(event).__name__ == type_name``."""
     cls = type(type_name, (), {"params": params})
     return cls()
+
+
+# ---------------------------------------------------------------------------
+# turn options
+# ---------------------------------------------------------------------------
+
+
+def test_turn_options_explicitly_reset_default_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pip_agent.config import settings
+
+    monkeypatch.setattr(settings, "agent_mode", "default")
+
+    opts = build_turn_options(
+        model="gpt-5.5",
+        developer_instructions="pip rules",
+        effort=None,
+    )
+
+    assert opts is not None
+    assert opts.collaboration_mode is not None
+    assert opts.collaboration_mode.mode.root == "default"
+
+
+def test_turn_options_set_plan_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pip_agent.config import settings
+
+    monkeypatch.setattr(settings, "agent_mode", "plan")
+
+    opts = build_turn_options(
+        model="gpt-5.5",
+        developer_instructions="pip rules",
+        effort=None,
+    )
+
+    assert opts is not None
+    assert opts.collaboration_mode is not None
+    assert opts.collaboration_mode.mode.root == "plan"
 
 
 # ---------------------------------------------------------------------------

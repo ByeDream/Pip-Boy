@@ -36,18 +36,17 @@ def build_turn_options(
         kwargs["effort"] = effort
 
     mode = normalized_agent_mode(settings.agent_mode)
-    if mode == "plan":
-        kwargs["collaboration_mode"] = proto.CollaborationMode(
-            mode=proto.ModeKind(root="plan"),
-            settings=proto.Settings(
-                # Let Codex apply its built-in Plan Mode instruction pack.
-                # Pip-Boy's persona/rules still ride on the thread-level
-                # developer_instructions passed at start/resume.
-                developer_instructions=None,
-                model=model or "",
-                reasoning_effort=effort,
-            ),
-        )
+    kwargs["collaboration_mode"] = proto.CollaborationMode(
+        mode=proto.ModeKind(root=mode),
+        settings=proto.Settings(
+            # Let Codex apply its built-in collaboration-mode instruction
+            # pack. Pip-Boy's persona/rules still ride on the thread-level
+            # developer_instructions passed at start/resume.
+            developer_instructions=None,
+            model=model or "",
+            reasoning_effort=effort,
+        ),
+    )
 
     return TurnOptions(**kwargs) if kwargs else None
 
