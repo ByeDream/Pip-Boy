@@ -125,6 +125,9 @@ async def _run_query_with_chain(
             options_kwargs["config"] = config_override
 
         client = Codex(CodexOptions(**options_kwargs) if options_kwargs else None)
+        from pip_agent.backends.codex_cli.turn_options import (
+            ensure_experimental_api,
+        )
 
         result = QueryResult()
         state: dict[str, Any] = {"start_ns": time.perf_counter_ns()}
@@ -132,6 +135,7 @@ async def _run_query_with_chain(
         try:
             async with _profile.span("codex.run_query"):
                 start_ns = time.perf_counter_ns()
+                ensure_experimental_api(client)
 
                 thread_opts = ThreadStartOptions(
                     sandbox=proto.SandboxMode(root=sandbox),
@@ -162,15 +166,19 @@ async def _run_query_with_chain(
                     prompt if isinstance(prompt, str)
                     else _blocks_to_text(prompt)
                 )
-                from codex import TurnOptions
+                from pip_agent.backends.codex_cli.turn_options import (
+                    build_turn_options,
+                )
 
-                turn_opts_kwargs: dict[str, Any] = {}
                 effort_val = _resolve_reasoning_effort()
-                if effort_val is not None:
-                    turn_opts_kwargs["effort"] = effort_val
+                turn_options = build_turn_options(
+                    model=model_candidate,
+                    developer_instructions=system_prompt_append,
+                    effort=effort_val,
+                )
                 stream = thread.run(
                     prompt_text,
-                    TurnOptions(**turn_opts_kwargs) if turn_opts_kwargs else None,
+                    turn_options,
                 )
 
                 async for event in _async_iter(stream):

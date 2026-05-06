@@ -372,7 +372,7 @@ class TestHandlerOutputs:
         body = result.response or ""
         for cmd in (
             "/help", "/status", "/memory", "/axioms", "/cron",
-            "/bind <id>", "/unbind",
+            "/mode", "/bind <id>", "/unbind",
             "/subagent", "/subagent create",
             "/subagent reset <id>",
             "/exit",
@@ -567,6 +567,73 @@ class TestHandlerOutputs:
         result = dispatch_command(ctx)
         assert result.handled
         assert "CLI" in (result.response or "")
+
+
+# ---------------------------------------------------------------------------
+# /mode — shared agent-mode toggle
+# ---------------------------------------------------------------------------
+
+
+class TestModeCommand:
+    def test_mode_query_reports_current_agent_mode(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        from pip_agent.config import settings
+
+        monkeypatch.setattr(settings, "agent_mode", "plan")
+
+        ctx = _build_ctx(_cli_inbound("/mode"), tmp_path)
+        result = dispatch_command(ctx)
+
+        assert result.handled
+        body = result.response or ""
+        assert "plan" in body
+        assert "default" in body
+
+    def test_mode_sets_plan_mode_for_codex(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        from pip_agent.config import settings
+
+        monkeypatch.setattr(settings, "backend", "codex_cli")
+        monkeypatch.setattr(settings, "agent_mode", "default")
+
+        ctx = _build_ctx(_cli_inbound("/mode plan"), tmp_path)
+        result = dispatch_command(ctx)
+
+        assert result.handled
+        assert settings.agent_mode == "plan"
+        assert "explicit Plan Mode" in (result.response or "")
+
+    def test_mode_sets_plan_mode_for_claude(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        from pip_agent.config import settings
+
+        monkeypatch.setattr(settings, "backend", "claude_code")
+        monkeypatch.setattr(settings, "agent_mode", "default")
+
+        ctx = _build_ctx(_cli_inbound("/mode plan"), tmp_path)
+        result = dispatch_command(ctx)
+
+        assert result.handled
+        assert settings.agent_mode == "plan"
+        assert "explicit Plan Mode" in (result.response or "")
+
+    def test_mode_rejects_invalid_value(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        from pip_agent.config import settings
+
+        monkeypatch.setattr(settings, "backend", "codex_cli")
+        monkeypatch.setattr(settings, "agent_mode", "default")
+
+        ctx = _build_ctx(_cli_inbound("/mode maybe"), tmp_path)
+        result = dispatch_command(ctx)
+
+        assert result.handled
+        assert settings.agent_mode == "default"
+        assert "Unknown" in (result.response or "")
 
 
 # ---------------------------------------------------------------------------

@@ -151,6 +151,20 @@ async def translate_event(
             await cb("text_delta", text=delta)
         return
 
+    # -- Plan delta (Codex Plan Mode) ------------------------------------
+    if etype in (
+        "ItemPlanDeltaNotification",
+        "ItemPlanDeltaNotificationModel",
+    ):
+        delta = getattr(event.params, "delta", "") or ""
+        if delta:
+            state.setdefault("codex_plan_text", "")
+            state["codex_plan_text"] += delta
+            item_id = getattr(event.params, "itemId", "") or ""
+            if item_id:
+                state["codex_plan_item_id"] = item_id
+        return
+
     # -- Reasoning / thinking delta --------------------------------------
     if etype in (
         "ItemReasoningTextDeltaNotification",
@@ -258,6 +272,23 @@ async def translate_event(
                 tool_use_id=getattr(item, "id", ""),
                 is_error=False,
             )
+        elif item_type == "plan":
+            plan = (
+                getattr(item, "text", "")
+                or state.get("codex_plan_text", "")
+                or ""
+            )
+            plan = plan.strip()
+            if plan and not state.get("codex_plan_emitted"):
+                state["codex_plan_emitted"] = True
+                await cb(
+                    "tool_use",
+                    id=getattr(item, "id", "")
+                    or state.get("codex_plan_item_id", "")
+                    or "codex-exit-plan-mode",
+                    name="ExitPlanMode",
+                    input={"plan": plan},
+                )
         elif item_type in ("agent_message", "agentMessage"):
             text = getattr(item, "text", "") or ""
             if text:

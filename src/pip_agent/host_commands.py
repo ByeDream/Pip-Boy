@@ -381,6 +381,8 @@ _HELP_COMMON = (
     "- **`/status`** — Current agent, session, and binding.\n"
     "- **`/effort [level]`** — Show or set Codex reasoning effort "
     "(`none`|`minimal`|`low`|`medium`|`high`|`xhigh`). Claude: `-`.\n"
+    "- **`/mode [default|plan]`** — Show or set agent mode for both "
+    "backends. Use `plan` for explicit Plan Mode turns.\n"
     "- **`/memory`** — Memory statistics for the current agent.\n"
     "- **`/axioms`** — Current judgment principles.\n"
     "- **`/recall <query>`** — Search stored memories.\n"
@@ -502,18 +504,20 @@ def _cmd_status(ctx: CommandContext, _args: str) -> CommandResult:
     resolved = primary_model(tier)  # type: ignore[arg-type]
     model_display = f"{tier} ({resolved})" if resolved else f"{tier} (no model configured)"
     from pip_agent.config import settings as _settings
+    from pip_agent.runtime_mode import normalized_agent_mode
 
-    effort_display = (
-        (_settings.codex_reasoning_effort or "medium")
-        if _settings.backend == "codex_cli"
-        else "-"
-    )
+    mode_display = normalized_agent_mode(_settings.agent_mode)
+    if _settings.backend == "codex_cli":
+        effort_display = _settings.codex_reasoning_effort or "medium"
+    else:
+        effort_display = "-"
 
     lines = [
         f"Agent: {agent.name or agent.id} ({agent.id})",
         f"Backend: {_settings.backend}",
         f"Model: {model_display}",
         f"Effort: {effort_display}",
+        f"Mode: {mode_display}",
         f"Scope: {effective.effective_dm_scope}",
         f"Session: {sk}",
         f"Channel: {inbound.channel}",
@@ -562,6 +566,42 @@ def _cmd_effort(ctx: CommandContext, args: str) -> CommandResult:
     return CommandResult(
         handled=True,
         response=f"Reasoning effort set to **{level}** (takes effect next turn).",
+    )
+
+
+# ---------------------------------------------------------------------------
+# /mode — live agent-mode toggle
+# ---------------------------------------------------------------------------
+
+
+def _cmd_mode(ctx: CommandContext, args: str) -> CommandResult:
+    from pip_agent.config import settings as _settings
+    from pip_agent.runtime_mode import VALID_AGENT_MODES, normalized_agent_mode
+
+    mode = args.strip().lower()
+    valid = ", ".join(sorted(VALID_AGENT_MODES))
+    if not mode:
+        current = normalized_agent_mode(_settings.agent_mode)
+        return CommandResult(
+            handled=True,
+            response=f"Current agent mode: **{current}**\n\n"
+            f"Valid modes: {valid}",
+        )
+
+    if mode not in VALID_AGENT_MODES:
+        return CommandResult(
+            handled=True,
+            response=f"Unknown agent mode `{mode}`. Valid: {valid}",
+        )
+
+    _settings.agent_mode = mode
+    if mode == "plan":
+        detail = "Subsequent turns will run in explicit Plan Mode."
+    else:
+        detail = "Subsequent turns will run in default coding mode."
+    return CommandResult(
+        handled=True,
+        response=f"Agent mode set to **{mode}**. {detail}",
     )
 
 
@@ -2702,6 +2742,7 @@ _HANDLERS: dict[
     "/help": _cmd_help,
     "/status": _cmd_status,
     "/effort": _cmd_effort,
+    "/mode": _cmd_mode,
     "/memory": _cmd_memory,
     "/axioms": _cmd_axioms,
     "/recall": _cmd_recall,

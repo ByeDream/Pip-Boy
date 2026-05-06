@@ -141,7 +141,9 @@ class StreamingSession:
         from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
         from pip_agent import _profile
+        from pip_agent.config import settings
         from pip_agent.models import is_model_invalid_error
+        from pip_agent.runtime_mode import claude_permission_mode
 
         last_exc: BaseException | None = None
         for idx, candidate in enumerate(self._model_chain):
@@ -162,7 +164,7 @@ class StreamingSession:
                     if self._system_prompt_append
                     else None
                 ),
-                permission_mode="bypassPermissions",
+                permission_mode=claude_permission_mode(settings.agent_mode),
                 setting_sources=["project", "user"],
                 env=_build_env(),
                 disallowed_tools=_builtin_disallowed_tools(),
@@ -381,6 +383,8 @@ class StreamingSession:
         )
 
         from pip_agent import _profile
+        from pip_agent.config import settings
+        from pip_agent.runtime_mode import claude_permission_mode
 
         use_stream_events = on_stream_event is not None
 
@@ -427,6 +431,9 @@ class StreamingSession:
             prompt_kind="str" if isinstance(prompt, str) else "blocks",
         ):
             try:
+                await self._client.set_permission_mode(
+                    claude_permission_mode(settings.agent_mode),
+                )
                 await self._client.query(send_prompt)
 
                 async for message in self._client.receive_response():

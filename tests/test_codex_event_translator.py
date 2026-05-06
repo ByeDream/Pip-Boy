@@ -320,6 +320,50 @@ async def test_plan_updated():
     cb.assert_any_await("tool_result", tool_use_id="plan-update", is_error=False)
 
 
+@pytest.mark.asyncio
+async def test_plan_item_completed_emits_exit_plan_mode():
+    cb = AsyncMock()
+    item = _FakeItem(type="plan", id="plan-1", text="# Plan\n1. Review first")
+    ev = _make_event(
+        "ItemCompletedNotificationModel",
+        _FakeParams(item=_FakeItemWrapper(item)),
+    )
+
+    await translate_event(ev, cb, state={})
+
+    cb.assert_awaited_once_with(
+        "tool_use",
+        id="plan-1",
+        name="ExitPlanMode",
+        input={"plan": "# Plan\n1. Review first"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_plan_delta_accumulates_until_plan_item_completed():
+    cb = AsyncMock()
+    state: dict[str, Any] = {}
+    delta = _make_event(
+        "ItemPlanDeltaNotification",
+        _FakeParams(delta="# Plan\n", itemId="plan-1"),
+    )
+    completed = _make_event(
+        "ItemCompletedNotificationModel",
+        _FakeParams(item=_FakeItemWrapper(_FakeItem(type="plan", id="plan-1"))),
+    )
+
+    await translate_event(delta, cb, state=state)
+    cb.assert_not_awaited()
+
+    await translate_event(completed, cb, state=state)
+    cb.assert_awaited_once_with(
+        "tool_use",
+        id="plan-1",
+        name="ExitPlanMode",
+        input={"plan": "# Plan"},
+    )
+
+
 # ---------------------------------------------------------------------------
 # token usage
 # ---------------------------------------------------------------------------

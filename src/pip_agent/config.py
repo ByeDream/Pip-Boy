@@ -96,6 +96,10 @@ class Settings(BaseSettings):
     # higher cost and latency. Reasoning tokens are billed as output tokens.
     codex_reasoning_effort: str = Field(default="medium")
 
+    # User-facing runtime mode for subsequent turns. ``default`` keeps normal
+    # coding-agent behavior; ``plan`` explicitly starts turns in Plan Mode.
+    agent_mode: str = Field(default="default")
+
     # --- Claude model tiers (used when ``backend = claude_code``) ---
     # Parallel set for the Claude Code backend; same fallback semantics.
     claude_model_t0: str = Field(default="")

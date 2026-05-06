@@ -264,7 +264,9 @@ WecomStreamRenderer` (or any other progressive-reply consumer). When
     crashed").
     """
     from pip_agent import _profile  # PROFILE
+    from pip_agent.config import settings
     from pip_agent.models import is_model_invalid_error
+    from pip_agent.runtime_mode import claude_permission_mode
 
     # ``[""]`` means "no tier-resolved candidate, let the SDK pick its
     # own default". Keeping at least one element through the loop means
@@ -293,7 +295,7 @@ WecomStreamRenderer` (or any other progressive-reply consumer). When
                     if system_prompt_append
                     else None
                 ),
-                permission_mode="bypassPermissions",
+                permission_mode=claude_permission_mode(settings.agent_mode),
                 # Load all three Claude Code settings tiers so plugins
                 # installed via ``/plugin install --scope {user|project|local}``
                 # are picked up by the next ``query()`` regardless of where

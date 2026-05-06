@@ -224,6 +224,11 @@ class CodexStreamingSession:
             self._client = Codex(
                 CodexOptions(**opts_kwargs) if opts_kwargs else None,
             )
+            from pip_agent.backends.codex_cli.turn_options import (
+                ensure_experimental_api,
+            )
+
+            ensure_experimental_api(self._client)
 
             thread_opts = ThreadStartOptions(
                 sandbox=proto.SandboxMode(root=self._sandbox),
@@ -353,15 +358,19 @@ class CodexStreamingSession:
             async with _profile.span("codex_session.run_turn"):
                 start_ns = time.perf_counter_ns()
 
-                from codex import TurnOptions
+                from pip_agent.backends.codex_cli.turn_options import (
+                    build_turn_options,
+                )
 
-                turn_opts_kwargs: dict[str, Any] = {}
                 effort_val = self._resolve_reasoning_effort()
-                if effort_val is not None:
-                    turn_opts_kwargs["effort"] = effort_val
+                turn_options = build_turn_options(
+                    model=self._model,
+                    developer_instructions=self._system_prompt_append,
+                    effort=effort_val,
+                )
                 stream = self._thread.run(
                     prompt_text,
-                    TurnOptions(**turn_opts_kwargs) if turn_opts_kwargs else None,
+                    turn_options,
                 )
 
                 async for event in _async_iter(stream):
