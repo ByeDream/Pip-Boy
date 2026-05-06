@@ -118,6 +118,12 @@ async def _run_query_with_chain(
         if bridge_env:
             options_kwargs["env"] = bridge_env
 
+        from pip_agent.backends.codex_cli.bridge_env import build_codex_config_override
+
+        config_override = build_codex_config_override(base_url, api_key)
+        if config_override is not None:
+            options_kwargs["config"] = config_override
+
         client = Codex(CodexOptions(**options_kwargs) if options_kwargs else None)
 
         result = QueryResult()

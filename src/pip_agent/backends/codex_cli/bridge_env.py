@@ -11,6 +11,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+_RELAY_PROVIDER_ID = "pip-relay"
+
 
 def _config_toml_env_keys() -> list[str]:
     """Read ``env_key`` values from ``~/.codex/config.toml`` model_providers.
@@ -67,6 +69,37 @@ def resolve_codex_credentials() -> tuple[str | None, str | None]:
     return api_key, base_url
 
 
+def build_codex_config_override(
+    base_url: str | None,
+    api_key: str | None,
+) -> Any:
+    """Build a Codex config override for Pip-Boy's relay.
+
+    The Codex app-server routes LLM requests through ``model_providers``;
+    ``OPENAI_BASE_URL`` alone is not sufficient.  We inject this config
+    via SDK process options so Pip-Boy can use its own relay/key without
+    modifying the user's global ``~/.codex/config.toml``.
+    """
+    if not base_url:
+        return None
+    try:
+        from codex._config_types import CodexConfig
+
+        env_key = "CODEX_API_KEY" if api_key else "OPENAI_API_KEY"
+        return CodexConfig(**{
+            "model_provider": _RELAY_PROVIDER_ID,
+            "model_providers": {
+                _RELAY_PROVIDER_ID: {
+                    "name": _RELAY_PROVIDER_ID,
+                    "base_url": base_url,
+                    "env_key": env_key,
+                },
+            },
+        })
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def build_bridge_env(
     *,
     mcp_ctx: Any = None,
@@ -79,25 +112,32 @@ def build_bridge_env(
     """Build the environment dict for ``CodexOptions(env=...)``.
 
     Starts from ``os.environ`` (so the app-server keeps PATH, TEMP,
-    etc.) and layers Pip-Boy context on top.
+    etc.) and **force-overwrites** credential env vars with Pip-Boy's
+    resolved values.  This ensures the spawned app-server subprocess
+    always uses Pip-Boy's own API key and base URL, even when the
+    global Codex app (``~/.codex/config.toml``) or the parent process
+    environment points to a different relay / key.  When Pip-Boy has
+    no ``base_url`` configured, any inherited ``OPENAI_BASE_URL`` is
+    removed so the app-server falls back to its own default.
 
     **Credential aliasing**: the Codex app-server resolves API keys
     through ``~/.codex/config.toml``'s ``model_providers.*.env_key``
-    field. When Pip-Boy's resolved ``codex_api_key`` differs from the
-    key name the global config expects (e.g. ``TUZ_API_KEY``), the
-    app-server would fail with "Missing environment variable". We
-    inject the resolved key under every common alias so the
-    app-server finds it regardless of which env_key the operator's
-    global config happens to use.
+    field.  We inject the resolved key under every alias the global
+    config declares so the app-server finds it regardless of which
+    ``env_key`` the operator's config uses.
     """
     env: dict[str, str] = dict(os.environ)
 
-    api_key, _ = resolve_codex_credentials()
+    api_key, base_url = resolve_codex_credentials()
     if api_key:
-        env.setdefault("OPENAI_API_KEY", api_key)
-        env.setdefault("CODEX_API_KEY", api_key)
+        env["OPENAI_API_KEY"] = api_key
+        env["CODEX_API_KEY"] = api_key
         for extra in _config_toml_env_keys():
-            env.setdefault(extra, api_key)
+            env[extra] = api_key
+    if base_url:
+        env["OPENAI_BASE_URL"] = base_url
+    elif "OPENAI_BASE_URL" in env:
+        del env["OPENAI_BASE_URL"]
 
     if session_id:
         env["PIP_SESSION_ID"] = session_id

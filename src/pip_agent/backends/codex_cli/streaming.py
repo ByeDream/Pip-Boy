@@ -214,6 +214,13 @@ class CodexStreamingSession:
                 opts_kwargs["base_url"] = base_url
             if codex_env:
                 opts_kwargs["env"] = codex_env
+
+            from pip_agent.backends.codex_cli.bridge_env import build_codex_config_override
+
+            config_override = build_codex_config_override(base_url, api_key)
+            if config_override is not None:
+                opts_kwargs["config"] = config_override
+
             self._client = Codex(
                 CodexOptions(**opts_kwargs) if opts_kwargs else None,
             )
